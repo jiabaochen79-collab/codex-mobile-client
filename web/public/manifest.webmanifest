@@ -1,0 +1,17 @@
+{
+  "name": "ChatGPT 远程助手",
+  "short_name": "远程助手",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f9fa",
+  "theme_color": "#f7f9fa",
+  "icons": [
+    {
+      "src": "/brand.png",
+      "sizes": "any",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

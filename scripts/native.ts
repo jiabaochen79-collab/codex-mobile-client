@@ -1,0 +1,10 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+mkdirSync('release', { recursive: true });
+const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('A three-part numeric helper version is required.');
+const versionSource = resolve('release/AssemblyVersion.cs');
+writeFileSync(versionSource, `[assembly: System.Reflection.AssemblyVersion("${version}.0")]\n[assembly: System.Reflection.AssemblyFileVersion("${version}.0")]\n[assembly: System.Reflection.AssemblyInformationalVersion("${version}")]\n`);
+await import('./assets.js');
+execFileSync('C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe', ['/nologo', '/target:winexe', '/platform:x64', '/utf8output', '/optimize+', `/out:${resolve('release/RemoteCompanion.exe')}`, `/win32icon:${resolve('release/companion.ico')}`, '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Net.Http.dll', '/reference:System.Web.Extensions.dll', '/reference:System.Management.dll', '/reference:System.Security.dll', resolve('native/RemoteCompanion.cs'), resolve('native/PowerSettings.cs'), resolve('native/DesktopToolsPipe.cs'), versionSource], { stdio: 'inherit', windowsHide: true });

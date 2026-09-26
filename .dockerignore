@@ -1,0 +1,9 @@
+node_modules
+.runtime
+release
+test-results
+.git
+.env
+deploy/.env
+tests
+native

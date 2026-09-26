@@ -1,0 +1,22 @@
+name: Feature request / 功能建议
+description: Describe a specific workflow and the outcome you need.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow
+      description: English and Chinese are welcome. Avoid including private user data.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and constraints
+      description: Include compatibility, security, or operational constraints where relevant.

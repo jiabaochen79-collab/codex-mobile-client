@@ -1,0 +1,10 @@
+.connect-form label.remember-login{display:flex;align-items:center;gap:10px;min-height:44px;margin:14px 0 0;font-weight:400;cursor:pointer}
+.remember-login input{width:18px;height:18px;flex:0 0 18px;margin:0;accent-color:#2969da}
+.remember-login span{min-width:0;overflow-wrap:anywhere}
+.remember-login+.alert,.remember-login+.web-update{margin-top:8px}
+.remember-login~.connect-submit{margin-top:14px}
+@media(max-width:620px){
+  .mobile-shell .icon-button{width:44px;height:44px;flex-basis:44px}
+  .mobile-shell .password-field button{top:6px;right:5px}
+  .mobile-shell .send-button{width:44px;height:44px}
+}

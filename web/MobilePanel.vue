@@ -1,0 +1,641 @@
+<script setup lang="ts">
+import { computed, nextTick, onActivated, onDeactivated, onUnmounted, reactive, ref, watch } from 'vue';
+import { ArrowDown, ArrowRight, ArrowUp, Bell, Check, ChevronDown, ChevronRight, CircleStop, Ellipsis, Folder, ListOrdered, LogOut, Menu, Monitor, Plus, RefreshCw, Search, X, File, Brain, MonitorSmartphone, Images, Camera, Ticket, CornerUpRight, Lightbulb, Shield, ShieldCheck, ShieldAlert } from 'lucide-vue-next';
+import { api } from './api';
+import MessageContent from './MessageContent.vue';
+import { conversationTurns } from './conversation-model';
+import { useChatScroll } from './use-chat-scroll';
+import { measureViewport, viewportSize, viewportOriginCorrection, viewportOriginHorizontalCorrection } from './mobile-viewport';
+import { useAttachments } from './use-attachments';
+import TaskStatus from './TaskStatus.vue';
+import SubscriptionPanel from './SubscriptionPanel.vue';
+import FeedbackButton from './FeedbackButton.vue';
+import WebUpdateButton from './WebUpdateButton.vue';
+import TrialNotice from './TrialNotice.vue';
+import QueuedMessages from './QueuedMessages.vue';
+import PlanRequest from './PlanRequest.vue';
+import NotificationCenter from './NotificationCenter.vue';
+import type { Subscription } from '../src/shared/subscription';
+import type { Conversation, Snapshot, Command, Interaction, Project, ModelOption, Activity, ThreadSettings, QueuedMessage, PermissionMode } from '../src/shared/protocol';
+
+const props = defineProps<{ deviceId: string; deviceName: string }>();
+const emit = defineEmits<{ devices: []; expired: [deviceId: string, message: string]; logout: [deviceId: string] }>();
+const subscriptionOpen = ref(false);
+const notificationOpen = ref(false); const notificationUnread = ref(0);
+const session = ref({ deviceId: props.deviceId }); const active = ref(false);
+const status = ref<any>({ online: false }); const connected = ref(false); const error = ref(''); const busy = ref(false);
+const selected = ref<Conversation | null>(null); const snapshot = ref<Snapshot | null>(null); const draft = ref(''); const limit = ref(100);
+const readError = ref('');
+const modeSynced = ref(false); const modeChanging = ref(false); let modeSyncCycle = 0;
+const queuedMessages = ref<QueuedMessage[]>([]); const sendMenu = ref(false); let readingQueue = false;
+const navigationType = (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined)?.type;
+const clientKey = `remote-client-id:${props.deviceId}`;
+const clientId = ref<string>(crypto.randomUUID());
+try {
+  if (navigationType === 'reload') { clientId.value = sessionStorage.getItem(clientKey) ?? sessionStorage.getItem('remote-client-id') ?? clientId.value; sessionStorage.removeItem('remote-client-id'); }
+  sessionStorage.setItem(clientKey, clientId.value);
+} catch {}
+const modelModal = ref(false); const modelTarget = ref<'current'|'new'>('current'); const models = ref<ModelOption[]>([]); const chosenModel = ref(''); const chosenEffort = ref(''); const editingSettings = ref<ThreadSettings>();
+const newModel = ref(''); const newEffort = ref(''); const takeoverModal = ref(false); const claimEpoch = ref<string|null>(null);
+const fileInput = ref<HTMLInputElement>(); const activities = reactive<Record<string, Activity>>({}); const drafts = new Map<string,string>();
+try { const saved = JSON.parse(sessionStorage.getItem('chat-drafts:' + props.deviceId) ?? '[]'); if (Array.isArray(saved)) for (const item of saved) if (Array.isArray(item) && typeof item[0] === 'string' && typeof item[1] === 'string') drafts.set(item[0], item[1]); } catch {}
+const photoInput = ref<HTMLInputElement>(); const cameraInput = ref<HTMLInputElement>(); const attachmentPicker = ref(false);
+const permissionPicker = ref(false); const fullAccessConfirm = ref(false); const permissionChanging = ref(false);
+const drawer = ref(false); const moreMenu = ref(false); const search = ref(''); const searchRows = ref<Conversation[]>([]); const searchMore = ref(false); const searchLoading = ref(false);
+const projects = ref<Project[]>([]); const navigationLoading = ref(false); const expandedProjects = reactive(new Set<string>());
+const automaticProjects = new Set<string>();
+let navigationEpoch = 0; let focusedNavigationEpoch = -1; let projectInteraction = 0;
+type Group = { rows: Conversation[]; loading: boolean; loaded: boolean; hasMore: boolean };
+const groups = reactive<Record<string, Group>>({});
+const projectModal = ref(false); const projectId = ref(''); const newText = ref('');
+const answers = ref<Record<string, string>>({}); const answerModes = reactive<Record<string, string>>({});
+const shell = ref<HTMLElement>(); const scroll = ref<HTMLElement>(); const content = ref<HTMLElement>(); const input = ref<HTMLTextAreaElement>(); const navigation = ref<HTMLElement>();
+const chatScroll = useChatScroll(scroll, content); const turns = computed(() => conversationTurns(snapshot.value));
+const viewportHeight = ref('100dvh'); const viewportTop = ref('0px'); const keyboardOpen = ref(false);
+const viewportProbe = ref<HTMLElement>();
+let viewportWatchdog: ReturnType<typeof setInterval> | undefined;
+const disposed = ref(false); let socket: WebSocket | undefined;
+let reconnect: ReturnType<typeof setTimeout> | undefined; let poll: ReturnType<typeof setInterval> | undefined; let navigationPoll: ReturnType<typeof setInterval> | undefined; let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let viewportFrame = 0; let viewportTimers: ReturnType<typeof setTimeout>[] = [];
+let viewportPass = 0;
+let previousViewportBounds: DOMRect | undefined;
+let reading = false; let dirty = false; let searchRevision = 0;
+const pendingActivations = new Set<string>();
+const pending = new Map<string, { resolve: (r: any) => void; reject: (e: any) => void; timer: ReturnType<typeof setTimeout> }>();
+const canReach = computed(() => connected.value && status.value.online && status.value.enabled && status.value.client?.available);
+const serviceActive = computed(() => status.value.subscription?.access !== false);
+const canRead = computed(() => canReach.value && serviceActive.value);
+const canUse = (feature: string) => !hasCapability('compatibility-checked') || hasCapability(feature);
+const ownsControl = computed(() => canReach.value && (status.value.control ? status.value.control.role === 'controller' : true));
+const canStop = computed(() => ownsControl.value && canUse('stop-generation'));
+const canDecline = computed(() => ownsControl.value && canUse('respond-approval'));
+const canControl = computed(() => canRead.value && (status.value.control ? status.value.control.role === 'controller' : true));
+const canCreate = computed(() => canControl.value && canUse('create-tasks'));
+const canApprove = computed(() => canControl.value && canUse('respond-approval'));
+const hasCapability = (name:string) => status.value.client?.capabilities?.includes(name) === true;
+const modeReason = computed(() => {
+  if (!connected.value || !status.value.online) return '电脑未连接';
+  if (!status.value.enabled) return '电脑端已关闭远程控制';
+  if (!status.value.client?.available) return status.value.client?.reason || 'Codex 客户端未就绪';
+  if (!serviceActive.value) return '订阅未开通或已到期';
+  if (!canControl.value) return '当前为查看模式，请先接管';
+  if (!hasCapability('task-mode')) return hasCapability('compatibility-checked') ? '计划接口暂不兼容，请更新助手' : '请将电脑助手升级至 0.4.4 或更新版本';
+  if (modeChanging.value) return '正在切换计划模式';
+  if (!modeSynced.value || !snapshot.value?.settings?.mode) return '任务模式尚未同步';
+  if (busy.value) return '正在处理操作';
+  return '';
+});
+const canToggleMode = computed(() => !modeReason.value);
+const modeReady = computed(() => !hasCapability('task-mode') || modeSynced.value);
+const permissionNames: Record<PermissionMode | 'custom', string> = { ask: '请求批准', approve: '帮我批准', full: '完全访问', custom: '自定义' };
+const permissionSynced = computed(() => !!snapshot.value?.settings && Object.prototype.hasOwnProperty.call(snapshot.value.settings, 'permission'));
+const permissionReason = computed(() => {
+  if (!connected.value || !status.value.online) return '电脑未连接';
+  if (!status.value.enabled) return '电脑端已关闭远程控制';
+  if (!status.value.client?.available) return status.value.client?.reason || 'Codex 客户端未就绪';
+  if (!serviceActive.value) return '订阅未开通或已到期';
+  if (!canControl.value) return '当前为查看模式，请先接管';
+  if (!hasCapability('permission-settings')) return '请更新电脑助手以更改权限';
+  if (permissionChanging.value) return '正在更改任务权限';
+  if (!permissionSynced.value) return '任务权限尚未同步';
+  if (busy.value) return '正在处理操作';
+  return '';
+});
+const canChangePermission = computed(() => !permissionReason.value);
+const permissionLabel = computed(() => permissionNames[snapshot.value?.settings?.permission ?? 'custom']);
+const attachmentReason = computed(() => !canControl.value ? connectionLabel.value : !hasCapability('attachments') ? '请更新电脑助手以使用附件' : !snapshot.value ? '任务尚未同步' : busy.value ? '正在处理操作' : '');
+const attachments = useAttachments({request,thread:()=>selected.value?.id,deviceId:props.deviceId,control:()=>({clientId:clientId.value,epoch:status.value.control?.epoch,allowed:canControl.value})});
+const projectNavigation = computed(() => status.value.client?.capabilities?.includes('project-navigation') === true);
+const hasDraft = computed(() => !!draft.value.trim() || !!attachments.current.value.length);
+const canSend = computed(() => canControl.value && canUse('send-messages') && modeReady.value && !!snapshot.value && (!snapshot.value.busy || hasCapability('queued-send')) && !busy.value && hasDraft.value && attachments.current.value.every(a=>a.attachment?.ready&&!a.error));
+const canSteer = computed(() => canControl.value && modeReady.value && !!snapshot.value?.busy && !!snapshot.value?.turnId && !busy.value && !!draft.value.trim() && !attachments.current.value.length && hasCapability('steering-text'));
+const canRemoveQueued = computed(() => connected.value && status.value.online && status.value.enabled && !busy.value && status.value.control?.role === 'controller');
+watch([hasDraft, () => snapshot.value?.busy], () => { if (!hasDraft.value || !snapshot.value?.busy) sendMenu.value = false; });
+const connectionLabel = computed(() => !connected.value ? '正在重连' : !status.value.online ? '电脑离线' : !status.value.enabled ? '远控已关闭' : !status.value.client?.available ? '客户端未就绪' : !serviceActive.value ? '订阅未开通或已到期' : status.value.client?.reason ? '兼容受限' : !canControl.value ? '查看模式' : '已连接');
+const formattedId = computed(() => String(session.value?.deviceId ?? '').replace(/(\d{3})(?=\d)/g, '$1 '));
+const listVisible = computed(() => !!session.value && (!selected.value || drawer.value));
+const projectNames = computed(() => new Map(projects.value.map(p => [p.id, p.name])));
+
+function request(command: Command, id: string = crypto.randomUUID()): Promise<any> {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error('连接尚未恢复。'));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { pending.delete(id); reject(Object.assign(new Error('未收到操作确认，请核对电脑端结果。'), { code: 'OUTCOME_UNKNOWN' })); }, 25000);
+    pending.set(id, { resolve, reject, timer }); socket!.send(JSON.stringify({ type: 'command', id, command, ...(status.value.control?.epoch ? {controlEpoch:status.value.control.epoch} : {}) }));
+  });
+}
+const notificationHeaders = () => ({ 'X-Remote-Device': props.deviceId });
+async function refreshNotificationBadge() {
+  try {
+    const result = await api('/api/notifications', undefined, notificationHeaders());
+    notificationUnread.value = Number(result.unread) || 0;
+  } catch {}
+}
+async function suppressVisibleNotification(item: any) {
+  if (document.visibilityState !== 'visible' || drawer.value || !selected.value || selected.value.id !== item.taskId || !snapshot.value || snapshot.value.busy || snapshot.value.lastTurnId !== item.turnId) return;
+  try {
+    const result = await api('/api/notifications', undefined, notificationHeaders());
+    const row = (result.items ?? []).find((entry: any) => entry.id === item.id);
+    if (row && !row.readAt) await api(`/api/notifications/${encodeURIComponent(item.id)}/read`, undefined, notificationHeaders(), 'POST');
+    notificationUnread.value = Number(result.unread) || 0;
+  } catch {}
+}
+async function openNotificationTask(taskId: string) {
+  notificationOpen.value = false; moreMenu.value = false;
+  const known = Object.values(groups).flatMap(group => group.rows).find(row => row.id === taskId) ?? searchRows.value.find(row => row.id === taskId);
+  await select(known ?? { id: taskId, title: '任务', cwd: '', updatedAt: Date.now() });
+}
+async function openNotificationFromUrl() {
+  const url = new URL(location.href);
+  const id = url.searchParams.get('notification');
+  const targetDevice = url.searchParams.get('notificationDevice');
+  if (!id || !/^[0-9a-f-]{36}$/i.test(id) || targetDevice && targetDevice !== props.deviceId) return;
+  let handled = false;
+  try {
+    const { item } = await api(`/api/notifications/${encodeURIComponent(id)}`, undefined, notificationHeaders());
+    if (!item.readAt) await api(`/api/notifications/${encodeURIComponent(id)}/read`, undefined, notificationHeaders(), 'POST');
+    notificationUnread.value = Math.max(0, notificationUnread.value - (item.readAt ? 0 : 1));
+    await openNotificationTask(item.taskId);
+    handled = true;
+  } catch {}
+  if (handled) { url.searchParams.delete('notification'); url.searchParams.delete('notificationDevice'); history.replaceState(null, '', url.pathname + (url.search ? url.search : '') + url.hash); }
+}
+function pageRestored(event: PageTransitionEvent) { resyncViewport(); if (event.persisted) { navigationEpoch++; void loadNavigation(); } }
+function openSocket() {
+  if (disposed.value || !active.value) return;
+  const url = new URL('/ws/mobile', location.origin); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.searchParams.set('clientId',clientId.value);
+  url.searchParams.set('remoteDevice', props.deviceId);
+  const ws = new WebSocket(url); socket = ws;
+  let firstStatus = true;
+  ws.onopen = () => { if (socket === ws && active.value) { connected.value = true; error.value = ''; } };
+  ws.onmessage = event => {
+    if (socket !== ws) return;
+    let m: any; try { m = JSON.parse(event.data); } catch { return; }
+    if (m.type === 'status') {
+      const becameReady = !status.value.client?.available || !status.value.online || status.value.subscription?.access === false && m.subscription?.access === true;
+      status.value = m;
+      if (firstStatus || becameReady || !canReach.value) invalidateMode();
+      if (m.enabled && m.client?.available && (firstStatus || becameReady || !groups.recent?.loaded)) { void loadNavigation(); if (selected.value) void read(); }
+      if (firstStatus || becameReady) { void refreshNotificationBadge(); void openNotificationFromUrl(); }
+      firstStatus = false;
+    } else if (m.type === 'result') {
+      const p = pending.get(m.id); if (!p) return; pending.delete(m.id); clearTimeout(p.timer);
+      if (m.error) p.reject(Object.assign(new Error(m.error.message), { code: m.error.code })); else p.resolve(m.result);
+    } else if (m.type === 'notification') {
+      const item = m.notification;
+      if (item?.deviceId === props.deviceId) {
+        notificationUnread.value = Math.max(1, notificationUnread.value + (item.readAt ? 0 : 1));
+        window.dispatchEvent(new CustomEvent('remote-notification', { detail: item }));
+        setTimeout(() => { void suppressVisibleNotification(item); }, 200);
+      }
+    } else if (m.type === 'changed') { if((m.conversationIds??[m.conversationId]).includes(selected.value?.id))void read();void refreshActivity(); }
+  };
+  ws.onclose = event => {
+    if (socket !== ws) return; connected.value = false; invalidateMode();
+    for (const p of pending.values()) { clearTimeout(p.timer); p.reject(Object.assign(new Error('连接已中断，请核对原会话，勿重复提交。'), { code: 'OUTCOME_UNKNOWN' })); } pending.clear();
+    if (disposed.value || !active.value) return;
+    if (event.code === 4002) { clientId.value=crypto.randomUUID();try { sessionStorage.setItem(clientKey,clientId.value); } catch {} reconnect=setTimeout(openSocket,500);return; }
+    if ([4001, 4003, 4004, 4005].includes(event.code)) {
+      error.value = event.code === 4005 ? '该设备已被管理员封禁，请联系运营方。' : event.code === 4004 ? '已达到 3 个在线终端，请关闭一个页面后重试。' : event.code === 4003 ? '设备正由另一台手机控制，请更新电脑助手。' : '授权已失效，请使用当前连接密码重新连接。';
+      if (event.code === 4001 || event.code === 4005) { clearNavigation(); emit('expired', props.deviceId, error.value); } return;
+    }
+    reconnect = setTimeout(openSocket, 2000);
+  };
+}
+function group(key: string) { groups[key] ??= { rows: [], loading: false, loaded: false, hasMore: false }; return groups[key]; }
+async function loadGroup(id: string | null, append = false) {
+  if (!canRead.value) return;
+  const state = group(id ?? 'recent'); if (state.loading) return; state.loading = true;
+  try {
+    const target = append ? 30 : Math.max(30, state.rows.length); const rows: Conversation[] = []; let hasMore = false;
+    do {
+      const params = { offset: (append ? state.rows.length : 0) + rows.length, ...(projectNavigation.value ? { projectId: id } : {}) };
+      const r = await request({ method: 'list', params }); rows.push(...r.conversations); hasMore = r.hasMore;
+      if (!r.conversations.length) break;
+    } while (hasMore && rows.length < target);
+    if (groups[id ?? 'recent'] !== state) return;
+    state.rows = append ? [...state.rows, ...rows] : rows; state.hasMore = hasMore; state.loaded = true;
+  } catch (e: any) { error.value = e.message; } finally { state.loading = false; }
+}
+async function loadNavigation() {
+  if (!canRead.value || navigationLoading.value) return; navigationLoading.value = true;
+  const epoch = navigationEpoch; const interaction = projectInteraction;
+  try {
+    if (projectNavigation.value) {
+      const r = await request({ method: 'projects', params: {} }); if (epoch !== navigationEpoch) return; projects.value = r.projects;
+      if (focusedNavigationEpoch !== epoch) {
+        const running = hasCapability('live-activity') ? await runningProjectIds(epoch) : new Set<string>();
+        if (!running || epoch !== navigationEpoch) return;
+        if (interaction === projectInteraction) {
+          for (const id of automaticProjects) if (!running.has(id)) { expandedProjects.delete(id); automaticProjects.delete(id); }
+          for (const project of projects.value) if (running.has(project.id) && !expandedProjects.has(project.id)) { expandedProjects.add(project.id); automaticProjects.add(project.id); }
+        }
+        focusedNavigationEpoch = epoch;
+      }
+      for (const id of expandedProjects) if (projects.value.some(p => p.id === id)) await loadGroup(id);
+    }
+    await loadGroup(null);
+    if (search.value.trim()) await runSearch();
+  } catch (e: any) { if (epoch === navigationEpoch) error.value = e.message; }
+  finally { navigationLoading.value = false; if (epoch !== navigationEpoch && !disposed.value && document.visibilityState === 'visible' && canRead.value) void loadNavigation(); }
+}
+function refreshPage() {
+  if (busy.value || modeChanging.value || attachments.hasPending.value) { error.value = '请先发送或移除待发送附件，再刷新网页。'; return; }
+  if (selected.value) drafts.set(selected.value.id, draft.value);
+  try { sessionStorage.setItem('chat-drafts:' + props.deviceId, JSON.stringify([...drafts])); } catch { error.value = '草稿保存失败，未刷新网页。'; return; }
+  location.reload();
+}
+async function runningProjectIds(epoch: number) {
+  const running = new Set<string>(); let offset = 0; if (!projects.value.length) return running;
+  // Scan task summaries once per entry, including projects outside the first page.
+  for (;;) {
+    const result = await request({ method: 'list', params: { offset } });
+    if (epoch !== navigationEpoch || disposed.value || !canRead.value) return null;
+    for (const task of result.conversations as Conversation[]) if (task.running && task.projectId) running.add(task.projectId);
+    if (!result.hasMore || !result.conversations.length) return running;
+    offset += result.conversations.length;
+  }
+}
+async function toggleProject(id: string) { projectInteraction++; automaticProjects.delete(id); if (expandedProjects.has(id)) expandedProjects.delete(id); else { expandedProjects.add(id); await loadGroup(id); } }
+async function runSearch(append = false) {
+  if (!canRead.value) { searchLoading.value = false; return; }
+  const query = search.value.trim(); const revision = ++searchRevision;
+  if (!query) { searchRows.value = []; searchMore.value = false; searchLoading.value = false; return; }
+  if (!projectNavigation.value) { searchRows.value = group('recent').rows.filter(c => c.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())); searchLoading.value = false; searchMore.value = false; return; }
+  searchLoading.value = true;
+  try {
+    const rows: Conversation[] = []; const target = append ? 30 : Math.max(30, searchRows.value.length); let hasMore = false;
+    do {
+      const result = await request({ method: 'list', params: { offset: (append ? searchRows.value.length : 0) + rows.length, query } });
+      if (revision !== searchRevision || search.value.trim() !== query) return;
+      rows.push(...result.conversations); hasMore = result.hasMore;
+      if (!result.conversations.length) break;
+    } while (hasMore && rows.length < target);
+    searchRows.value = append ? [...searchRows.value, ...rows] : rows; searchMore.value = hasMore;
+  } catch (e: any) { if (revision === searchRevision) error.value = e.message; }
+  finally { if (revision === searchRevision) searchLoading.value = false; }
+}
+watch(search, () => { clearTimeout(searchTimer); searchRevision++; searchRows.value = []; searchMore.value = false; searchLoading.value = !!search.value.trim(); searchTimer = setTimeout(() => { void runSearch(); }, 200); });
+async function select(conversation: Conversation) {
+  if (!canRead.value) { subscriptionOpen.value = !serviceActive.value; return; }
+  attachmentPicker.value = false;
+  for (const key of Object.keys(answers.value)) delete answers.value[key]; for (const key of Object.keys(answerModes)) delete answerModes[key];
+  invalidateMode();
+  queuedMessages.value = []; sendMenu.value = false;
+  if(selected.value)drafts.set(selected.value.id,draft.value);
+  selected.value = conversation; drawer.value = false; moreMenu.value = false; snapshot.value = null; readError.value = ''; error.value = ''; limit.value = 100; draft.value = drafts.get(conversation.id)??''; chatScroll.reset(); await read(true);
+}
+async function read(activate = false) {
+  if (!selected.value) return;
+  if (!canReach.value) { void readQueue(); return; }
+  if (!serviceActive.value) {
+    if (reading || !hasCapability('safety-status')) return; reading = true;
+    const id = selected.value.id;
+    try { const state = await request({ method: 'safety.status', params: { id } }); if (selected.value?.id === id) { if (!snapshot.value) snapshot.value = { id, title: selected.value.title, epoch: state.epoch, busy: state.busy, turnId: state.turnId, messages: [], requests: [], hasMore: false }; else { snapshot.value.busy = state.busy; snapshot.value.turnId = state.turnId; snapshot.value.epoch = state.epoch; } } }
+    catch { /* Keep the last known stop target if the desktop is unavailable. */ }
+    finally { reading = false; }
+    return;
+  }
+  if(activate)pendingActivations.add(selected.value.id);
+  if (reading) { dirty = true; return; } reading = true;
+  const id = selected.value.id; const initial = !snapshot.value; const cycle = modeSyncCycle;
+  const activateTask=pendingActivations.delete(id);
+  try { const next = await request({ method: 'read', params: { id, limit: limit.value, ...(hasCapability('multi-terminal') ? {activate:activateTask} : {}), ...(hasCapability('conditional-read') && modeSynced.value && snapshot.value?.revision ? { ifRevision: snapshot.value.revision } : {}) } }); if (selected.value?.id === id && cycle === modeSyncCycle) { readError.value = ''; if (!next.notModified) await chatScroll.change(() => { snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) modeSynced.value = !!snapshot.value?.settings?.mode; void markSeen(); } }
+  catch (e: any) {
+    if (selected.value?.id !== id) return;
+    if (e.code === 'NOT_FOUND') {
+      for (const state of Object.values(groups)) state.rows = state.rows.filter(c => c.id !== id);
+      searchRows.value = searchRows.value.filter(c => c.id !== id);
+      selected.value = null; snapshot.value = null; drawer.value = false; moreMenu.value = false;
+      error.value = '会话已归档或删除，已从列表移除。'; void loadNavigation();
+    } else { readError.value = e.message; if (snapshot.value) error.value = e.message; }
+  } finally { reading = false; if (dirty) { dirty = false; void read(); } }
+}
+async function readQueue() {
+  const id = selected.value?.id; if (!id || readingQueue || !hasCapability('queued-send') || !connected.value || !status.value.online || !status.value.enabled || !serviceActive.value) return;
+  readingQueue = true; try { const result = await request({ method: 'queue.list', params: { id } }); if (selected.value?.id === id && JSON.stringify(result.queued) !== JSON.stringify(queuedMessages.value)) await chatScroll.change(() => { queuedMessages.value = result.queued; }); } catch {} finally { readingQueue = false; }
+}
+async function queueAction(queuedId: string, action: 'remove' | 'resume') {
+  const id = selected.value?.id; if (!id) return;
+  if (action === 'remove' && canRemoveQueued.value) {
+    if (await perform({ method: 'queue.remove', params: { id, queuedId } }) && selected.value?.id === id) await chatScroll.change(() => { queuedMessages.value = queuedMessages.value.filter(item => item.id !== queuedId); });
+  }
+  else if (action === 'resume' && canControl.value && modeReady.value && !busy.value && snapshot.value) await perform({ method: 'queue.resume', params: { id, queuedId, epoch: snapshot.value.epoch } });
+  await readQueue();
+}
+function queueResized() { void nextTick(chatScroll.layoutChanged); }
+async function perform(command: Command) {
+  busy.value = true; error.value = '';
+  try { await request(command); return true; }
+  catch (e: any) { error.value = e.message; if (e.code === 'OUTCOME_UNKNOWN' && command.method === 'send') { if (selected.value?.id === command.params.id) draft.value = ''; drafts.delete(command.params.id); attachments.clear(command.params.id); } return false; }
+  finally { busy.value = false; await read(); }
+}
+async function send(mode?: 'steer') {
+  if (!(mode === 'steer' ? canSteer.value : canSend.value) || !snapshot.value) return;
+  sendMenu.value = false; const id = snapshot.value.id; const text = draft.value; const queued = mode !== 'steer' && (snapshot.value.busy || queuedMessages.value.length > 0);
+  chatScroll.toBottom();
+  if (await perform({ method: 'send', params: { id, text, epoch: snapshot.value.epoch, ...(mode === 'steer' ? { mode, turnId: snapshot.value.turnId! } : queued ? { mode: 'queue' } : {}), ...(attachments.current.value.length ? { attachmentIds: attachments.current.value.map(a => a.attachment!.id) } : {}) } })) {
+    if (selected.value?.id === id && draft.value === text) draft.value = ''; drafts.delete(id); attachments.clear(id);
+  }
+}
+let buttonSendAt = 0;
+function sendFromButton(event?: Event) {
+  event?.preventDefault();
+  const now = performance.now(); if (buttonSendAt && now - buttonSendAt < 500) return; buttonSendAt = now; void send();
+}
+function composerPointerdown(event: PointerEvent) {
+  const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('.composer-field .send-button') : null;
+  if (!button || button.disabled || button.classList.contains('stop') || button.classList.contains('takeover')) return;
+  sendFromButton(event);
+}
+async function stop() { sendMenu.value = false; const s = snapshot.value; if (s?.turnId) await perform({ method: 'stop', params: { id: s.id, turnId: s.turnId, epoch: s.epoch } }); }
+async function respond(r: Interaction, decision?: 'accept' | 'decline') {
+  const s = snapshot.value; if (!s) return;
+  await perform({ method: 'respond', params: { id: s.id, requestId: r.id, epoch: s.epoch, ...(decision ? { decision } : { answers: Object.fromEntries((r.questions ?? []).map(q => [q.id, [answers.value[q.id] ?? '']])) }) } });
+  if (!decision) for (const question of r.questions ?? []) { delete answers.value[question.id]; delete answerModes[question.id]; }
+}
+const customAnswerMode = 'custom';
+function chooseAnswer(question: NonNullable<Interaction['questions']>[number], event: Event) {
+  const select = event.currentTarget as HTMLSelectElement; const mode = select.value; answerModes[question.id] = mode;
+  if (mode === customAnswerMode) {
+    answers.value[question.id] = '';
+    void nextTick(() => { const field = select.nextElementSibling; if (field instanceof HTMLInputElement) field.focus(); });
+    return;
+  }
+  const index = Number(mode); answers.value[question.id] = Number.isInteger(index) ? question.options[index]?.label ?? '' : '';
+}
+function answersComplete(r: Interaction) { return (r.questions ?? []).every(question => !!answers.value[question.id]?.trim()); }
+function invalidateMode() { modeSyncCycle++; modeSynced.value = false; }
+async function setPlanMode(mode: 'plan'|'default') {
+  const s = snapshot.value; const settings = s?.settings;
+  if (!s || !settings || !canToggleMode.value) return;
+  attachmentPicker.value = false;
+  if (settings.mode === mode) return;
+  invalidateMode(); modeChanging.value = true; busy.value = true; error.value = '';
+  try { await request({ method: 'mode.update', params: { id: s.id, epoch: s.epoch, revision: settings.revision, mode } }); }
+  catch (e: any) { if (selected.value?.id === s.id && active.value) error.value = e.message; }
+  finally { invalidateMode(); modeChanging.value = false; busy.value = false; if (active.value) await read(); }
+}
+function openPermissionMenu() { permissionPicker.value = true; attachmentPicker.value = false; moreMenu.value = false; }
+function choosePermission(permission: PermissionMode) {
+  if (!canChangePermission.value) return;
+  if (snapshot.value?.settings?.permission === permission) { permissionPicker.value = false; return; }
+  if (permission === 'full') { permissionPicker.value = false; fullAccessConfirm.value = true; return; }
+  void setPermission(permission);
+}
+async function setPermission(permission: PermissionMode) {
+  const s = snapshot.value; const settings = s?.settings;
+  if (!s || !settings || !canChangePermission.value) return;
+  permissionPicker.value = false; fullAccessConfirm.value = false;
+  invalidateMode(); permissionChanging.value = true; busy.value = true; error.value = '';
+  try { await request({ method: 'permissions.update', params: { id: s.id, epoch: s.epoch, revision: settings.revision, permission } }); }
+  catch (e: any) { if (selected.value?.id === s.id && active.value) error.value = e.message; }
+  finally { invalidateMode(); permissionChanging.value = false; busy.value = false; if (active.value) await read(); }
+}
+async function respondPlan(r: Interaction, action: 'implement'|'revise', feedback?: string) {
+  const s = snapshot.value; if (!s || !r.plan || busy.value || !modeReady.value || !canControl.value || !hasCapability('plan-implementation')) return;
+  await perform({ method: 'plan.respond', params: { id: s.id, epoch: s.epoch, requestId: String(r.id), revision: r.plan.revision, action, ...(action === 'revise' ? { feedback } : {}) } });
+}
+function subscriptionChanged(subscription: Subscription) { status.value.subscription = subscription; void loadNavigation(); void read(); }
+function clearNavigation() {
+  navigationEpoch++; focusedNavigationEpoch = -1; projectInteraction++; automaticProjects.clear();
+  subscriptionOpen.value = false; notificationOpen.value = false; permissionPicker.value = false; fullAccessConfirm.value = false;
+  selected.value = null; snapshot.value = null; drawer.value = false; moreMenu.value = false; projectModal.value = false;
+  readError.value = '';
+  modelModal.value=false;takeoverModal.value=false;attachments.clear();drafts.clear();draft.value='';for(const key of Object.keys(activities))delete activities[key];
+  attachmentPicker.value = false;
+  queuedMessages.value = []; sendMenu.value = false;
+  for (const key of Object.keys(groups)) delete groups[key]; projects.value = []; expandedProjects.clear();
+  search.value = ''; searchRows.value = []; searchMore.value = false;
+  for (const key of Object.keys(answers.value)) delete answers.value[key]; for (const key of Object.keys(answerModes)) delete answerModes[key];
+}
+async function logout() {
+  try { await api('/api/logout', {}, { 'X-Remote-Device': props.deviceId }); suspend(); clearNavigation(); error.value = ''; emit('logout', props.deviceId); }
+  catch (e: any) { error.value = e.message; }
+}
+async function newConversation(project?: string) {
+  if (!canControl.value || !canUse('create-tasks')) return;
+  moreMenu.value = false; error.value = '';
+  try { const r = await request({ method: 'projects', params: {} }); projects.value = r.projects; projectId.value = project ?? selected.value?.projectId ?? r.projects[0]?.id ?? ''; projectModal.value = true; }
+  catch (e: any) { error.value = e.message; }
+}
+async function create() {
+  if (!canControl.value || !canUse('create-tasks') || !projectId.value || !newText.value.trim()) return; busy.value = true;
+  try { const r = await request({ method: 'create', params: { projectId: projectId.value, text: newText.value, ...(newModel.value?{model:newModel.value,effort:newEffort.value as any}:{}) } }); projectModal.value = false; newText.value = ''; await loadNavigation(); if (r.threadId) await select({ id: r.threadId, title: '新任务', cwd: '', updatedAt: Date.now(), projectId: projectId.value }); }
+  catch (e: any) { error.value = e.message; } finally { busy.value = false; }
+}
+function taskState(c:Conversation){const state=activities[c.id]??c;return{...state,running:hasCapability('live-activity')&&state.running};}
+let activityLoading=false;let seenKey='';
+async function refreshActivity(){
+  if(!canRead.value||!hasCapability('activity')||activityLoading)return;activityLoading=true;
+  try{const ids=[...new Set([...Object.values(groups).flatMap(g=>g.rows.map(c=>c.id)),...searchRows.value.map(c=>c.id),...(selected.value?[selected.value.id]:[])])].slice(0,150);if(ids.length){const r=await request({method:'activity',params:{ids}});for(const a of r.activities)activities[a.id]=a;}}
+  catch{}finally{activityLoading=false;}
+}
+async function markSeen(){const s=snapshot.value;if(!active.value||!s||s.busy||!s.completionId||drawer.value||document.visibilityState!=='visible'||chatScroll.awayFromBottom.value||!hasCapability('activity'))return;const key=s.id+':'+s.completionId;if(seenKey===key)return;seenKey=key;try{const turnId=s.lastTurnId&&s.completionId.startsWith(`${s.lastTurnId}:`)?s.lastTurnId:undefined;const result=await request({method:'seen',params:{id:s.id,completionId:s.completionId,...(turnId?{turnId}:{})}});if(result.seen!==true){seenKey='';return;}if(activities[s.id])activities[s.id].unread=false;for(const g of Object.values(groups))for(const c of g.rows)if(c.id===s.id)c.unread=false;}catch{seenKey='';}}
+watch([()=>chatScroll.awayFromBottom.value,drawer],()=>{void markSeen();});
+function chooseAttachmentSource(source:'photos'|'camera'|'files') {
+  if(attachmentReason.value)return;
+  attachmentPicker.value=false;
+  // Keep the picker call synchronous with the tap so iOS retains user activation.
+  (source==='photos'?photoInput.value:source==='camera'?cameraInput.value:fileInput.value)?.click();
+}
+function openAttachmentMenu() { attachmentPicker.value = true; permissionPicker.value = false; moreMenu.value = false; }
+async function chooseFiles(event:Event,photosOnly=false){const element=event.target as HTMLInputElement;const files=Array.from(element.files??[]);element.value='';if(!files.length)return;error.value='';try{await attachments.add(files,photosOnly);}catch(e:any){error.value=e.message;}}
+const availableEfforts=computed(()=>models.value.find(m=>m.id===chosenModel.value)?.efforts??[]);
+const effortNames:Record<string,string>={none:'默认',minimal:'最少',low:'低',medium:'中',high:'高',xhigh:'极高',max:'最大',ultra:'超高'};
+watch(chosenModel,()=>{if(!availableEfforts.value.includes(chosenEffort.value))chosenEffort.value=models.value.find(m=>m.id===chosenModel.value)?.defaultEffort??availableEfforts.value[0]??'';});
+async function openModels(target:'current'|'new'='current'){try{const result=await request({method:'models',params:{}});models.value=result.models;modelTarget.value=target;editingSettings.value=snapshot.value?.settings;chosenModel.value=(target==='new'?newModel.value:snapshot.value?.settings?.model)||models.value[0]?.id||'';chosenEffort.value=(target==='new'?newEffort.value:snapshot.value?.settings?.effort)||models.value.find(m=>m.id===chosenModel.value)?.defaultEffort||'';modelModal.value=true;moreMenu.value=false;}catch(e:any){error.value=e.message;}}
+async function saveModel(){if(modelTarget.value==='new'){newModel.value=chosenModel.value;newEffort.value=chosenEffort.value;modelModal.value=false;return;}const s=snapshot.value;if(!s||!editingSettings.value)return;busy.value=true;try{const result=await request({method:'settings.update',params:{id:s.id,epoch:s.epoch,revision:editingSettings.value.revision,model:chosenModel.value,effort:chosenEffort.value as any}});if(snapshot.value?.id===s.id)snapshot.value.settings=result.settings;modelModal.value=false;}catch(e:any){error.value=e.message;modelModal.value=false;}finally{busy.value=false;}}
+function openTakeover(){claimEpoch.value=status.value.control?.epoch??null;takeoverModal.value=true;moreMenu.value=false;}
+function openNotifications() { notificationOpen.value = true; moreMenu.value = false; }
+async function takeControl(){busy.value=true;try{await request({method:'control.claim',params:{epoch:claimEpoch.value}});takeoverModal.value=false;}catch(e:any){error.value=e.message;takeoverModal.value=false;}finally{busy.value=false;}}
+async function openDrawer() {
+  drawer.value = true; moreMenu.value = false;
+  navigationEpoch++;
+  await loadNavigation();
+  await nextTick(); navigation.value?.focus({ preventScroll: true });
+  navigation.value?.querySelector('.nav-conversation.active')?.scrollIntoView({ block: 'nearest' });
+}
+function fitInput() { const element = input.value; if (!element) return; element.style.height = '0px'; element.style.height = `${Math.min(160, Math.max(44, element.scrollHeight))}px`; }
+watch(draft, async () => { await nextTick(); fitInput(); });
+function updateViewport(event?: Event | string) {
+  if (disposed.value || !active.value || document.visibilityState !== 'visible') return;
+  const pass = ++viewportPass;
+  const metrics = measureViewport(viewportProbe.value); const size = viewportSize(metrics);
+  const reason = typeof event === 'string' ? event : event?.type ?? 'measure';
+  keyboardOpen.value = size.keyboard;
+  // Pin measured pixels; CSS dvh can lag behind a restored browser's visible viewport.
+  if (size.height > 0) viewportHeight.value = `${size.height}px`;
+  viewportTop.value = `${size.top}px`;
+  // iOS can retain root scrolling after dismissing the keyboard or restoring a page.
+  if (!size.keyboard && (!metrics.visual || Math.abs(metrics.visual.scale - 1) < 0.02) && (window.scrollY || window.scrollX)) window.scrollTo(0, 0);
+  void nextTick(() => {
+    if (pass !== viewportPass || disposed.value || !active.value || document.visibilityState !== 'visible' || !shell.value) return;
+    const bounds = shell.value.getBoundingClientRect();
+    const applied = parseFloat(shell.value.style.getPropertyValue('--chat-origin-correction')) || 0;
+    const appliedHorizontal = parseFloat(shell.value.style.getPropertyValue('--chat-origin-horizontal-correction')) || 0;
+    const correction = viewportOriginCorrection(metrics, size, bounds.top, applied);
+    const horizontalCorrection = viewportOriginHorizontalCorrection(metrics, bounds.left, appliedHorizontal);
+    if (correction !== applied) {
+      // WebKit can pan the fixed-position origin while scrollY stays zero.
+      // Write synchronously so the next measurement sees the applied correction.
+      shell.value.style.setProperty('--chat-origin-correction', `${correction}px`);
+    }
+    if (horizontalCorrection !== appliedHorizontal) shell.value.style.setProperty('--chat-origin-horizontal-correction', `${horizontalCorrection}px`);
+    const updatedBounds = shell.value.getBoundingClientRect();
+    if (!previousViewportBounds || updatedBounds.width !== previousViewportBounds.width || updatedBounds.height !== previousViewportBounds.height || updatedBounds.top !== previousViewportBounds.top || updatedBounds.left !== previousViewportBounds.left) {
+      previousViewportBounds = updatedBounds; chatScroll.layoutChanged();
+    }
+  });
+}
+function cancelViewportSync() { cancelAnimationFrame(viewportFrame); viewportFrame = 0; for (const timer of viewportTimers) clearTimeout(timer); viewportTimers = []; }
+function stopViewportWatchdog() { clearInterval(viewportWatchdog); viewportWatchdog = undefined; }
+function resetViewportCache(blur = false) {
+  keyboardOpen.value = false; viewportHeight.value = '100dvh'; viewportTop.value = '0px';
+  if (blur) {
+    const focused = document.activeElement;
+    if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) focused.blur();
+  }
+}
+function resyncViewport(event?: Event) {
+  cancelViewportSync();
+  if (disposed.value || !active.value) return;
+  if (document.visibilityState !== 'visible') { stopViewportWatchdog(); return; }
+  viewportWatchdog ??= setInterval(() => updateViewport('watchdog'), 1000);
+  updateViewport(event);
+  // Mobile browsers may settle their viewport after pageshow without another resize event.
+  viewportFrame = requestAnimationFrame(() => { viewportFrame = 0; updateViewport('settle'); });
+  viewportTimers = [100, 300, 700].map(delay => setTimeout(() => updateViewport('settle'), delay));
+}
+function pageHidden() { cancelViewportSync(); stopViewportWatchdog(); resetViewportCache(true); }
+function foreground() { if (!active.value) return; if (document.visibilityState !== 'visible') { navigationEpoch++; resetViewportCache(); } resyncViewport(); if (document.visibilityState === 'visible') { void refreshNotificationBadge(); void openNotificationFromUrl(); if (socket?.readyState === WebSocket.OPEN) { void loadNavigation(); void read(); } else if (socket?.readyState !== WebSocket.CONNECTING) { clearTimeout(reconnect); openSocket(); } } }
+watch(session, () => resyncViewport(), { flush: 'post' });
+function closeOverlays(event: KeyboardEvent) { if (event.key === 'Escape') { if(sendMenu.value)sendMenu.value=false;else if(fullAccessConfirm.value)fullAccessConfirm.value=false;else if(permissionPicker.value)permissionPicker.value=false;else if(attachmentPicker.value)attachmentPicker.value=false;else if(modelModal.value)modelModal.value=false;else if(takeoverModal.value)takeoverModal.value=false;else if(notificationOpen.value)notificationOpen.value=false;else {drawer.value = false; moreMenu.value = false; projectModal.value = false;} } }
+onActivated(async () => {
+  active.value = true; await nextTick(); if (!active.value || disposed.value) return; chatScroll.resume(); resyncViewport();
+  try { if (sessionStorage.getItem(`notification-setup:${props.deviceId}`) === '1') { sessionStorage.removeItem(`notification-setup:${props.deviceId}`); notificationOpen.value = true; } } catch {}
+  resyncViewport(); window.visualViewport?.addEventListener('resize', resyncViewport); window.visualViewport?.addEventListener('scroll', updateViewport); window.addEventListener('resize', resyncViewport); window.addEventListener('keydown', closeOverlays);
+  window.addEventListener('scroll', updateViewport, { passive: true });
+  window.addEventListener('focus', resyncViewport); window.addEventListener('orientationchange', resyncViewport); document.addEventListener('focusin', resyncViewport); document.addEventListener('focusout', resyncViewport);
+  openSocket();
+  window.addEventListener('pageshow', pageRestored);
+  window.addEventListener('pagehide', pageHidden);
+  window.addEventListener('pointerdown', composerPointerdown, true);
+  document.addEventListener('visibilitychange', foreground); void refreshNotificationBadge(); void openNotificationFromUrl(); poll = setInterval(() => { if (document.visibilityState === 'visible') {if(selected.value)void read();void refreshActivity();} }, 5000);
+  navigationPoll = setInterval(() => { if (document.visibilityState === 'visible' && listVisible.value) void loadNavigation(); }, 15000);
+});
+function suspend() {
+  active.value = false; chatScroll.pause(); connected.value = false; invalidateMode();
+  subscriptionOpen.value = false; notificationOpen.value = false; modelModal.value = false; projectModal.value = false; takeoverModal.value = false; attachmentPicker.value = false; permissionPicker.value = false; fullAccessConfirm.value = false; sendMenu.value = false; moreMenu.value = false;
+  cancelViewportSync(); stopViewportWatchdog(); clearTimeout(reconnect); clearTimeout(searchTimer); clearInterval(poll); clearInterval(navigationPoll);
+  const previous = socket; socket = undefined; previous?.close(1000, 'Device switch');
+  for (const p of pending.values()) { clearTimeout(p.timer); p.reject(Object.assign(new Error('已切换电脑。'), { code: 'DEVICE_SWITCH' })); } pending.clear();
+  document.removeEventListener('visibilitychange', foreground);
+  window.removeEventListener('pageshow', pageRestored);
+  window.removeEventListener('pagehide', pageHidden);
+  window.removeEventListener('pointerdown', composerPointerdown, true);
+  window.visualViewport?.removeEventListener('resize', resyncViewport); window.visualViewport?.removeEventListener('scroll', updateViewport); window.removeEventListener('resize', resyncViewport); window.removeEventListener('keydown', closeOverlays);
+  window.removeEventListener('scroll', updateViewport);
+  window.removeEventListener('focus', resyncViewport); window.removeEventListener('orientationchange', resyncViewport); document.removeEventListener('focusin', resyncViewport); document.removeEventListener('focusout', resyncViewport);
+}
+onDeactivated(suspend);
+onUnmounted(() => { disposed.value = true; suspend(); attachments.clear(); });
+function canReloadHome() {
+  return !selected.value && !busy.value && !modeChanging.value && !attachments.hasPending.value
+    && !draft.value && ![...drafts.values()].some(Boolean) && !newText.value && !search.value
+    && !projectModal.value && !modelModal.value && !subscriptionOpen.value && !notificationOpen.value && !takeoverModal.value && !permissionPicker.value && !fullAccessConfirm.value && !moreMenu.value;
+}
+defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.uploading.value }), canReloadHome, cancelUploads: attachments.cancelPending, suspend, clear: clearNavigation, realign: resyncViewport });
+</script>
+
+<template>
+  <div ref="shell" class="mobile-shell" :class="{ authenticated: session, 'in-conversation': selected, 'keyboard-open': keyboardOpen, 'viewport-offset': viewportTop !== '0px' }" :style="{ '--chat-viewport': viewportHeight, '--chat-top': viewportTop }">
+      <div ref="viewportProbe" data-viewport-probe aria-hidden="true"></div>
+      <TrialNotice :device-id="deviceId" :subscription="status.subscription" @open="subscriptionOpen = true"/>
+      <header v-if="selected" class="chat-toolbar">
+        <button class="icon-button" title="项目与会话" @click="openDrawer"><Menu :size="20"/></button>
+        <div class="chat-heading"><h1 :title="snapshot?.title ?? selected.title">{{ snapshot?.title ?? selected.title }}</h1><button class="device-trigger" title="切换电脑" @click="emit('devices')"><Monitor :size="12"/><span>{{ deviceName }}</span><ChevronDown :size="12"/></button></div>
+        <button v-if="snapshot?.busy && hasDraft && hasCapability('queued-send')" type="button" class="icon-button draft-stop" title="停止当前生成" :disabled="busy || !canStop" @click="stop"><CircleStop :size="20"/></button>
+        <button v-if="hasCapability('model-settings')" class="model-trigger" :title="`模型与思考深度：${snapshot?.settings?.model ?? ''}`" :disabled="!canRead || !snapshot" @click="openModels()"><Brain :size="16"/><span>{{ snapshot?.settings?.model ?? '模型' }}</span></button>
+        <button type="button" class="icon-button permission-status" :class="{ full: snapshot?.settings?.permission === 'full', approve: snapshot?.settings?.permission === 'approve' }" :aria-label="`任务权限：${permissionReason || permissionLabel}`" title="更改任务权限" aria-haspopup="dialog" :aria-expanded="permissionPicker" @click="openPermissionMenu"><ShieldAlert v-if="snapshot?.settings?.permission === 'full'" :size="18"/><ShieldCheck v-else-if="snapshot?.settings?.permission === 'approve'" :size="18"/><Shield v-else :size="18"/></button>
+        <div class="chat-menu-anchor"><button class="icon-button" title="更多操作" :aria-expanded="moreMenu" @click="moreMenu = !moreMenu"><Ellipsis :size="21"/></button>
+          <div v-if="moreMenu" class="chat-menu"><div class="menu-device"><span :title="status.client?.reason">{{ formattedId }}</span><span :class="canControl ? 'good' : 'warning'">{{ connectionLabel }}</span></div><div class="connection-versions"><span>助手 {{ status.helperVersion ? `v${status.helperVersion}` : '版本未知' }}</span><span>Codex {{ status.client?.version || '版本未知' }}</span></div><button type="button" class="notification-menu-item" @click="openNotifications"><Bell :size="17"/><span>任务完成提醒</span><span v-if="notificationUnread" class="notification-unread-dot" aria-label="有未读提醒"></span></button><button type="button" class="permission-menu-item" :class="{ full: snapshot?.settings?.permission === 'full' }" @click="openPermissionMenu"><ShieldAlert v-if="snapshot?.settings?.permission === 'full'" :size="17"/><ShieldCheck v-else-if="snapshot?.settings?.permission === 'approve'" :size="17"/><Shield v-else :size="17"/><span><strong>任务权限</strong><small>{{ permissionReason || permissionLabel }}</small></span><ChevronRight :size="16"/></button><FeedbackButton mode="mobile" :device-id="deviceId" :status="status"/><button :disabled="!canRead" @click="moreMenu = false; read()"><RefreshCw :size="16"/>刷新会话</button><button v-if="hasCapability('multi-terminal')" :disabled="!canRead" @click="openTakeover"><MonitorSmartphone :size="17"/>在线终端 {{ status.control?.terminals.length ?? 1 }}</button><button :disabled="!canCreate" @click="newConversation()"><Plus :size="17"/>新建任务</button><button @click="logout"><LogOut :size="16"/>退出登录</button></div>
+        </div>
+      </header>
+      <button v-if="moreMenu" class="chat-menu-scrim" aria-label="关闭菜单" @click="moreMenu = false"></button>
+      <div v-if="selected && !canReach" class="chat-status" role="status">{{ connectionLabel }}</div>
+      <button v-if="session && !serviceActive" class="subscription-required" @click="subscriptionOpen = true"><Ticket :size="16"/>订阅未开通或已到期<ChevronRight :size="16"/></button>
+      <div v-if="error && !drawer" class="alert app-alert" role="alert"><span>{{ error }}</span><button class="icon-button" title="关闭提示" @click="error = ''"><X :size="16"/></button></div>
+      <div v-if="listVisible" :class="['navigation-surface', { 'navigation-overlay': selected }]">
+        <button v-if="selected" class="navigation-scrim" aria-label="关闭项目列表" @click="drawer = false"></button>
+        <section ref="navigation" class="navigation-panel" aria-label="项目与会话" :role="selected ? 'dialog' : 'region'" :aria-modal="selected ? true : undefined" tabindex="-1">
+          <header class="navigation-header"><div class="navigation-heading"><h1>项目与会话</h1><button class="device-trigger" title="切换电脑" @click="emit('devices')"><Monitor :size="12"/><span>{{ deviceName }}</span><ChevronDown :size="12"/></button></div><div><button class="icon-button" title="新建任务" :disabled="!canCreate" @click="newConversation()"><Plus :size="21"/></button><div v-if="!selected" class="chat-menu-anchor"><button class="icon-button" title="更多操作" :aria-expanded="moreMenu" @click="moreMenu = !moreMenu"><Ellipsis :size="21"/></button><div v-if="moreMenu" class="chat-menu"><div class="menu-device"><span :title="status.client?.reason">{{ formattedId }}</span><span :class="canControl ? 'good' : 'warning'">{{ connectionLabel }}</span></div><button type="button" class="notification-menu-item" @click="openNotifications"><Bell :size="17"/><span>任务完成提醒</span><span v-if="notificationUnread" class="notification-unread-dot" aria-label="有未读提醒"></span></button><FeedbackButton mode="mobile" :device-id="deviceId" :status="status"/><button @click="logout"><LogOut :size="16"/>退出登录</button></div></div><button v-if="selected" class="icon-button" title="关闭项目列表" @click="drawer = false"><X :size="19"/></button></div></header>
+          <div v-if="error && drawer" class="alert app-alert" role="alert"><span>{{ error }}</span><button class="icon-button" title="关闭提示" @click="error = ''"><X :size="16"/></button></div>
+          <div class="conversation-search"><Search :size="17"/><input v-model="search" aria-label="搜索会话" placeholder="搜索会话" maxlength="200" type="search"><button v-if="search" class="icon-button" title="清除搜索" @click="search = ''"><X :size="16"/></button></div>
+          <div class="navigation-scroll">
+            <template v-if="search.trim()"><div v-if="searchLoading && !searchRows.length" class="list-state" role="status">正在搜索</div><div v-else-if="!searchRows.length" class="list-state">没有匹配的会话</div><button v-for="c in searchRows" :key="c.id" class="nav-conversation search-result" @click="select(c)"><div class="search-task-title"><TaskStatus :running="taskState(c).running" :unread="taskState(c).unread"/><span>{{ c.title }}</span></div><small>{{ projectNames.get(c.projectId ?? '') ?? '最近' }}</small></button><button v-if="searchMore" class="text-button nav-load-more" :disabled="searchLoading" @click="runSearch(true)">加载更多</button></template>
+            <template v-else>
+              <p v-if="canControl && (!projectNavigation || !hasCapability('live-activity'))" class="compatibility-notice">电脑助手需要更新</p>
+              <div v-if="navigationLoading && !projects.length && !groups.recent?.loaded" class="list-state">正在读取项目</div>
+              <section v-for="p in projects" :key="p.id" class="project-group"><div class="project-row"><button class="project-toggle" :aria-expanded="expandedProjects.has(p.id)" @click="toggleProject(p.id)"><ChevronRight :size="14" :class="{ expanded: expandedProjects.has(p.id) }"/><Folder :size="17"/><span>{{ p.name }}</span><small>{{ p.count ?? '' }}</small></button><button class="icon-button project-new" :title="`在${p.name}新建任务`" :disabled="!canCreate" @click="newConversation(p.id)"><Plus :size="16"/></button></div><div v-if="expandedProjects.has(p.id)" class="project-conversations"><p v-if="group(p.id).loading && !group(p.id).loaded" class="list-state">正在读取</p><p v-else-if="!group(p.id).rows.length" class="list-state">暂无会话</p><button v-for="c in group(p.id).rows" :key="c.id" class="nav-conversation" :class="{ active: selected?.id === c.id }" @click="select(c)"><TaskStatus :running="taskState(c).running" :unread="taskState(c).unread"/><span>{{ c.title }}</span></button><button v-if="group(p.id).hasMore" class="text-button nav-load-more" :disabled="group(p.id).loading" @click="loadGroup(p.id, true)">加载更多</button></div></section>
+              <section class="recent-group"><h2>{{ projectNavigation ? '最近' : '会话' }}</h2><p v-if="groups.recent?.loaded && !groups.recent.rows.length" class="list-state">暂无会话</p><button v-for="c in groups.recent?.rows ?? []" :key="c.id" class="nav-conversation" :class="{ active: selected?.id === c.id }" @click="select(c)"><TaskStatus :running="taskState(c).running" :unread="taskState(c).unread"/><span>{{ c.title }}</span></button><button v-if="groups.recent?.hasMore" class="text-button nav-load-more" :disabled="groups.recent.loading" @click="loadGroup(null, true)">加载更多</button></section>
+            </template>
+          </div>
+          <div class="navigation-maintenance"><WebUpdateButton @refresh="refreshPage"/><span v-if="status.update?.phase === 'ready'" class="small muted">电脑助手更新已就绪</span></div>
+          <footer class="navigation-footer"><span class="status" :class="canControl ? 'good' : 'warning'"><span class="status-dot"></span>{{ connectionLabel }}</span><button class="icon-button" title="订阅与权益" @click="subscriptionOpen = true"><Ticket :size="17"/></button><button v-if="hasCapability('multi-terminal')" class="icon-button" title="在线终端与控制权" @click="openTakeover"><MonitorSmartphone :size="17"/></button><span class="device-number">{{ formattedId }}</span><button class="icon-button" title="退出登录" @click="logout"><LogOut :size="17"/></button></footer>
+        </section>
+      </div>
+      <template v-if="selected">
+        <div class="transcript-area"><div ref="scroll" class="messages" @scroll.passive="chatScroll.onScroll"><div ref="content" class="messages-content">
+          <button v-if="snapshot?.hasMore && limit < 500" class="text-button history-button" @click="limit += 100; read()">较早的消息</button>
+          <div v-if="!snapshot && readError" class="empty-state" role="alert"><p>{{ readError }}</p><button class="text-button" @click="readError = ''; read(true)">重新读取</button></div>
+          <div v-else-if="!snapshot" class="empty-state"><RefreshCw :size="22" class="spin"/><p>正在读取原会话</p></div>
+          <section v-for="turn in turns" :key="turn.id" class="conversation-turn">
+            <MessageContent v-for="m in turn.users" :key="m.id" :message="m" :conversation-id="selected.id" :device-id="deviceId"/>
+            <section v-if="turn.process.length" class="turn-process"><div class="process-heading" :data-scroll-key="`process:${turn.id}`"><RefreshCw v-if="turn.status === 'inProgress'" :size="14" class="spin"/><Check v-else :size="14"/><span>{{ turn.status === 'inProgress' ? '正在执行' : '执行过程' }}</span><small>{{ turn.process.length }} 项</small></div><div class="process-content"><MessageContent v-for="m in turn.process" :key="m.id" :message="m" :conversation-id="selected.id" :device-id="deviceId"/></div></section>
+            <MessageContent v-for="m in turn.results" :key="m.id" :message="m" :conversation-id="selected.id" :device-id="deviceId"/>
+            <p v-if="turn.status === 'failed' || turn.status === 'interrupted'" class="turn-outcome">{{ turn.status === 'failed' ? '任务未完成' : '已停止' }}</p>
+          </section>
+          <div v-if="snapshot?.busy && !turns.some(t => t.status === 'inProgress')" class="working"><RefreshCw :size="14" class="spin"/>正在运行</div>
+          <section v-for="r in snapshot?.requests ?? []" :key="r.id" class="approval" :data-scroll-key="`approval:${r.id}`">
+            <h2>{{ r.title }}</h2><pre v-if="r.detail && r.kind !== 'plan'">{{ r.detail }}</pre>
+            <PlanRequest v-if="r.kind === 'plan'" :key="`${selected.id}:${r.plan?.revision}`" :request="r" :conversation-id="selected.id" :device-id="deviceId" :supported="hasCapability('plan-implementation')" :disabled="busy || !modeReady || !canControl || !hasCapability('plan-implementation') || !!snapshot?.busy || !!queuedMessages.length || snapshot?.settings?.mode !== 'plan'" @submit="(action, feedback) => respondPlan(r, action, feedback)" @resized="queueResized"/>
+            <div v-else-if="r.kind === 'input'" class="questions"><div v-for="q in r.questions" :key="q.id"><label :for="`question-${q.id}`">{{ q.question }}</label><select v-if="q.options.length" :id="`question-${q.id}`" :value="answerModes[q.id] ?? ''" @change="chooseAnswer(q, $event)"><option value="">请选择</option><option v-for="(o, index) in q.options" :key="o.label" :value="String(index)">{{ o.label }}</option><option :value="customAnswerMode">其他（手动输入）</option></select><input v-if="!q.options.length || answerModes[q.id] === customAnswerMode" :id="q.options.length ? `question-${q.id}-custom` : `question-${q.id}`" v-model="answers[q.id]" class="custom-answer" :aria-label="q.options.length ? `${q.question}：其他` : undefined" :placeholder="q.options.length ? '请输入其他回答' : '请输入回答'" maxlength="4000"></div><button class="button primary" :disabled="busy || !canApprove || !answersComplete(r)" @click="respond(r)">提交</button></div><div v-else-if="r.kind !== 'unsupported'" class="approval-actions"><button class="button" :disabled="busy || !canDecline" @click="respond(r, 'decline')"><X :size="16"/>拒绝</button><button class="button primary" :disabled="busy || !canApprove" @click="respond(r, 'accept')"><Check :size="16"/>允许本次</button></div>
+          </section>
+        </div></div><button v-if="chatScroll.awayFromBottom.value" class="jump-to-bottom" title="回到最新消息" @click="chatScroll.toBottom"><ArrowDown :size="19"/></button></div>
+        <form class="composer compact-composer" @submit.prevent="sendFromButton()">
+          <QueuedMessages :items="queuedMessages" :can-remove="canRemoveQueued" :can-resume="canControl && canUse('send-messages') && modeReady && !busy" @remove="queueAction($event, 'remove')" @resume="queueAction($event, 'resume')" @resized="queueResized"/>
+          <div v-if="attachments.current.value.length" class="attachment-strip"><div v-for="a in attachments.current.value" :key="a.key" class="pending-attachment"><img v-if="a.preview" :src="a.preview" :alt="a.file.name"><File v-else :size="20"/><div><strong :title="a.file.name">{{ a.file.name }}</strong><small :class="{ warning:a.error }">{{ a.error || (a.preparing ? '正在处理照片' : a.attachment?.ready ? '已上传' : `${a.progress}%`) }}</small></div><button v-if="a.error" type="button" class="icon-button" title="重试上传" :disabled="!canControl" @click="attachments.upload(a)"><RefreshCw :size="16"/></button><button type="button" class="icon-button" title="移除附件" @click="attachments.remove(a)"><X :size="16"/></button></div></div>
+          <div class="composer-field"><input ref="fileInput" data-attachment-source="files" type="file" multiple hidden @change="chooseFiles($event)"><input ref="photoInput" data-attachment-source="photos" type="file" accept="image/*" multiple hidden @change="chooseFiles($event,true)"><input ref="cameraInput" data-attachment-source="camera" type="file" accept="image/*" capture="environment" hidden @change="chooseFiles($event,true)"><button type="button" class="icon-button attach-button" title="添加照片、文件或计划模式" aria-haspopup="dialog" :aria-expanded="attachmentPicker" @click="openAttachmentMenu"><Plus :size="21"/></button><div v-if="snapshot?.settings?.mode === 'plan'" class="plan-chip" :title="canToggleMode ? '当前为计划模式' : `计划模式：${modeReason}`"><Lightbulb :size="15"/><span>计划</span><button type="button" class="plan-chip-close" aria-label="关闭计划模式" title="关闭计划模式" :disabled="!canToggleMode" @click="setPlanMode('default')"><X :size="14"/></button></div><textarea ref="input" v-model="draft" aria-label="消息" :placeholder="canControl ? '发送消息' : '查看模式'" rows="1" maxlength="32000" :disabled="!canRead || busy" @input="fitInput" @keydown.ctrl.enter.prevent="send()"/><button v-if="canRead && !canControl" type="button" class="send-button takeover" title="接管控制权" @click="openTakeover"><MonitorSmartphone :size="20"/></button><button v-else-if="snapshot?.busy && (!hasDraft || !hasCapability('queued-send'))" type="button" class="send-button stop" title="停止当前生成" :disabled="busy || !canStop || !snapshot.turnId" @click="stop"><CircleStop :size="23"/></button><button v-else class="send-button" :title="snapshot?.busy || queuedMessages.length ? '排队发送' : '发送消息'" :disabled="!canSend"><ArrowUp :size="22"/></button><div v-if="snapshot?.busy && hasDraft && hasCapability('queued-send')" class="send-options"><button type="button" class="icon-button" title="发送方式" :aria-expanded="sendMenu" :disabled="busy || !canControl" @click="sendMenu = !sendMenu"><ChevronDown :size="17"/></button><div v-if="sendMenu" class="send-mode-menu" role="menu"><button type="button" role="menuitem" :disabled="!canSend" @click="send()"><ListOrdered :size="17"/>排队发送</button><button type="button" role="menuitem" :disabled="!canSteer" :title="attachments.current.value.length ? '带附件的内容请排队发送' : '调整当前任务方向'" @click="send('steer')"><CornerUpRight :size="17"/>调整方向</button><button type="button" role="menuitem" :disabled="busy || !canStop" @click="sendMenu = false; stop()"><CircleStop :size="17"/>停止当前生成</button></div></div></div>
+        </form>
+      </template>
+    <button v-if="sendMenu" type="button" class="send-mode-scrim" aria-label="关闭发送方式" @click="sendMenu = false"/>
+    <div v-if="projectModal" class="modal-backdrop" @click.self="projectModal = false"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="new-title"><div class="modal-title"><h2 id="new-title">新建任务</h2><button class="icon-button" title="关闭" @click="projectModal = false"><X :size="20"/></button></div><form @submit.prevent="create"><label for="project">现有项目</label><select id="project" v-model="projectId"><option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name ?? p.path }}</option></select><p v-if="!projects.length" class="muted">暂无本机项目</p><button v-if="hasCapability('model-settings')" type="button" class="text-button" @click="openModels('new')"><Brain :size="14"/>{{ newModel || '默认模型' }} {{ effortNames[newEffort] || '' }}</button><label for="new-text">任务</label><textarea id="new-text" v-model="newText" rows="5" maxlength="32000" required/><button class="button primary" :disabled="busy || !canCreate || !projectId || !newText.trim()">创建任务<ArrowRight :size="16"/></button></form></section></div>
+    <SubscriptionPanel v-if="subscriptionOpen" mode="mobile" :device-id="deviceId" @close="subscriptionOpen = false" @changed="subscriptionChanged"/>
+    <NotificationCenter v-if="notificationOpen" :device-id="deviceId" @close="notificationOpen = false" @open-task="openNotificationTask" @unread="notificationUnread = $event"/>
+    <div v-if="modelModal" class="modal-backdrop settings-backdrop" @click.self="modelModal=false"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="model-title"><div class="modal-title"><h2 id="model-title">模型与思考深度</h2><button class="icon-button" title="关闭模型设置" @click="modelModal=false"><X :size="20"/></button></div><form @submit.prevent="saveModel"><label for="model-choice">模型</label><select id="model-choice" v-model="chosenModel"><option v-for="m in models" :key="m.id" :value="m.id">{{ m.name }}</option></select><label for="effort-choice">思考深度</label><select id="effort-choice" v-model="chosenEffort"><option v-for="effort in availableEfforts" :key="effort" :value="effort">{{ effortNames[effort] ?? effort }}</option></select><button class="button primary" :disabled="busy || !canControl || !chosenModel || !chosenEffort"><Check :size="16"/>保存</button></form></section></div>
+    <div v-if="takeoverModal" class="modal-backdrop settings-backdrop" @click.self="takeoverModal=false"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="terminal-title"><div class="modal-title"><h2 id="terminal-title">在线终端</h2><button class="icon-button" title="关闭终端列表" @click="takeoverModal=false"><X :size="20"/></button></div><div v-for="t in status.control?.terminals ?? []" :key="t.id" class="terminal-row"><MonitorSmartphone :size="20"/><span>{{ t.label }}{{ t.id === clientId ? '（本终端）' : '' }}</span><small>{{ t.controlling ? '控制中' : '查看中' }}</small></div><button v-if="!canControl" class="button primary" :disabled="busy || !canRead" @click="takeControl"><MonitorSmartphone :size="17"/>确认接管</button></section></div>
+    <div v-if="permissionPicker" class="modal-backdrop permission-backdrop" @click.self="permissionPicker=false"><section class="modal permission-picker" role="dialog" aria-modal="true" aria-labelledby="permission-title"><div class="modal-title"><h2 id="permission-title">任务权限</h2><button class="icon-button" title="关闭任务权限" @click="permissionPicker=false"><X :size="20"/></button></div><div role="radiogroup" aria-label="选择任务权限"><button type="button" class="permission-option" role="radio" :aria-checked="snapshot?.settings?.permission === 'ask'" :disabled="!canChangePermission" @click="choosePermission('ask')"><Shield :size="22"/><span><strong>请求批准</strong><small>编辑工作区外文件和使用互联网时始终询问</small></span><Check v-if="snapshot?.settings?.permission === 'ask'" :size="18"/></button><button type="button" class="permission-option" role="radio" :aria-checked="snapshot?.settings?.permission === 'approve'" :disabled="!canChangePermission" @click="choosePermission('approve')"><ShieldCheck :size="22"/><span><strong>帮我批准</strong><small>仅对检测到的风险操作请求批准</small></span><Check v-if="snapshot?.settings?.permission === 'approve'" :size="18"/></button><button type="button" class="permission-option full" role="radio" :aria-checked="snapshot?.settings?.permission === 'full'" :disabled="!canChangePermission" @click="choosePermission('full')"><ShieldAlert :size="22"/><span><strong>完全访问权限</strong><small>可不受限制访问互联网和电脑文件</small></span><Check v-if="snapshot?.settings?.permission === 'full'" :size="18"/></button></div><p v-if="snapshot?.settings?.permission === 'custom' && !permissionReason" class="compatibility-notice">当前任务使用自定义权限配置，可切换为以上任一档。</p><p v-else-if="permissionReason" class="compatibility-notice">暂时无法更改：{{ permissionReason }}</p></section></div>
+    <div v-if="fullAccessConfirm" class="modal-backdrop permission-confirm-backdrop" @click.self="fullAccessConfirm=false"><section class="modal permission-confirm" role="alertdialog" aria-modal="true" aria-labelledby="full-access-title"><div class="modal-title"><h2 id="full-access-title">启用完全访问权限？</h2><button class="icon-button" title="关闭确认" @click="fullAccessConfirm=false"><X :size="20"/></button></div><div class="permission-warning"><ShieldAlert :size="24"/><p>后续消息可不经批准访问互联网和电脑上的任意文件。仅在你信任当前任务时启用。</p></div><p v-if="permissionReason" class="compatibility-notice">暂时无法更改：{{ permissionReason }}</p><div class="permission-confirm-actions"><button type="button" class="button" @click="fullAccessConfirm=false">取消</button><button type="button" class="button confirm-full" :disabled="!canChangePermission" @click="setPermission('full')">确认启用</button></div></section></div>
+    <div v-if="attachmentPicker" class="modal-backdrop attachment-backdrop" @click.self="attachmentPicker=false"><section class="modal attachment-picker" role="dialog" aria-modal="true" aria-labelledby="attachment-title"><div class="modal-title"><h2 id="attachment-title">添加内容</h2><button class="icon-button" title="关闭添加内容" @click="attachmentPicker=false"><X :size="20"/></button></div><button class="attachment-source" :disabled="!!attachmentReason" @click="chooseAttachmentSource('photos')"><Images :size="22"/><span>照片图库</span><ChevronRight :size="16"/></button><button class="attachment-source" :disabled="!!attachmentReason" @click="chooseAttachmentSource('camera')"><Camera :size="22"/><span>拍照</span><ChevronRight :size="16"/></button><button class="attachment-source" :disabled="!!attachmentReason" @click="chooseAttachmentSource('files')"><File :size="22"/><span>文件</span><ChevronRight :size="16"/></button><button type="button" class="attachment-source plan-source" :disabled="!canToggleMode" :aria-checked="snapshot?.settings?.mode === 'plan'" role="menuitemcheckbox" @click="setPlanMode('plan')"><Lightbulb :size="22"/><span><strong>计划模式</strong><small>{{ modeReason || (snapshot?.settings?.mode === 'plan' ? '已开启' : '') }}</small></span><Check v-if="snapshot?.settings?.mode === 'plan'" :size="18"/></button><p v-if="attachmentReason" class="compatibility-notice">附件不可用：{{ attachmentReason }}</p></section></div>
+  </div>
+</template>
+
+<style scoped>
+.notification-menu-item{display:flex;align-items:center;gap:10px;width:100%;padding:10px;color:#38545e;background:none;border:0;text-align:left;font-size:13px}.notification-menu-item:hover{background:#f1f5f7}.notification-menu-item svg{flex-shrink:0}.notification-unread-dot{width:7px;height:7px;margin-left:auto;border-radius:50%;background:#d65738;flex:0 0 auto}
+.navigation-maintenance{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:8px 14px;border-top:1px solid #e1e7ea}.navigation-maintenance:empty{display:none}
+.chat-heading,.navigation-heading{flex:1;min-width:0}.chat-heading h1{line-height:1.4}.device-trigger{display:flex;align-items:center;gap:4px;border:0;background:none;color:#60727c;font-size:11px;max-width:100%;height:22px;padding:0;text-align:left}.device-trigger span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.device-trigger svg{flex-shrink:0}.navigation-header .navigation-heading{display:block}.navigation-heading h1{font-size:16px}
+.model-trigger{display:flex;align-items:center;gap:5px;max-width:110px;height:36px;border:0;background:none;color:#63767e;font-size:11px;flex-shrink:1;min-width:32px;padding:0 5px}.model-trigger svg{flex-shrink:0}.model-trigger span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plan-chip{display:flex;align-items:center;gap:3px;flex:0 0 auto;height:32px;align-self:flex-end;margin-bottom:6px;padding:0 3px 0 6px;border-radius:6px;background:#edf3ee;color:#436b4a;font-size:12px;white-space:nowrap}.plan-chip-close{display:flex;align-items:center;justify-content:center;min-width:24px;height:30px;padding:0;border:0;background:none;color:inherit}.plan-chip-close:hover{background:#dde9df}.plan-chip svg{flex-shrink:0}.connection-versions{display:grid;gap:3px;padding:6px 10px 10px;font-size:11px;color:#63767e;overflow-wrap:anywhere}
+.plan-source span{min-width:0}.plan-source strong{font-weight:400}.plan-source small{display:block;font-size:12px;color:#697a83;white-space:normal;overflow-wrap:anywhere}.attachment-picker .compatibility-notice{padding:7px 4px}
+.questions .custom-answer{margin-top:8px}
+.search-task-title{display:flex;gap:9px;align-items:center;min-width:0}.search-task-title>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attachment-strip{display:flex;gap:8px;overflow:auto;padding:0 0 8px}.pending-attachment{display:flex;align-items:center;gap:8px;flex:0 0 250px;min-width:0;border:1px solid #dbe4e7;border-radius:6px;padding:7px;background:#fafcfc}.pending-attachment>img{width:34px;height:34px;object-fit:contain}.pending-attachment>div{flex:1;min-width:0}.pending-attachment strong{display:block;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pending-attachment small{display:block;font-size:10px;color:#688279;overflow-wrap:anywhere}.pending-attachment small.warning{color:#ae593f}.pending-attachment .icon-button{width:28px;height:30px;flex-basis:28px}
+.composer-field .attach-button{align-self:end;height:44px;width:32px;flex-basis:32px}.takeover{background:#467ba5}.terminal-row{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #e1e7ea}.terminal-row span{flex:1;font-size:13px;overflow-wrap:anywhere}.terminal-row small{font-size:11px;color:#6e827b}.settings-backdrop{z-index:40!important}
+.attachment-backdrop{z-index:45!important;align-items:flex-end;padding:14px 14px max(14px,env(safe-area-inset-bottom))}.attachment-picker{padding:16px 18px 10px;max-width:440px}.attachment-picker .modal-title{margin-bottom:8px}.attachment-source{display:flex;align-items:center;gap:14px;width:100%;min-height:56px;padding:12px 4px;border:0;border-top:1px solid #e7ecee;background:white;color:#38545e;text-align:left}.attachment-source span{flex:1;color:#263d46;font-size:15px}.attachment-source svg{flex-shrink:0}.attachment-source:hover{background:#f3f7f7}
+.permission-backdrop{z-index:46!important;align-items:flex-end;padding:14px 14px max(14px,env(safe-area-inset-bottom))}.permission-picker{padding:16px 18px 10px;max-width:440px}.permission-picker .modal-title{margin-bottom:8px}.permission-option{display:flex;align-items:center;gap:13px;width:100%;min-height:66px;padding:11px 4px;border:0;border-top:1px solid #e7ecee;background:#fff;color:#45616b;text-align:left}.permission-option:hover{background:#f3f7f7}.permission-option>span{flex:1;min-width:0}.permission-option strong,.permission-option small{display:block}.permission-option strong{font-size:14px;color:#253c45}.permission-option small{margin-top:2px;color:#718087;font-size:12px;line-height:1.45;white-space:normal}.permission-option.full>svg:first-child,.permission-option.full strong{color:#bd4b27}.permission-option>svg{flex-shrink:0}.permission-confirm-backdrop{z-index:50!important}.permission-warning{display:flex;align-items:flex-start;gap:12px;color:#71402f}.permission-warning svg{flex-shrink:0;color:#bd4b27}.permission-warning p{line-height:1.65}.permission-confirm-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:22px}.permission-confirm-actions .confirm-full{background:#b94929;border-color:#b94929;color:#fff}.permission-confirm-actions .confirm-full:hover{background:#9e3d22}
+.pricing-link{display:flex;align-items:center;justify-content:center;gap:7px;margin:14px auto 0}.subscription-required{display:flex;align-items:center;justify-content:center;gap:7px;flex-shrink:0;border:0;border-bottom:1px solid #eadfc9;background:#fffaf0;color:#946223;padding:9px;font-size:12px}.navigation-footer .status{min-width:0;white-space:normal}.navigation-footer{gap:7px}
+.send-options{position:relative;align-self:flex-end}.send-options>.icon-button{width:28px;flex-basis:28px;height:44px}.send-mode-menu{position:absolute;right:0;bottom:50px;width:188px;padding:5px;background:#fff;border:1px solid #dbe3e7;border-radius:6px;box-shadow:0 6px 24px #1b344626;z-index:15}.send-mode-menu button{display:flex;align-items:center;gap:9px;width:100%;border:0;background:none;text-align:left;padding:12px 10px;color:#314b58;font-size:13px}.send-mode-menu button:hover{background:#f1f5f7}.draft-stop{color:#976326}
+.send-mode-scrim{position:absolute;inset:0;border:0;border-radius:0;background:transparent;z-index:14}
+.navigation-footer .device-number{margin-left:auto}
+</style>

@@ -1,0 +1,81 @@
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { ArrowLeft, ArrowUpRight, Check, ClipboardList, Copy, CreditCard, QrCode, RefreshCw, Wallet, X } from 'lucide-vue-next';
+import QRCode from 'qrcode';
+import { api as requestApi } from './api';
+import { money, paymentStatusNames, refundStatusNames, type PaymentOrder } from '../src/shared/commerce';
+import { PAYMENT_TERMS_VERSION, type Catalog } from '../src/shared/subscription';
+const props = defineProps<{ mode: 'desktop' | 'mobile'; initialPlan?: string; deviceId?: string }>();
+const api = (path: string, body?: unknown) => requestApi(path, body, props.mode === 'mobile' && props.deviceId ? { 'X-Remote-Device': props.deviceId } : undefined);
+const emit = defineEmits<{ close: []; changed: [] }>();
+const base = props.mode === 'desktop' ? '/local/orders' : '/api/orders';
+const view = ref(props.initialPlan ? 'buy' : 'orders'); const data = ref<any>(); const catalog = ref<Catalog>(); const selected = ref(props.initialPlan ?? 'month'); const channel = ref('wechat'); const accepted = ref(false);
+const channels = computed(() => data.value?.readiness?.channels ?? []);
+const loading = ref(false); const error = ref(''); const active = ref<PaymentOrder>(); const payUrl = ref(''); const qr = ref(''); const copied = ref(false); const key = ref(crypto.randomUUID());
+const refundTarget = ref<any>(); const refundReason = ref('first_purchase'); const explanation = ref('');
+const plan = computed(() => catalog.value?.plans.find(p => p.id === selected.value));
+const plans = computed(() => catalog.value?.plans.filter(p => p.id !== 'trial') ?? []);
+const canBuy = computed(() => data.value?.readiness.ready && plan.value?.available && accepted.value && !loading.value && !data.value?.orders.some((o: PaymentOrder) => !['paid','closed','refunded'].includes(o.status)));
+function changedChoice() { accepted.value = false; key.value = crypto.randomUUID(); }
+const date = (value: number | null) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-';
+let polling: ReturnType<typeof setInterval> | undefined;
+async function load() {
+  try { data.value = await api(base); const info = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription'); catalog.value = info.catalog;
+    if (!channels.value.includes(channel.value)) channel.value = channels.value[0] ?? '';
+    if (active.value) { const next = data.value.orders.find((o: PaymentOrder) => o.id === active.value!.id); if (next) { const previous = active.value.status; active.value = next; if (next.status === 'paid' && previous !== 'paid') emit('changed'); } }
+  } catch (e: any) { error.value = e.message; }
+}
+async function showPayment(result: any) { active.value = result.order; payUrl.value = result.payUrl; qr.value = await QRCode.toDataURL(result.payUrl, { width: 260, margin: 2, errorCorrectionLevel: 'M' }); copied.value = false; }
+async function create() {
+  if (!canBuy.value) return; loading.value = true; error.value = '';
+  try { await showPayment(await api(base, { planId: selected.value, planRevision: plan.value!.revision, channel: channel.value, termsVersion: PAYMENT_TERMS_VERSION, idempotencyKey: key.value })); key.value = crypto.randomUUID(); accepted.value = false; await load(); }
+  catch (e: any) { error.value = e.message; if (e.code === 'STALE') { accepted.value = false; key.value = crypto.randomUUID(); await load(); } }
+  finally { loading.value = false; }
+}
+async function open(order: PaymentOrder) { loading.value = true; error.value = ''; try { await showPayment(await api(`${base}/${order.id}/open`, {})); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
+async function closeOrder(order: PaymentOrder) { loading.value = true; error.value = ''; try { await api(`${base}/${order.id}/close`, {}); await load(); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
+async function copyLink() { try { await navigator.clipboard.writeText(payUrl.value); copied.value = true; } catch { error.value = '无法复制链接。'; } }
+async function refund() { loading.value = true; error.value = ''; try { await api(`${base}/${refundTarget.value.id}/refund`, { reason: refundReason.value, explanation: explanation.value }); refundTarget.value = undefined; explanation.value = ''; await load(); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
+onMounted(async () => { loading.value = true; await load(); loading.value = false; polling = setInterval(() => { if (!loading.value && document.visibilityState === 'visible') void load(); }, 5000); });
+onUnmounted(() => clearInterval(polling));
+</script>
+<template>
+  <div class="modal-backdrop purchase-backdrop" @click.self="!loading && emit('close')">
+    <section class="modal purchase-panel" role="dialog" aria-modal="true" aria-label="订单与续费">
+      <div class="modal-title"><h2>订单与续费</h2><button class="icon-button" title="关闭订单" :disabled="loading" @click="emit('close')"><X :size="20"/></button></div>
+      <div v-if="active" class="purchase-payment">
+        <button class="text-button" @click="active = undefined; view = 'orders'"><ArrowLeft :size="16"/>返回订单</button>
+        <p class="purchase-device">设备 {{ active.deviceId }}</p><h3>{{ active.planName }} · {{ active.days }} 天</h3><strong class="purchase-price">¥{{ money(active.priceFen) }}</strong>
+        <p class="purchase-state" :class="{ good: active.status === 'paid' }"><Check v-if="active.status === 'paid'" :size="18"/>{{ paymentStatusNames[active.status] }} · {{ active.serviceStatus }}</p>
+        <template v-if="['pending','confirming'].includes(active.status)"><div class="purchase-payment-actions"><a class="button primary" :href="payUrl" target="_blank" rel="noopener noreferrer"><ArrowUpRight :size="17"/>{{ active.channel === 'alipay' ? '去支付宝支付' : '打开付款页面' }}</a><button class="text-button" @click="copyLink"><Check v-if="copied" :size="16"/><Copy v-else :size="16"/>{{ copied ? '已复制' : '复制付款链接' }}</button></div><p class="muted small">有效至 {{ date(active.expires) }}</p><img v-if="qr" :src="qr" class="purchase-qr" alt="本订单付款二维码" width="260" height="260"></template>
+        <div v-if="active.lastError" class="alert">{{ active.lastError }}</div>
+      </div>
+      <template v-else-if="refundTarget">
+        <h3>申请退款 · ¥{{ money(refundTarget.price_fen) }}</h3>
+        <form @submit.prevent="refund"><label for="refund-reason">原因</label><select id="refund-reason" v-model="refundReason"><option value="first_purchase">首购七天保障</option><option value="unused">尚未开始使用</option><option value="incompatibility">客户端兼容问题</option></select><label for="refund-explanation">申请说明</label><textarea id="refund-explanation" v-model="explanation" minlength="5" maxlength="1000" required rows="3"/><button class="button primary" :disabled="loading || explanation.trim().length < 5"><Wallet :size="17"/>提交申请</button><button type="button" class="text-button" @click="refundTarget = undefined">取消</button></form>
+      </template>
+      <template v-else>
+        <div class="purchase-tabs" role="tablist"><button role="tab" :aria-selected="view === 'buy'" @click="view = 'buy'"><CreditCard :size="17"/>购买 / 续费</button><button role="tab" :aria-selected="view === 'orders'" @click="view = 'orders'"><ClipboardList :size="17"/>我的订单</button></div>
+        <p v-if="data" class="purchase-device">设备 {{ data.deviceId }}</p>
+        <form v-if="view === 'buy'" @submit.prevent="create">
+          <div v-if="data && !data.readiness.ready" class="alert" role="status">{{ data.readiness.reason }}</div>
+          <label for="purchase-plan">套餐</label><select id="purchase-plan" v-model="selected" @change="changedChoice"><option v-for="p in plans" :key="p.id" :value="p.id" :disabled="!p.available">{{ p.name }} · {{ p.days }} 天 · ¥{{ money(p.priceFen) }}{{ p.available ? '' : '（未开放）' }}</option></select>
+          <div v-if="channels.length" class="purchase-channels" role="radiogroup" aria-label="支付渠道"><label v-if="channels.includes('wechat')"><input v-model="channel" type="radio" value="wechat" @change="changedChoice">微信支付</label><label v-if="channels.includes('alipay')"><input v-model="channel" type="radio" value="alipay" @change="changedChoice">支付宝</label></div>
+          <details class="purchase-terms"><summary>订阅服务及支付隐私条款</summary><p>预付 {{ plan?.days ?? 30 }} 天，绑定当前一台电脑，最多三个在线终端、一个控制端。不限累计流量，图片和文件最高 3Mbps 共享带宽，不自动扣款，不含模型额度或云电脑。</p><p>支付成功并经服务器核验后自动开通，续费接在剩余期限之后。微信和支付宝处理必要的订单、金额及支付身份信息；微信内付款需要取得 OpenID。中继可接触远控内容，不属于端到端加密，不持久化聊天正文或照片。</p><p>首笔付费七天内可申请退款；兼容问题按未使用期限核算。退款须审核并由渠道确认成功，处理中不提前撤销有效服务。换机需核验设备归属。</p><small>{{ PAYMENT_TERMS_VERSION }}</small></details>
+          <label class="purchase-consent"><input v-model="accepted" type="checkbox">我已确认设备、金额并同意上述条款</label>
+          <button class="button primary" :disabled="!canBuy"><RefreshCw v-if="loading" :size="17" class="spin"/><CreditCard v-else :size="17"/>创建订单 · ¥{{ money(plan?.priceFen ?? 0) }}</button>
+          <p v-if="data?.orders.some((o:PaymentOrder) => !['paid','closed','refunded'].includes(o.status))" class="alert">有未结清订单</p>
+        </form>
+        <div v-else class="purchase-order-list">
+          <div v-for="order in data?.orders ?? []" :key="order.id" class="purchase-order"><div><strong>{{ order.planName }} · ¥{{ money(order.priceFen) }}</strong><span>{{ date(order.created) }}</span><span>{{ paymentStatusNames[order.status] }} · {{ order.serviceStatus }}</span></div><div class="purchase-order-actions"><button v-if="['pending','confirming'].includes(order.status)" class="icon-button" title="打开付款" :disabled="loading" @click="open(order)"><QrCode :size="20"/></button><button v-if="['pending','confirming'].includes(order.status)" class="icon-button" title="关闭待支付订单" :disabled="loading" @click="closeOrder(order)"><X :size="19"/></button></div></div>
+          <h3 v-if="data?.licenses.length">服务记录</h3><div v-for="item in data?.licenses ?? []" :key="item.id" class="purchase-order"><div><strong>¥{{ money(item.price_fen) }} · {{ item.source === 'online' ? '在线购买' : '人工授权' }}</strong><span>{{ item.refunded ? '已退款' : '有效至 ' + date(item.ends) }}</span></div><button v-if="item.price_fen && !item.refunded && !data.refunds.some((r:any) => r.billing_order_id === item.id && r.state !== 'rejected')" class="icon-button" title="申请退款" @click="refundTarget = item"><Wallet :size="18"/></button></div>
+          <div v-for="item in data?.refunds ?? []" :key="item.id" class="purchase-order"><span>退款 · {{ refundStatusNames[item.state] }}</span><span>{{ item.amount_fen == null ? '待审核' : '¥' + money(item.amount_fen) }}</span></div>
+          <p v-if="data && !data.orders.length && !data.licenses.length" class="empty-state">暂无订单</p>
+        </div>
+      </template>
+      <div v-if="error" class="alert" role="alert">{{ error }}</div>
+    </section>
+  </div>
+</template>
+<style src="./purchase.css"/>
+<style scoped>.purchase-payment-actions{display:flex;flex-direction:column;align-items:stretch;gap:7px;margin:18px 0 4px}.purchase-payment-actions .primary{width:100%;min-height:44px}</style>
