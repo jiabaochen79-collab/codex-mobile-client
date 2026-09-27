@@ -9,7 +9,7 @@ if (process.platform !== 'win32') throw new Error('Build the installer on Window
 const { values } = parseArgs({ options: { package: { type: 'string' }, compiler: { type: 'string' }, output: { type: 'string' } } });
 const packageDir = resolve(values.package ?? 'release/windows-public');
 const output = resolve(values.output ?? 'release');
-const compiler = values.compiler ?? process.env.INNO_SETUP_COMPILER ?? resolve('.runtime/tools/inno-7.1.0/compiler/ISCC.exe');
+const compiler = values.compiler ?? process.env.INNO_SETUP_COMPILER ?? [resolve('.runtime/tools/inno-7.1.0/compiler/ISCC.exe'), resolve('.runtime/tools/inno-7.1.0/ISCC.exe')].find(existsSync) ?? resolve('.runtime/tools/inno-7.1.0/ISCC.exe');
 if (!existsSync(compiler)) throw new Error('Set INNO_SETUP_COMPILER to a verified Inno Setup ISCC.exe installation.');
 for (const name of ['RemoteCompanion.exe', 'node.exe', 'companion.ico', 'icons', 'dist/agent.mjs', 'dist/web/index.html', 'node_modules', 'relay.json', 'package.json']) if (!existsSync(join(packageDir, name))) throw new Error(`Incomplete Windows package: ${name}`);
 const origin = originUrl(JSON.parse(readFileSync(join(packageDir, 'relay.json'), 'utf8')).origin);

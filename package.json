@@ -1,17 +1,17 @@
 {
   "name": "codex-mobile",
   "version": "0.4.22",
-  "description": "A self-hosted mobile web companion for existing Codex desktop tasks.",
+  "description": "A secure, self-hosted mobile companion for continuing Codex desktop tasks.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jiabaochen79-collab/codex-mobile.git"
+    "url": "git+https://github.com/jiabaochen79-collab/codex-mobile-client.git"
   },
-  "homepage": "https://github.com/jiabaochen79-collab/codex-mobile#readme",
+  "homepage": "https://github.com/jiabaochen79-collab/codex-mobile-client#readme",
   "bugs": {
-    "url": "https://github.com/jiabaochen79-collab/codex-mobile/issues"
+    "url": "https://github.com/jiabaochen79-collab/codex-mobile-client/issues"
   },
-  "private": true,
+  "private": false,
   "type": "module",
   "engines": {
     "node": ">=22.13"
