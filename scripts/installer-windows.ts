@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { originUrl } from '../src/shared/security.js';
+import { assertClientDist } from './client-boundary.js';
 
 if (process.platform !== 'win32') throw new Error('Build the installer on Windows.');
 const { values } = parseArgs({ options: { package: { type: 'string' }, compiler: { type: 'string' }, output: { type: 'string' } } });
@@ -12,6 +13,9 @@ const output = resolve(values.output ?? 'release');
 const compiler = values.compiler ?? process.env.INNO_SETUP_COMPILER ?? [resolve('.runtime/tools/inno-7.1.0/compiler/ISCC.exe'), resolve('.runtime/tools/inno-7.1.0/ISCC.exe')].find(existsSync) ?? resolve('.runtime/tools/inno-7.1.0/ISCC.exe');
 if (!existsSync(compiler)) throw new Error('Set INNO_SETUP_COMPILER to a verified Inno Setup ISCC.exe installation.');
 for (const name of ['RemoteCompanion.exe', 'node.exe', 'companion.ico', 'icons', 'dist/agent.mjs', 'dist/web/index.html', 'node_modules', 'relay.json', 'package.json']) if (!existsSync(join(packageDir, name))) throw new Error(`Incomplete Windows package: ${name}`);
+assertClientDist(join(packageDir, 'dist'));
+const allowed = new Set(['node.exe', 'RemoteCompanion.exe', 'companion.ico', 'icons', 'dist', 'node_modules', 'package.json', 'package-lock.json', 'relay.json', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'NODE-LICENSE.txt', 'INSTALLER.md', 'REMEMBERED-LOGIN.md', 'COMPATIBILITY.md', 'PLAN-MODE.md', 'QUEUED-SEND.md']);
+for (const name of readdirSync(packageDir)) if (!allowed.has(name)) throw new Error(`Unexpected installer file: ${name}`);
 const origin = originUrl(JSON.parse(readFileSync(join(packageDir, 'relay.json'), 'utf8')).origin);
 if (!origin.startsWith('https:')) throw new Error('The user installer must contain an HTTPS server origin.');
 const version = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8')).version;

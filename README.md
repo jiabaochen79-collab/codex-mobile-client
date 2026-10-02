@@ -57,6 +57,13 @@ It does **not** contain the relay server, administrator console, payment impleme
 - Install a prepared update only after the user confirms; Codex and active desktop tasks are not intentionally stopped by an assistant update.
 - Report helper version and compatibility capabilities to the mobile interface.
 
+### Service access and support
+
+- View subscription status, redeem an authorization code, and purchase service access when enabled by the relay operator.
+- Claim a one-time seven-day trial on an eligible computer when the operator has enabled trials; eligibility and expiry are determined by the service.
+- Submit feedback, attach optional screenshots, follow replies, and track resolution from either device.
+- Service expiry does not stop Codex tasks already running on the computer.
+
 ## Download
 
 The latest Windows installer and portable archive are published in the [GitHub Releases](https://github.com/jiabaochen79-collab/codex-mobile-client/releases) page. A mirror is maintained on [Gitee](https://gitee.com/jiabaochen79-collab/codex-mobile-client/releases).
@@ -84,6 +91,7 @@ Requirements:
 
 ```powershell
 npm ci
+npm run audit:public
 npm run check
 npm run native
 npm run build

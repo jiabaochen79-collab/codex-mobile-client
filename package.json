@@ -17,6 +17,7 @@
     "node": ">=22.13"
   },
   "scripts": {
+    "audit:public": "node scripts/audit-public.cjs",
     "build": "node scripts/tasks.cjs build",
     "test": "node scripts/tasks.cjs test",
     "agent": "node scripts/tasks.cjs agent",

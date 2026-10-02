@@ -3,9 +3,11 @@ import { resolve, join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { originUrl } from '../src/shared/security.js';
+import { assertClientDist } from './client-boundary.js';
 const origin = originUrl(process.env.RELAY_URL ?? 'http://127.0.0.1:8790');
 if (process.platform !== 'win32') throw new Error('Build the native helper on Windows.');
 if (!existsSync('dist/agent.mjs')) throw new Error('Run npm run build and npm run native first.');
+assertClientDist(resolve('dist'));
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
 for (const [command, args] of [[resolve('release/RemoteCompanion.exe'), ['--version']], [process.execPath, ['dist/agent.mjs', '--version']]] as const) {
   if (execFileSync(command, args, { encoding: 'utf8', windowsHide: true }).trim() !== pkg.version) throw new Error('Helper build version mismatch. Rebuild both the agent and native executable.');
@@ -17,6 +19,7 @@ copyFileSync('release/RemoteCompanion.exe', join(output, 'RemoteCompanion.exe'))
 copyFileSync('release/companion.ico', join(output, 'companion.ico'));
 cpSync('release/icons', join(output, 'icons'), { recursive: true });
 cpSync('dist', join(output, 'dist'), { recursive: true });
+assertClientDist(join(output, 'dist'));
 writeFileSync(join(output, 'package.json'), JSON.stringify({ name: pkg.name, version: pkg.version, license: pkg.license, private: true, type: 'module', dependencies: pkg.dependencies, overrides: pkg.overrides }, null, 2));
 copyFileSync('package-lock.json', join(output, 'package-lock.json'));
 for (const file of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) copyFileSync(file, join(output, file));

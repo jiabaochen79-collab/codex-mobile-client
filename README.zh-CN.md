@@ -57,6 +57,13 @@ Windows 助手连接本机 Codex 桌面进程，并向独立运营的 relay 服�
 - 下载完成后由用户确认安装；助手更新不会主动停止 Codex 或正在执行的桌面任务。
 - 向手机端报告助手版本和兼容能力。
 
+### 服务权益和问题反馈
+
+- 查看订阅状态、兑换授权码，并在运营者开放购买后在线购买服务权益。
+- 运营者开放试用后，符合条件的电脑可领取一次七天试用；资格和到期时间以服务端为准。
+- 手机和电脑均可提交问题反馈、选择截图、查看回复及跟进处理结果。
+- 服务到期不会停止电脑上已经执行中的 Codex 任务。
+
 ## 下载
 
 最新 Windows 安装包和便携压缩包发布在 [GitHub Releases](https://github.com/jiabaochen79-collab/codex-mobile-client/releases)。同时提供 [Gitee 镜像](https://gitee.com/jiabaochen79-collab/codex-mobile-client/releases)。
@@ -84,6 +91,7 @@ relay 地址、订阅状态和账号策略由具体部署决定，不是本仓�
 
 ```powershell
 npm ci
+npm run audit:public
 npm run check
 npm run native
 npm run build
