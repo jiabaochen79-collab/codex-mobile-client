@@ -14,6 +14,10 @@
 AppId={{B98F4E8B-9CF9-4C68-9718-376041F08A25}
 AppName={#AppName}
 AppVersion={#AppVersion}
+VersionInfoVersion={#AppVersion}.0
+VersionInfoTextVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}.0
+VersionInfoProductTextVersion={#AppVersion}
 AppPublisher=ChatGPT 远程助手项目
 AppComments=独立的非官方 Codex 桌面连接工具
 DefaultDirName={localappdata}\Programs\CodexMobile
