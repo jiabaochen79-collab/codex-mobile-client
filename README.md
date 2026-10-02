@@ -66,7 +66,7 @@ It does **not** contain the relay server, administrator console, payment impleme
 
 ## Download
 
-The latest Windows installer and portable archive are published in the [GitHub Releases](https://github.com/jiabaochen79-collab/codex-mobile-client/releases) page. A mirror is maintained on [Gitee](https://gitee.com/jiabaochen79-collab/codex-mobile-client/releases).
+Windows installers and portable archives are distributed through [GitHub Releases](https://github.com/jiabaochen79-collab/codex-mobile-client/releases). The Gitee mirror will be linked here after its account and release assets have been verified.
 
 For each release, download the installer or archive together with its `.sha256` file and verify the digest before opening it. The current public package is an unsigned Windows installer; Windows may show a SmartScreen warning until an Authenticode certificate is added.
 

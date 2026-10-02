@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { originUrl } from '../src/shared/security.js';
 import { assertClientDist } from './client-boundary.js';
+import { writeWindowsArchive } from './windows-archive.js';
 const origin = originUrl(process.env.RELAY_URL ?? 'http://127.0.0.1:8790');
 if (process.platform !== 'win32') throw new Error('Build the native helper on Windows.');
 if (!existsSync('dist/agent.mjs')) throw new Error('Run npm run build and npm run native first.');
@@ -36,7 +37,7 @@ const archiveName = publicPackage ? 'codex-mobile-windows-public.zip' : 'codex-m
 const archive = resolve('release', archiveName);
 const distributable = ['node.exe', 'RemoteCompanion.exe', 'companion.ico', 'icons', 'dist', 'node_modules', 'package.json', 'package-lock.json', 'relay.json', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'NODE-LICENSE.txt', 'INSTALLER.md', 'REMEMBERED-LOGIN.md', 'COMPATIBILITY.md', 'PLAN-MODE.md', 'QUEUED-SEND.md'];
 for (const file of distributable) if (!existsSync(join(output, file))) throw new Error(`Missing distributable: ${file}`);
-execFileSync('tar.exe', ['-a', '-c', '-f', archive, '-C', output, ...distributable], { windowsHide: true });
+await writeWindowsArchive(output, archive, distributable);
 const digest = createHash('sha256').update(readFileSync(archive)).digest('hex');
 writeFileSync(archive + '.sha256', digest + '  ' + archiveName + '\n');
 console.log(JSON.stringify({ archive, sha256: digest, origin, signed: false }, null, 2));

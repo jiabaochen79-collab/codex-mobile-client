@@ -66,7 +66,7 @@ Windows 助手连接本机 Codex 桌面进程，并向独立运营的 relay 服�
 
 ## 下载
 
-最新 Windows 安装包和便携压缩包发布在 [GitHub Releases](https://github.com/jiabaochen79-collab/codex-mobile-client/releases)。同时提供 [Gitee 镜像](https://gitee.com/jiabaochen79-collab/codex-mobile-client/releases)。
+Windows 安装包和便携压缩包通过 [GitHub Releases](https://github.com/jiabaochen79-collab/codex-mobile-client/releases) 分发。Gitee 镜像入口将在账号及发布资产完成核验后补充。
 
 每个版本都应同时下载 `.sha256` 校验文件，在启动安装包前核对摘要。当前公开安装包未进行 Windows Authenticode 代码签名，Windows 可能显示 SmartScreen 提示，直到后续配置正式签名证书。
 
