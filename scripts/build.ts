@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { VERSION as protocolVersion } from '../src/shared/protocol.js';
 mkdirSync('dist', { recursive: true });
 for (const [name, entry] of [['agent', 'src/agent/main.ts']] as const) {
   // The bundled applications use a modern Node runtime; SQLite is a built-in module.
@@ -15,7 +16,7 @@ if (!statSync(webRoot, { throwIfNoEntry: false } )?.isDirectory()) throw new Err
 function webFiles(root: string, prefix = ''): string[] {
   return readdirSync(join(root, prefix), { withFileTypes: true }).flatMap(entry => {
     const name = prefix ? join(prefix, entry.name) : entry.name;
-    return entry.isDirectory() ? webFiles(root, name) : [name];
+    return entry.isDirectory() ? webFiles(root, name) : [name.replaceAll('\\', '/')];
   }).sort();
 }
 const files = webFiles(webRoot).map(file => {
@@ -25,4 +26,4 @@ const files = webFiles(webRoot).map(file => {
 const treeSha256 = createHash('sha256').update(files.map(file => `${file.path}\0${file.bytes}\0${file.sha256}\n`).join('')).digest('hex');
 let sourceRevision = 'working-tree';
 try { sourceRevision = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim() || sourceRevision; } catch { /* Source archives may not contain Git metadata. */ }
-writeFileSync('dist/client-web-manifest.json', JSON.stringify({ schemaVersion: 1, packageVersion: JSON.parse(readFileSync('package.json', 'utf8')).version, sourceRevision, treeSha256, files }, null, 2) + '\n');
+writeFileSync('dist/client-web-manifest.json', JSON.stringify({ schemaVersion: 1, protocolVersion, packageVersion: JSON.parse(readFileSync('package.json', 'utf8')).version, sourceRevision, treeSha256, files }, null, 2) + '\n');
