@@ -4,8 +4,8 @@ import { Bell, Check, ExternalLink, RefreshCw, ShieldAlert, Smartphone, X } from
 import { api } from './api';
 import type { NotificationItem, NotificationSettings } from '../src/shared/notifications';
 
-const props = defineProps<{ deviceId: string }>();
-const emit = defineEmits<{ close: []; openTask: [taskId: string]; unread: [count: number] }>();
+const props = defineProps<{ deviceId: string; taskLabels: Record<string, { title: string; project?: string }>; resolveTasks: (ids: string[]) => Promise<void>; openTask: (taskId: string) => Promise<boolean> }>();
+const emit = defineEmits<{ close: []; unread: [count: number] }>();
 
 const headers = () => ({ 'X-Remote-Device': props.deviceId });
 const items = ref<NotificationItem[]>([]);
@@ -57,6 +57,7 @@ async function load() {
     vapidPublicKey.value = settingResult.vapidPublicKey ?? null;
     items.value = listResult.items ?? [];
     updateUnread(Number(listResult.unread) || 0);
+    void props.resolveTasks(items.value.map(item => item.taskId));
     await refreshSystemPushState();
   } catch (e: any) { error.value = e.message; }
   finally { loading.value = false; }
@@ -130,8 +131,9 @@ async function changeKind(kind: 'completed' | 'failed', value: boolean) {
 async function readOne(item: NotificationItem) {
   if (busy.value) return; busy.value = true; error.value = '';
   try {
+    if (!await props.openTask(item.taskId)) return;
     await api(`/api/notifications/${encodeURIComponent(item.id)}/read`, undefined, headers(), 'POST');
-    item.readAt ??= Date.now(); updateUnread(items.value.filter(row => !row.readAt).length); emit('openTask', item.taskId);
+    item.readAt ??= Date.now(); updateUnread(items.value.filter(row => !row.readAt).length); emit('close');
   } catch (e: any) { error.value = e.message; }
   finally { busy.value = false; }
 }
@@ -147,6 +149,7 @@ function onIncoming(event: Event) {
   const index = items.value.findIndex(row => row.id === item.id);
   if (index >= 0) items.value[index] = item; else items.value.unshift(item);
   updateUnread(items.value.filter(row => !row.readAt).length);
+  void props.resolveTasks([item.taskId]);
 }
 onMounted(() => { window.addEventListener('remote-notification', onIncoming); void load(); });
 onUnmounted(() => window.removeEventListener('remote-notification', onIncoming));
@@ -165,10 +168,10 @@ onUnmounted(() => window.removeEventListener('remote-notification', onIncoming))
         <p v-if="info || systemPushState === 'enabled'" class="notification-success" role="status"><Check :size="16"/>{{ info || '系统推送已开启。' }}</p>
         <div class="notification-list-heading"><strong>最近提醒</strong><button v-if="unread" class="text-button" :disabled="busy" @click="readAll">全部标为已读</button></div>
         <div v-if="!items.length" class="notification-empty">暂无任务完成提醒</div>
-        <div v-else class="notification-list"><button v-for="item in items" :key="item.id" class="notification-item" :class="{ unread: !item.readAt }" @click="readOne(item)"><span class="notification-status" :class="item.status"><Check v-if="item.status === 'completed'" :size="15"/><ShieldAlert v-else :size="15"/></span><span class="notification-item-text"><strong>{{ statusLabel(item.status) }}</strong><small>{{ formatTime(item.occurredAt) }}</small></span><ExternalLink :size="15"/></button></div>
+        <div v-else class="notification-list"><button v-for="item in items" :key="item.id" class="notification-item" :class="{ unread: !item.readAt }" :disabled="busy" @click="readOne(item)"><span class="notification-status" :class="item.status"><Check v-if="item.status === 'completed'" :size="15"/><ShieldAlert v-else :size="15"/></span><span class="notification-item-text"><strong :title="taskLabels[item.taskId]?.title || item.taskId">{{ taskLabels[item.taskId]?.title || `任务 ${item.taskId.slice(0, 8)}` }}</strong><small v-if="taskLabels[item.taskId]?.project" class="notification-project">{{ taskLabels[item.taskId].project }}</small><small>{{ statusLabel(item.status) }} · {{ formatTime(item.occurredAt) }}</small></span><ExternalLink :size="15"/></button></div>
       </template>
       <p v-if="error" class="alert" role="alert">{{ error }}</p>
-      <p class="notification-footnote">通知只显示状态和时间，不包含提示词、回复、命令、文件、密码或密钥；站内记录保留 30 天。</p>
+      <p class="notification-footnote">系统通知只显示状态和时间；登录后的提醒列表显示任务及项目名称，无法读取名称时显示任务编号。站内记录保留 30 天。</p>
     </section>
   </div>
 </template>
@@ -176,4 +179,5 @@ onUnmounted(() => window.removeEventListener('remote-notification', onIncoming))
 <style scoped>
 .notification-backdrop{z-index:55!important}.notification-modal{width:min(100%,440px);max-height:calc(100dvh - 24px);padding:18px;overflow-y:auto}.notification-modal .modal-title h2{display:flex;align-items:center;gap:7px}.notification-loading{display:flex;align-items:center;gap:9px;padding:28px 0;color:#71818a}.notification-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:3px 0 14px;border-bottom:1px solid #e4eaec}.notification-toggle-row>div{min-width:0}.notification-toggle-row strong,.notification-toggle-row small{display:block}.notification-toggle-row strong{font-size:14px}.notification-toggle-row small{margin-top:4px;color:#78878d;font-size:11px}.notification-toggle-row .button{white-space:nowrap}.notification-kinds{display:flex;flex-wrap:wrap;gap:14px;padding:13px 0;font-size:12px;color:#4e626a}.notification-kinds label{display:flex;align-items:center;gap:7px}.notification-browser-push{margin-bottom:10px}.notification-info,.notification-success{display:flex;align-items:flex-start;gap:7px;padding:10px;background:#f5f8f9;color:#667981;font-size:12px;line-height:1.6}.notification-info svg,.notification-success svg{flex-shrink:0;margin-top:2px}.notification-list-heading{display:flex;align-items:center;justify-content:space-between;margin-top:20px;padding-bottom:7px;border-bottom:1px solid #e4eaec;font-size:13px}.notification-empty{padding:26px 0;text-align:center;color:#85949b;font-size:12px}.notification-list{display:grid}.notification-item{display:flex;align-items:center;gap:10px;width:100%;min-height:56px;padding:9px 2px;border:0;border-bottom:1px solid #edf0f1;background:transparent;text-align:left;color:#344c56}.notification-item:hover{background:#f6f9fa}.notification-item.unread{background:#f7fbfa}.notification-status{display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:#e7f2ec;color:#27785b;flex-shrink:0}.notification-status.failed,.notification-status.interrupted{background:#fff0e9;color:#ad542e}.notification-item-text{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px}.notification-item-text strong{font-size:13px;font-weight:550}.notification-item-text small{font-size:11px;color:#7a8990}.notification-footnote{margin-top:14px;color:#8a979c;font-size:11px;line-height:1.6}
 @media(max-width:400px){.notification-backdrop{padding:12px}.notification-modal{padding:15px}.notification-toggle-row{align-items:flex-start;flex-direction:column}.notification-toggle-row .button{align-self:stretch}}
+.notification-item-text strong,.notification-project{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.notification-item>svg{flex-shrink:0}
 </style>

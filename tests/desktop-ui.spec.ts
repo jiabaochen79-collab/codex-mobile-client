@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-test.use({ viewport: { width: 900, height: 780 }, launchOptions: { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
+test.use({ viewport: { width: 900, height: 780 }, launchOptions: process.env.TEST_BROWSER === 'webkit' ? {} : { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
 const origin = 'http://127.0.0.1:18890';
 
 for (const mode of ['custom', 'automatic']) {

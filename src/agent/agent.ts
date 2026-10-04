@@ -43,10 +43,14 @@ export class Agent {
   private failures = 0;
   private lastPong = 0;
   private lastPing = 0;
+  private lastStatus = '';
+  private lastStatusAt = 0;
+  private refreshing = false;
   private closing = false;
   private grants = new Map<string, number>();
   private pairLimit = new RateLimit(5, 15 * 60000);
   private queue = Promise.resolve();
+  private commandWork: { priority: number; work: () => Promise<void> }[] = [];
   private queued = 0;
   private mediaQueue = Promise.resolve();
   private mediaQueued = 0;
@@ -106,10 +110,10 @@ export class Agent {
       stage = 'connect';
       const url = new URL('/ws/host', this.origin); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
       url.searchParams.set('deviceId', credentials.id); url.searchParams.set('epoch', this.epoch);
-      const socket = new WebSocket(url, { headers: { Authorization: `Bearer ${credentials.secret}` }, maxPayload: MAX_FRAME, perMessageDeflate: false, handshakeTimeout: 10000, followRedirects: false });
+      const socket = new WebSocket(url, { headers: { Authorization: `Bearer ${credentials.secret}` }, maxPayload: MAX_FRAME, perMessageDeflate: false, handshakeTimeout: 30000, followRedirects: false });
       let socketError: ReturnType<typeof connectionFailure> | undefined;
       this.socket = socket;
-      socket.on('open', () => { this.connection = 'online'; this.connectionError = null; this.failures = 0; this.lastPong = Date.now(); this.lastPing = 0; this.computerIdentitySent = false; void this.announceComputer(); void this.refresh(); void this.flushNotifications(); void this.updater?.reportPrevious(); void this.updater?.connected(); });
+      socket.on('open', () => { this.connection = 'online'; this.connectionError = null; this.failures = 0; this.lastPong = Date.now(); this.lastPing = 0; this.lastStatus = ''; this.computerIdentitySent = false; void this.announceComputer(); void this.refresh(); void this.flushNotifications(); void this.updater?.reportPrevious(); void this.updater?.connected(); });
       socket.on('pong', () => { this.lastPong = Date.now(); });
       socket.on('message', (data, binary) => { if (this.socket === socket) { if (binary) this.uploadChunk(Buffer.from(data as Buffer)); else void this.message(data.toString()); } });
       socket.on('unexpected-response', (_req, response) => { socketError = connectionFailure('connect', new ConnectionHttpError(response.statusCode ?? 502)); response.resume(); socket.terminate(); });
@@ -120,20 +124,27 @@ export class Agent {
   private retry() {
     if (this.closing || this.reconnect) return;
     this.connection = 'offline';
-    this.reconnect = setTimeout(() => { this.reconnect = undefined; void this.connect(); }, Math.min(15000, 1000 * 2 ** Math.min(++this.failures, 4)));
+    this.reconnect = setTimeout(() => { this.reconnect = undefined; void this.connect(); }, Math.min(15000, 1000 * 2 ** Math.min(++this.failures, 4)) + Math.floor(Math.random() * 500));
   }
   private async refresh() {
-    if (this.closing) return;
+    if (this.closing || this.refreshing) return;
+    this.refreshing = true;
+    try {
     if (this.socket?.readyState === WebSocket.OPEN) {
-      if (Date.now() - this.lastPong > 35000) { this.socket.terminate(); return; }
+      if (Date.now() - this.lastPong > 75000) { this.socket.terminate(); return; }
       if (Date.now() - this.lastPing > 10000) { this.socket.ping(); this.lastPing = Date.now(); }
     }
     if (this.codeExpires !== null && Date.now() >= this.codeExpires) this.refreshCode();
     this.client = await this.options.adapter.status();
-    this.client = { ...this.client, capabilities: [...new Set([...(this.client.capabilities ?? []), 'queued-send', 'multi-terminal'])] };
+    this.client = { ...this.client, capabilities: [...new Set([...(this.client.capabilities ?? []), 'queued-send', 'multi-terminal', 'command-status'])] };
     if (this.closing) { this.options.adapter.close(); return; }
     for (const [id, until] of this.grants) if (until <= Date.now()) { this.store.deleteGrant(this.origin, id); this.grants.delete(id); }
-    this.send({ type: 'status', helperVersion: packageInfo.version, enabled: this.enabled, status: this.client, update: this.updater?.state, authorizedSessions: [...this.grants.keys()] });
+    const frame = { type: 'status', helperVersion: packageInfo.version, enabled: this.enabled, status: this.client, update: this.updater?.state, authorizedSessions: [...this.grants.keys()] };
+    const serialized = JSON.stringify(frame);
+    if (this.socket?.readyState === WebSocket.OPEN && (serialized !== this.lastStatus || Date.now() - this.lastStatusAt >= 30000)) {
+      this.send(frame); this.lastStatus = serialized; this.lastStatusAt = Date.now();
+    }
+    } finally { this.refreshing = false; }
   }
   private send(message: unknown) {
     if (this.socket?.readyState !== WebSocket.OPEN) return;
@@ -144,7 +155,7 @@ export class Agent {
   private async message(text: string) {
     if (this.closing) return;
     let m: any; try { m = JSON.parse(text); } catch { return; }
-    if (m.type === 'queue-authorization') { const parsed = z.object({ id: uid, allowed: z.boolean(), validForMs: z.number().int().min(0).max(2000) }).safeParse(m); if (parsed.success) { const pending = this.queueAuthorizations.get(parsed.data.id); if (pending) { clearTimeout(pending.timer); this.queueAuthorizations.delete(parsed.data.id); pending.resolve(parsed.data); } } return; }
+    if (m.type === 'queue-authorization') { const parsed = z.object({ id: uid, allowed: z.boolean(), validForMs: z.number().int().min(0).max(10000) }).safeParse(m); if (parsed.success) { const pending = this.queueAuthorizations.get(parsed.data.id); if (pending) { clearTimeout(pending.timer); this.queueAuthorizations.delete(parsed.data.id); pending.resolve(parsed.data); } } return; }
     if (m.type === 'notification-ack') { const parsed = z.object({ type: z.literal('notification-ack'), eventId: z.string().regex(/^[a-f0-9]{64}$/), accepted: z.boolean() }).safeParse(m); if (parsed.success && parsed.data.accepted) this.store.ackNotification(parsed.data.eventId); return; }
     if (m.type === 'subscription') { const parsed = subscriptionSchema.safeParse(m.subscription); if (parsed.success) this.subscription = parsed.data; return; }
     if (m.type === 'control') {
@@ -202,6 +213,7 @@ export class Agent {
         else if (command.method === 'upload.complete') result = this.uploads.complete(command.params.attachmentId, sessionId);
         else if (command.method === 'upload.remove') result = this.uploads.remove(command.params.attachmentId, sessionId);
         else if (command.method === 'queue.list') result = { queued: this.sends.list(command.params.id) };
+        else if (command.method === 'command.status') result = this.store.commandStatus(command.params.requestId, sessionId, command.params.id);
         else if (command.method === 'read') {
           const snapshot = await this.options.adapter.execute({ ...command, params: { ...command.params, ifRevision: undefined } }, frame.id) as Snapshot;
           result = snapshotResponse({ ...snapshot, queued: this.sends.list(command.params.id) }, command.params.ifRevision);
@@ -227,7 +239,7 @@ export class Agent {
           const executed = await this.options.adapter.execute(command, frame.id, dispatch, attachments);
           if (command.method === 'create' && typeof (executed as { threadId?: unknown })?.threadId === 'string') this.completionMonitor.watch((executed as { threadId: string }).threadId, startedAt);
           return executed;
-        });
+        }, sessionId);
        if (this.enabled && this.grants.has(sessionId)) {
           if (frame.command.method === 'seen' && (result as any)?.seen === true && 'turnId' in frame.command.params && frame.command.params.turnId) this.send({ type: 'notification.seen', taskId: frame.command.params.id, turnId: frame.command.params.turnId });
           this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, result });
@@ -235,7 +247,13 @@ export class Agent {
       } catch (error) { this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, error: publicError(error) }); }
       finally { if (image) this.mediaQueued--; else this.queued--; if (frame.command.method === 'stop') this.stopping.delete(frame.command.params.id); }
     };
-    if (frame.command.method === 'queue.remove') void work(); else if (image) this.mediaQueue = this.mediaQueue.then(work); else this.queue = this.queue.then(work);
+    if (frame.command.method === 'queue.remove' || frame.command.method === 'command.status') void work();
+    else if (image) this.mediaQueue = this.mediaQueue.then(work);
+    else {
+      this.commandWork.push({ priority: isSafetyCommand(frame.command) ? 0 : readMethods.has(frame.command.method) ? 2 : 1, work });
+      this.commandWork.sort((a, b) => a.priority - b.priority);
+      this.queue = this.queue.then(async () => { await this.commandWork.shift()?.work(); });
+    }
   }
   private async flushNotifications() {
     if (this.closing || !this.credentials || !this.enabled || this.socket?.readyState !== WebSocket.OPEN) return;
@@ -251,7 +269,7 @@ export class Agent {
   private updateSubscriptions() { this.options.adapter.setSubscriptions?.([...new Set([...this.sends.entries().map(r => r.conversation), ...this.subscriptions])].slice(0, 6)); }
   private queueAuthorization(sessionId: string) {
     return new Promise<{ allowed: boolean; validForMs: number; retryable?: boolean }>(resolve => {
-      const id = randomUUID(); const timer = setTimeout(() => { this.queueAuthorizations.delete(id); resolve({ allowed: false, validForMs: 0, retryable: true }); }, 3000);
+      const id = randomUUID(); const timer = setTimeout(() => { this.queueAuthorizations.delete(id); resolve({ allowed: false, validForMs: 0, retryable: true }); }, 15000);
       this.queueAuthorizations.set(id, { resolve, timer }); this.send({ type: 'queue-authorize', id, sessionId });
     });
   }
@@ -278,7 +296,8 @@ export class Agent {
       const requestedAt = performance.now(); const proof = await this.queueAuthorization(current.session); if (proof.retryable) throw new RemoteError('QUEUE_RETRY', '服务器连接暂时中断，队列将自动重试。'); const deadline = requestedAt + proof.validForMs;
       const authorize = () => {
         if (this.closing || !this.enabled || this.connection !== 'online' || (this.grants.get(current.session) ?? 0) <= Date.now()) throw new RemoteError('AUTH', '远控授权已失效，队列已暂停。');
-        if (!proof.allowed || performance.now() >= deadline || this.subscription?.access === false) throw new RemoteError('SUBSCRIPTION_REQUIRED', '服务器授权或订阅待确认，队列已暂停。');
+        if (!proof.allowed || this.subscription?.access === false) throw new RemoteError('SUBSCRIPTION_REQUIRED', '服务器授权或订阅待确认，队列已暂停。');
+        if (performance.now() >= deadline) throw new RemoteError('QUEUE_RETRY', '授权确认延迟，队列将自动重新核对。');
         if (this.stopping.has(current.conversation) || !['pending','sending'].includes(this.sends.get(current.id, current.conversation).state)) throw new RemoteError('QUEUE_PAUSED', '队列已暂停。');
       };
       authorize(); this.sends.mark(current, 'sending'); this.notifyQueue(current.conversation);
@@ -287,7 +306,7 @@ export class Agent {
       this.sends.finish(current); this.notifyQueue(current.conversation); this.updateSubscriptions();
     } catch (e) {
       const row = this.sends.entries(entry.conversation).find(r => r.id === entry.id); if (!row) return;
-      if (!dispatched && e instanceof RemoteError && ['BUSY', 'QUEUE_RETRY'].includes(e.code)) { if (pending) this.sends.mark(row, 'pending', e.code === 'QUEUE_RETRY' ? e.message : null); this.notifyQueue(entry.conversation); this.updateSubscriptions(); return; }
+      if (!dispatched && e instanceof RemoteError && ['BUSY', 'QUEUE_RETRY', 'CLIENT_UNAVAILABLE', 'OFFLINE'].includes(e.code)) { if (pending) this.sends.mark(row, 'pending', e.code === 'BUSY' ? null : e.message); this.notifyQueue(entry.conversation); this.updateSubscriptions(); return; }
       if (!taskRead && e instanceof RemoteError && e.code === 'NOT_FOUND') { for (const item of this.sends.entries(entry.conversation)) this.sends.finish(item); }
       else if (!pending) return;
       else { this.sends.mark(row, dispatched ? 'uncertain' : 'paused', dispatched ? '发送结果待核对，不会自动重发；请查看原任务后处理。' : e instanceof RemoteError ? e.message : '待发送内容暂不可用，请核对后继续。'); this.sends.pause('前一条消息需要处理，队列已暂停。', entry.conversation); }

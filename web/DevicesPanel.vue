@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ArrowDown, ArrowRight, ArrowUp, Check, Ellipsis, Eye, EyeOff, LogOut, Monitor, Pencil, Plus, RefreshCw, ShieldCheck, Smartphone, Ticket, Trash2, X } from 'lucide-vue-next';
 import { api } from './api';
 import MobilePanel from './MobilePanel.vue';
@@ -35,6 +35,8 @@ function normalizeDeviceId() { deviceId.value = deviceIdDigits.value.slice(0, 9)
 const deviceState = (device: PairedDevice) => device.disabled ? '已被管理员封禁' : !device.authorized ? '需要重新验证' : !device.online ? '电脑离线' : !device.enabled ? '远控已关闭' : '在线';
 let directoryRevision = 0; let polling: ReturnType<typeof setInterval> | undefined; let disposed = false;
 const webUpdateAvailable = ref(false); let latestWebEntry = ''; let checkingWebVersion = false;
+const pageEntry = document.querySelector<HTMLScriptElement>('script[type="module"][src]')?.src;
+let openingNotificationDevice = false;
 try {
   const saved = JSON.parse(localStorage.getItem('remote-login') ?? '{}'); remember.value = saved?.remember !== false;
   if (remember.value && typeof saved?.deviceId === 'string' && /^[1-9][0-9]{8}$/.test(saved.deviceId)) deviceId.value = rememberedDeviceId.value = saved.deviceId;
@@ -114,13 +116,45 @@ async function loggedOut(id: string) { clearPanel(id); if (activeId.value === id
 async function checkWebVersion() {
   if (!import.meta.env.PROD || activeId.value || connecting.value || disposed || document.visibilityState !== 'visible' || checkingWebVersion) return;
   checkingWebVersion = true;
-  try { const result = await api('/api/web-version'); if (activeId.value || connecting.value || disposed || typeof result.entry !== 'string' || result.entry === new URL(import.meta.url).pathname) return; latestWebEntry = result.entry; webUpdateAvailable.value = true; }
+  try { const result = await api('/api/web-version'); if (activeId.value || connecting.value || disposed || !pageEntry || typeof result.entry !== 'string' || result.entry === new URL(pageEntry).pathname) return; latestWebEntry = result.entry; webUpdateAvailable.value = true; }
   catch {} finally { checkingWebVersion = false; }
 }
 function refreshWeb() { const url = new URL(location.href); url.searchParams.set('v', latestWebEntry); location.replace(url.href); }
 function foreground() { if (document.visibilityState !== 'visible') return; void refreshDirectory().catch(() => {}); void checkWebVersion(); }
+async function openNotificationDevice() {
+  const url = new URL(location.href);
+  const id = url.searchParams.get('notification'); const targetId = url.searchParams.get('notificationDevice');
+  if (restoring.value || disposed || openingNotificationDevice || working.value || connecting.value || panel.value?.leaveState().busy || !id || !targetId || !/^[0-9a-f-]{36}$/i.test(id) || !/^[1-9][0-9]{8}$/.test(targetId)) return;
+  const device = devices.value.find(row => row.deviceId === targetId);
+  if (!device?.authorized) {
+    error.value = '请先验证通知所属电脑，再查看任务。';
+    deviceId.value = targetId; code.value = ''; adding.value = true; directoryOpen.value = false;
+    return;
+  }
+  openingNotificationDevice = true;
+  try {
+    await switchTo(device);
+    await nextTick();
+    if (activeId.value === targetId) await panel.value?.openNotificationFromUrl();
+  } finally {
+    openingNotificationDevice = false;
+    const current = new URL(location.href);
+    if (current.searchParams.get('notification') !== id || current.searchParams.get('notificationDevice') !== targetId) void openNotificationDevice();
+  }
+}
+function notificationMessage(event: MessageEvent) {
+  if (event.data?.type !== 'notification.open' || typeof event.data.url !== 'string') return;
+  let url: URL;
+  try { url = new URL(event.data.url); } catch { return; }
+  if (url.origin !== location.origin || url.pathname !== '/' || !/^[0-9a-f-]{36}$/i.test(url.searchParams.get('notification') ?? '') || !/^[1-9][0-9]{8}$/.test(url.searchParams.get('notificationDevice') ?? '')) return;
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+  event.ports[0]?.postMessage('notification.received');
+  void openNotificationDevice();
+}
+watch([working, connecting, () => panel.value?.leaveState().busy], () => { void openNotificationDevice(); });
 function closeOverlay(event: KeyboardEvent) { if (event.key !== 'Escape' || working.value || connecting.value) return; if (pendingSwitch.value) pendingSwitch.value = undefined; else if (removeTarget.value) removeTarget.value = undefined; else if (confirmLogout.value) confirmLogout.value = false; else if (editingId.value) editingId.value = ''; else if (adding.value && devices.value.length) closePairing(); else directoryOpen.value = false; }
 onMounted(async () => {
+  navigator.serviceWorker?.addEventListener('message', notificationMessage);
   try {
     await refreshDirectory(true);
     let last = ''; try { last = sessionStorage.getItem('remote-active-device') ?? ''; } catch {}
@@ -132,12 +166,13 @@ onMounted(async () => {
     else if (linkedDevice) { deviceId.value = linkedDevice; adding.value = true; }
   } catch (e: any) { if (!error.value) error.value = e.message; }
   finally { restoring.value = false; }
+  if (new URL(location.href).searchParams.has('notification')) void openNotificationDevice();
   resumeReload.ready();
   document.addEventListener('visibilitychange', foreground); window.addEventListener('pageshow', foreground); window.addEventListener('keydown', closeOverlay);
   polling = setInterval(() => { if (document.visibilityState === 'visible') { if (directoryVisible.value || activeId.value) void refreshDirectory().catch(() => {}); else void checkWebVersion(); } }, 15000);
   void checkWebVersion();
 });
-onUnmounted(() => { disposed = true; resumeReload.dispose(); clearInterval(polling); document.removeEventListener('visibilitychange', foreground); window.removeEventListener('pageshow', foreground); window.removeEventListener('keydown', closeOverlay); });
+onUnmounted(() => { disposed = true; navigator.serviceWorker?.removeEventListener('message', notificationMessage); resumeReload.dispose(); clearInterval(polling); document.removeEventListener('visibilitychange', foreground); window.removeEventListener('pageshow', foreground); window.removeEventListener('keydown', closeOverlay); });
 </script>
 
 <template>

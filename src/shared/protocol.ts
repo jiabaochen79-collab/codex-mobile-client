@@ -25,6 +25,7 @@ export const commandSchema = z.discriminatedUnion('method', [
   z.object({ method: z.literal('image.read'), params: z.object({ id: uid, imageId: z.string().regex(/^[a-f0-9]{64}$/), variant: z.enum(['thumbnail', 'full']) }).strict() }).strict(),
   z.object({ method: z.literal('send'), params: z.object({ id: uid, text: z.string().trim().max(32000), epoch: epochSchema, attachmentIds: z.array(uid).max(5).optional(), mode: z.enum(['queue','steer']).optional(), turnId: epochSchema.optional() }).strict().refine(p => (!!p.text || !!p.attachmentIds?.length) && (p.mode !== 'steer' || !!p.turnId)) }).strict(),
   z.object({ method: z.literal('queue.list'), params: z.object({ id: uid }).strict() }).strict(),
+  z.object({ method: z.literal('command.status'), params: z.object({ id: uid, requestId: uid }).strict() }).strict(),
   z.object({ method: z.literal('queue.remove'), params: z.object({ id: uid, queuedId: uid }).strict() }).strict(),
   z.object({ method: z.literal('queue.resume'), params: z.object({ id: uid, queuedId: uid, epoch: epochSchema }).strict() }).strict(),
   z.object({ method: z.literal('stop'), params: z.object({ id: uid, turnId: z.string().min(1).max(200), epoch: z.string().min(1).max(200) }).strict() }).strict(),
@@ -56,8 +57,8 @@ export function supportsDesktopCommand(capabilities: string[] | undefined, comma
   return !feature || !capabilities?.includes('compatibility-checked') || capabilities.includes(feature);
 }
 export const commandFrame = z.object({ type: z.literal('command'), id: uid, command: commandSchema, controlEpoch: uid.optional() }).strict();
-export const readMethods = new Set<Command['method']>(['list', 'read', 'image.read', 'safety.status', 'projects', 'models', 'activity', 'seen', 'upload.status', 'queue.list']);
-export const isSafetyCommand = (command: Command) => command.method === 'stop' || command.method === 'safety.status' || command.method === 'upload.remove' || command.method === 'queue.remove' || command.method === 'respond' && command.params.decision === 'decline' && command.params.answers === undefined;
+export const readMethods = new Set<Command['method']>(['list', 'read', 'image.read', 'safety.status', 'projects', 'models', 'activity', 'seen', 'upload.status', 'queue.list', 'command.status']);
+export const isSafetyCommand = (command: Command) => command.method === 'stop' || command.method === 'safety.status' || command.method === 'command.status' || command.method === 'upload.remove' || command.method === 'queue.remove' || command.method === 'respond' && command.params.decision === 'decline' && command.params.answers === undefined;
 export type ControlLease = { sessionId: string; clientId: string; epoch: string; expires: number };
 export type ControlState = { role: 'controller' | 'viewer'; epoch: string | null; expires: number | null; terminals: { id: string; label: string; controlling: boolean }[] };
 export type ModelOption = { id: string; name: string; efforts: string[]; defaultEffort: string; images: boolean };
@@ -70,7 +71,7 @@ export type Project = { id: string; name: string; path: string; count?: number }
 export type Conversation = { id: string; title: string; cwd: string; updatedAt: number; projectId?: string | null; running?: boolean; unread?: boolean; completionId?: string };
 export type MessageImage = { id: string; alt: string };
 export const MAX_IMAGE_BYTES = 1024 * 1024;
-export type Message = { id: string; role: 'user' | 'assistant' | 'tool'; text: string; images?: MessageImage[]; status?: string; turnId?: string; turnStatus?: string; phase?: 'commentary' | 'final' | 'reasoning' };
+export type Message = { id: string; role: 'user' | 'assistant' | 'tool'; text: string; images?: MessageImage[]; status?: string; turnId?: string; turnStatus?: string; turnReason?: string; phase?: 'commentary' | 'final' | 'reasoning' };
 export type Interaction = { id: string | number; kind: 'command' | 'file' | 'input' | 'plan' | 'unsupported'; title: string; detail: string; plan?: { turnId: string; revision: string }; questions?: { id: string; question: string; options: { label: string; description?: string }[] }[] };
 export type QueuedMessage = { id: string; text: string; attachments: { id: string; name: string }[]; state: 'pending' | 'paused' | 'sending' | 'uncertain'; reason: string | null; created: number };
 export type Snapshot = { id: string; title: string; epoch: string; turnId: string | null; busy: boolean; messages: Message[]; requests: Interaction[]; hasMore: boolean; settings?: ThreadSettings; completionId?: string; revision?: string; lastTurnStatus?: string; lastTurnId?: string | null; nativeQueuedCount?: number | null; queued?: QueuedMessage[] };

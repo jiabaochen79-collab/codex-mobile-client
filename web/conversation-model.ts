@@ -1,6 +1,6 @@
 import type { Message, Snapshot } from '../src/shared/protocol';
 
-export type DisplayTurn = { id: string; status: string; users: Message[]; process: Message[]; results: Message[] };
+export type DisplayTurn = { id: string; status: string; reason?: string; users: Message[]; process: Message[]; results: Message[] };
 export function conversationTurns(snapshot: Snapshot | null): DisplayTurn[] {
   if (!snapshot) return [];
   const groups: { id: string; status: string; messages: Message[]; legacy: boolean }[] = [];
@@ -21,6 +21,6 @@ export function conversationTurns(snapshot: Snapshot | null): DisplayTurn[] {
       if (last) results = [last];
     }
     const resultIds = new Set(results.map(m => m.id));
-    return { id: group.id, status, users: group.messages.filter(m => m.role === 'user'), process: group.messages.filter(m => m.role !== 'user' && !resultIds.has(m.id)), results };
+    return { id: group.id, status, reason: group.messages.find(m => m.turnReason)?.turnReason, users: group.messages.filter(m => m.role === 'user'), process: group.messages.filter(m => m.role !== 'user' && !resultIds.has(m.id)), results };
   });
 }

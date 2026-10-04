@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mockPairedBrowser } from './paired-browser-fixture';
 
 // Run against tests/browser-fixture.ts; all task data below is isolated browser state.
-test.use({ viewport: { width: 390, height: 844 }, launchOptions: { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
+test.use({ viewport: { width: 390, height: 844 }, launchOptions: process.env.TEST_BROWSER === 'webkit' ? {} : { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
 const origin = 'http://127.0.0.1:18890';
 const active = { id: '12345678-1234-4234-8234-123456789abc', title: '正常任务', cwd: 'C:/test', updatedAt: 1, projectId: 'project-a' };
 const stale = { ...active, id: '23456789-1234-4234-8234-123456789abc', title: '待移除任务' };

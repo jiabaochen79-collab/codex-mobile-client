@@ -1,4 +1,4 @@
-import { cpSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -19,6 +19,7 @@ copyFileSync(process.execPath, join(output, 'node.exe'));
 copyFileSync('release/RemoteCompanion.exe', join(output, 'RemoteCompanion.exe'));
 copyFileSync('release/companion.ico', join(output, 'companion.ico'));
 cpSync('release/icons', join(output, 'icons'), { recursive: true });
+rmSync(join(output, 'dist'), { recursive: true, force: true });
 cpSync('dist', join(output, 'dist'), { recursive: true });
 assertClientDist(join(output, 'dist'));
 writeFileSync(join(output, 'package.json'), JSON.stringify({ name: pkg.name, version: pkg.version, license: pkg.license, private: true, type: 'module', dependencies: pkg.dependencies, overrides: pkg.overrides }, null, 2));

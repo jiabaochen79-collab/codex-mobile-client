@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import sharp from 'sharp';
-test.use({ viewport: { width: 390, height: 844 }, launchOptions: { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
+test.use({ viewport: { width: 390, height: 844 }, launchOptions: process.env.TEST_BROWSER === 'webkit' ? {} : { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
 const origin = 'http://127.0.0.1:18890';
 let deviceId: string;
 test.beforeEach(async ({ request }) => {

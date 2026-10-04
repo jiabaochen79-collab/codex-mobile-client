@@ -7,13 +7,18 @@ import type { LocalNotificationEvent } from '../shared/notifications.js';
 
 export class AgentStore {
   db: DatabaseSync;
+  private runningCommands = new Set<string>();
   constructor(dir: string, private nativeExe?: string) {
     privateDirectory(dir); this.db = new DatabaseSync(join(dir, 'agent.sqlite'));
     this.db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, digest TEXT NOT NULL, result TEXT, created INTEGER NOT NULL);');
+    const commandColumns = this.db.prepare('PRAGMA table_info(commands)').all();
+    for (const name of ['session', 'conversation']) if (!commandColumns.some(c => c.name === name)) this.db.exec(`ALTER TABLE commands ADD COLUMN ${name} TEXT`);
     this.db.exec('CREATE TABLE IF NOT EXISTS remembered_grants (origin TEXT NOT NULL, id TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(origin,id));');
     this.db.exec('CREATE TABLE IF NOT EXISTS notification_cursors (path TEXT PRIMARY KEY, offset INTEGER NOT NULL, mtime INTEGER NOT NULL, size INTEGER NOT NULL, fileId TEXT NOT NULL DEFAULT \'\', baselineAt INTEGER NOT NULL, remainder TEXT NOT NULL);');
     if (!this.db.prepare('PRAGMA table_info(notification_cursors)').all().some(c => c.name === 'fileId')) this.db.exec("ALTER TABLE notification_cursors ADD COLUMN fileId TEXT NOT NULL DEFAULT ''");
-    this.db.exec('CREATE TABLE IF NOT EXISTS notification_watches (taskId TEXT PRIMARY KEY, startedAt INTEGER NOT NULL);');
+    this.db.exec('CREATE TABLE IF NOT EXISTS notification_watches (taskId TEXT PRIMARY KEY, startedAt INTEGER NOT NULL, lastWatchedAt INTEGER NOT NULL DEFAULT 0);');
+    if (!this.db.prepare('PRAGMA table_info(notification_watches)').all().some(c => c.name === 'lastWatchedAt')) this.db.exec('ALTER TABLE notification_watches ADD COLUMN lastWatchedAt INTEGER NOT NULL DEFAULT 0');
+    this.db.exec('UPDATE notification_watches SET lastWatchedAt=startedAt WHERE lastWatchedAt=0');
     this.db.exec('CREATE TABLE IF NOT EXISTS notification_outbox (eventId TEXT PRIMARY KEY, taskId TEXT NOT NULL, turnId TEXT NOT NULL, status TEXT NOT NULL, occurredAt INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, lastAttempt INTEGER, createdAt INTEGER NOT NULL, ackedAt INTEGER);');
     try { this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS notification_outbox_round_status ON notification_outbox(taskId,turnId,status);'); }
     catch {
@@ -62,12 +67,12 @@ export class AgentStore {
     this.db.prepare('INSERT INTO notification_cursors(path,offset,mtime,size,fileId,baselineAt,remainder) VALUES(?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,mtime=excluded.mtime,size=excluded.size,fileId=excluded.fileId,baselineAt=excluded.baselineAt,remainder=excluded.remainder').run(cursor.path, cursor.offset, cursor.mtime, cursor.size, cursor.fileId, cursor.baselineAt, cursor.remainder);
   }
   watchNotificationTask(taskId: string, startedAt: number) {
-    this.db.prepare('INSERT INTO notification_watches(taskId,startedAt) VALUES(?,?) ON CONFLICT(taskId) DO UPDATE SET startedAt=MIN(startedAt,excluded.startedAt)').run(taskId, startedAt);
+    this.db.prepare('INSERT INTO notification_watches(taskId,startedAt,lastWatchedAt) VALUES(?,?,?) ON CONFLICT(taskId) DO UPDATE SET startedAt=MIN(startedAt,excluded.startedAt),lastWatchedAt=MAX(lastWatchedAt,excluded.lastWatchedAt)').run(taskId, startedAt, startedAt);
   }
   notificationWatch(taskId: string) {
     return this.db.prepare('SELECT startedAt FROM notification_watches WHERE taskId=?').get(taskId) as { startedAt: number } | undefined;
   }
-  notificationWatchIds() { return (this.db.prepare('SELECT taskId FROM notification_watches ORDER BY startedAt DESC LIMIT 200').all() as { taskId: string }[]).map(row => row.taskId); }
+  notificationWatchIds() { return (this.db.prepare('SELECT taskId FROM notification_watches ORDER BY lastWatchedAt DESC LIMIT 200').all() as { taskId: string }[]).map(row => row.taskId); }
   recordNotifications(events: LocalNotificationEvent[], cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; remainder: string }) {
     this.db.exec('BEGIN');
     try {
@@ -83,12 +88,21 @@ export class AgentStore {
   }
   markNotificationAttempt(eventId: string) { this.db.prepare('UPDATE notification_outbox SET attempts=attempts+1,lastAttempt=? WHERE eventId=? AND ackedAt IS NULL').run(Date.now(), eventId); }
   ackNotification(eventId: string) { this.db.prepare('UPDATE notification_outbox SET ackedAt=? WHERE eventId=?').run(Date.now(), eventId); }
-  pruneNotifications(before = Date.now() - 30 * 86400000) { this.db.prepare('DELETE FROM notification_outbox WHERE ackedAt IS NOT NULL AND createdAt<?').run(before); this.db.prepare('DELETE FROM notification_watches WHERE startedAt<?').run(before); }
-  async once(id: string, command: Command, perform: () => Promise<unknown>) {
+  pruneNotifications(before = Date.now() - 30 * 86400000) { this.db.prepare('DELETE FROM notification_outbox WHERE ackedAt IS NOT NULL AND createdAt<?').run(before); this.db.prepare('DELETE FROM notification_watches WHERE lastWatchedAt<?').run(before); }
+  commandStatus(id: string, session: string, conversation: string) {
+    const row = this.db.prepare('SELECT result FROM commands WHERE id=? AND session=? AND conversation=?').get(id, session, conversation);
+    if (!row) return { state: 'unknown' };
+    if (!row.result) return { state: this.runningCommands.has(id) ? 'pending' : 'unknown' };
+    const saved = JSON.parse(row.result as string);
+    if (['OUTCOME_UNKNOWN', 'INTERNAL'].includes(saved.error?.code)) return { state: 'unknown' };
+    return saved.error ? { state: 'failed', error: saved.error } : { state: 'succeeded' };
+  }
+  async once(id: string, command: Command, perform: () => Promise<unknown>, session?: string) {
     if (readMethods.has(command.method) || command.method.startsWith('upload.')) return perform();
     const digest = hash(JSON.stringify(command));
-    const prior = this.db.prepare('SELECT digest,result FROM commands WHERE id=?').get(id);
+    const prior = this.db.prepare('SELECT digest,result,session FROM commands WHERE id=?').get(id);
     if (prior) {
+      if (prior.session && prior.session !== session) throw new RemoteError('AUTH', '操作不属于当前授权。');
       if (prior.digest !== digest) throw new RemoteError('INVALID', '操作 ID 已用于另一条请求。');
       if (!prior.result) throw new RemoteError('OUTCOME_UNKNOWN', '之前的操作结果未确认，请核对原会话，不要重复提交。');
       const saved = JSON.parse(prior.result as string);
@@ -96,16 +110,17 @@ export class AgentStore {
       return saved.result;
     }
     this.db.prepare("DELETE FROM commands WHERE created < ? AND id NOT LIKE 'plan:%'").run(Date.now() - 7 * 86400000);
-    this.db.prepare('INSERT INTO commands(id,digest,created) VALUES(?,?,?)').run(id, digest, Date.now());
+    this.db.prepare('INSERT INTO commands(id,digest,created,session,conversation) VALUES(?,?,?,?,?)').run(id, digest, Date.now(), session ?? null, 'id' in command.params ? command.params.id : null);
+    this.runningCommands.add(id);
     try {
       const result = await perform();
       this.db.prepare('UPDATE commands SET result=? WHERE id=?').run(JSON.stringify({ result }), id);
       return result;
     } catch (e) {
       if (command.method === 'plan.respond' && e instanceof RemoteError && ['STALE', 'BUSY', 'QUEUE_PENDING', 'INVALID', 'AUTH', 'SUBSCRIPTION_REQUIRED', 'UNSUPPORTED', 'NOT_FOUND', 'CONTROL_LOST'].includes(e.code)) this.db.prepare('DELETE FROM commands WHERE id=?').run(id);
-      else if (e instanceof RemoteError && e.code !== 'OUTCOME_UNKNOWN') this.db.prepare('UPDATE commands SET result=? WHERE id=?').run(JSON.stringify({ error: { code: e.code, message: e.message } }), id);
+      else if (e instanceof RemoteError && !['OUTCOME_UNKNOWN', 'INTERNAL'].includes(e.code)) this.db.prepare('UPDATE commands SET result=? WHERE id=?').run(JSON.stringify({ error: { code: e.code, message: e.message } }), id);
       throw e;
-    }
+    } finally { this.runningCommands.delete(id); }
   }
   close() { this.db.close(); }
 }

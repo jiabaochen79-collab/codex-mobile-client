@@ -2,7 +2,7 @@ import { test, expect, type Page, type WebSocketRoute } from '@playwright/test';
 import { mockPairedBrowser } from './paired-browser-fixture';
 import type { Command, QueuedMessage, Snapshot } from '../src/shared/protocol';
 
-test.use({ viewport: { width: 390, height: 844 }, launchOptions: { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
+test.use({ viewport: { width: 390, height: 844 }, launchOptions: process.env.TEST_BROWSER === 'webkit' ? {} : { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
 const origin = 'http://127.0.0.1:18890';
 const task = { id: '12345678-1234-4234-8234-123456789abc', title: 'Queue acceptance', cwd: 'C:/fixture', updatedAt: 1, projectId: 'project-a' };
 const other = { ...task, id: '23456789-1234-4234-8234-123456789abc', title: 'Other task' };

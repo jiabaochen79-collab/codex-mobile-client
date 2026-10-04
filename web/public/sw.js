@@ -1,5 +1,5 @@
 // Push-only worker. It deliberately has no fetch handler or cache storage.
-const PUSH_WORKER_VERSION = 'codex-mobile-push-v1';
+const PUSH_WORKER_VERSION = 'codex-mobile-push-v2';
 
 function localUrl(value) {
   if (typeof value !== 'string') return `${self.location.origin}/`;
@@ -38,11 +38,27 @@ self.addEventListener('notificationclick', event => {
   const url = localUrl(event.notification.data?.url);
   event.waitUntil((async () => {
     const pages = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    const current = pages.find(page => 'focus' in page);
+    const current = pages.filter(page => {
+      const pageUrl = new URL(page.url);
+      return pageUrl.origin === self.location.origin && pageUrl.pathname === '/' && 'focus' in page;
+    }).sort((a, b) => Number(b.focused) - Number(a.focused))[0];
     if (current) {
-      await current.focus();
-      if ('navigate' in current && current.url !== url) await current.navigate(url);
-      return;
+      try {
+        // Keep drafts intact; older or suspended pages fall back to a deep-link navigation.
+        const channel = new MessageChannel();
+        const handled = await new Promise(resolve => {
+          const timer = setTimeout(() => resolve(false), 1000);
+          channel.port1.onmessage = event => { clearTimeout(timer); resolve(event.data === 'notification.received'); };
+          current.postMessage({ type: 'notification.open', url }, [channel.port2]);
+        });
+        channel.port1.close();
+        if (!handled && (!('navigate' in current) || !await current.navigate(url))) {
+          await self.clients.openWindow(url);
+          return;
+        }
+        await current.focus();
+        return;
+      } catch { /* The page may have closed while the notification was tapped. */ }
     }
     await self.clients.openWindow(url);
   })());

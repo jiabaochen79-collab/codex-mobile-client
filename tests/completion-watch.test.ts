@@ -1,0 +1,64 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { AgentStore } from '../src/agent/store.js';
+import { CompletionMonitor } from '../src/agent/notifications.js';
+
+describe('durable completion watches', () => {
+  let dir: string, store: AgentStore, monitor: CompletionMonitor;
+  const taskId = randomUUID();
+  const completion = (turnId: string, at: number) => JSON.stringify({ timestamp: new Date(at).toISOString(), type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId } }) + '\n';
+  const sources = (ids: string[] = []) => ids.includes(taskId) ? [{ id: taskId, path: join(dir, 'archived.jsonl') }] : [];
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'completion-watch-')); store = new AgentStore(dir);
+    writeFileSync(join(dir, 'archived.jsonl'), ''); monitor = new CompletionMonitor(store, sources);
+  });
+  afterEach(() => { monitor.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  it('renews an old watch and captures an archived task after monitor and store restart', async () => {
+    const now = Date.now(), startedAt = now - 31 * 86400000;
+    monitor.watch(taskId, startedAt); monitor.watch(taskId, now); await monitor.poll();
+    const retained = store.notificationWatch(taskId);
+    monitor.close(); store.close(); store = new AgentStore(dir); monitor = new CompletionMonitor(store, sources);
+    appendFileSync(join(dir, 'archived.jsonl'), completion('new-turn', now + 100));
+    await monitor.poll(); await monitor.poll();
+    expect(retained).toEqual({ startedAt }); expect(store.notificationWatch(taskId)).toEqual({ startedAt });
+    expect(store.notificationOutbox()).toEqual([expect.objectContaining({ taskId, turnId: 'new-turn', status: 'completed' })]);
+    store.pruneNotifications(now + 1); expect(store.notificationWatch(taskId)).toBeUndefined();
+  });
+
+  it('preserves the earliest capture baseline when another watch arrives before the first poll', async () => {
+    const now = Date.now(); monitor.watch(taskId, now - 2000);
+    appendFileSync(join(dir, 'archived.jsonl'), completion('earlier-turn', now - 1000));
+    monitor.watch(taskId, now); await monitor.poll();
+    expect(store.notificationOutbox()).toEqual([expect.objectContaining({ turnId: 'earlier-turn' })]);
+  });
+
+  it('prioritizes recently reused tasks within the bounded watch list', () => {
+    const now = Date.now(); monitor.watch(taskId, now - 31 * 86400000);
+    for (let i = 0; i < 200; i++) monitor.watch(randomUUID(), now - 1000 + i);
+    monitor.watch(taskId, now);
+    expect(store.notificationWatchIds()).toHaveLength(200); expect(store.notificationWatchIds()[0]).toBe(taskId);
+  });
+
+  it('accepts legacy watch inserts during rollback and backfills their freshness on reopening', () => {
+    const startedAt = Date.now();
+    store.db.prepare('INSERT INTO notification_watches(taskId,startedAt) VALUES(?,?)').run(taskId, startedAt);
+    monitor.close(); store.close(); store = new AgentStore(dir); monitor = new CompletionMonitor(store, sources);
+    store.pruneNotifications(); expect(store.notificationWatch(taskId)).toEqual({ startedAt });
+  });
+
+  it('migrates legacy watches without resetting their capture baseline or keeping expired watches', () => {
+    const now = Date.now(), startedAt = now - 31 * 86400000, expiredId = randomUUID();
+    monitor.close(); store.close();
+    const db = new DatabaseSync(join(dir, 'agent.sqlite'));
+    db.exec('DROP TABLE notification_watches; CREATE TABLE notification_watches (taskId TEXT PRIMARY KEY, startedAt INTEGER NOT NULL);');
+    for (const id of [taskId, expiredId]) db.prepare('INSERT INTO notification_watches VALUES(?,?)').run(id, startedAt);
+    db.close(); store = new AgentStore(dir); monitor = new CompletionMonitor(store, sources);
+    monitor.watch(taskId, now); store.pruneNotifications();
+    expect(store.notificationWatch(taskId)).toEqual({ startedAt }); expect(store.notificationWatch(expiredId)).toBeUndefined();
+  });
+});

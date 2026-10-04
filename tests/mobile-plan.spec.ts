@@ -9,7 +9,7 @@ const planOption = (page: Page) => page.getByRole('menuitemcheckbox', { name: /�
 const closePlan = (page: Page) => page.getByRole('button', { name: '关闭计划模式', exact: true });
 const permissionTrigger = (page: Page) => page.locator('.permission-status');
 const permissionOption = (page: Page, name: string) => page.getByRole('radio').filter({ has: page.getByText(name, { exact: true }) });
-async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean; busy?: boolean; reject?: boolean; delayed?: boolean; mode?: 'plan'|'default'; unsynced?: boolean; permission?: 'ask'|'approve'|'full'|'custom'; permissionUnsynced?: boolean; secondTask?: boolean; inputRequest?: boolean } = {}) {
+async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean; busy?: boolean; reject?: boolean; delayed?: boolean; mode?: 'plan'|'default'; unsynced?: boolean; permission?: 'ask'|'approve'|'full'|'custom'; permissionUnsynced?: boolean; secondTask?: boolean; inputRequest?: boolean; failedReason?: string | null } = {}) {
   const conversation = { id: '12345678-1234-4234-8234-123456789abc', title: '计划模式验收', cwd: 'C:/fixture', updatedAt: 1 };
   const plan = { id: 'implement-plan:turn-plan', kind: 'plan', title: '实施此计划？', detail: '# 更新计划\n\n1. 保留已有数据。\n2. 验证结果。\n\n<script>alert(1)</script>', plan: { turnId: 'turn-plan', revision: 'a'.repeat(64) } };
   const inputRequest = { id: 'input-request', kind: 'input', title: '需要你的回复', detail: '', questions: [
@@ -17,8 +17,8 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
     { id: 'approach', question: '处理方式', options: [{ label: '保守调整' }, { label: '完整重做' }] },
     { id: 'note', question: '补充要求', options: [] }
   ] };
-  const snapshot: any = { ...conversation, epoch: 'fixture', busy: !!options.busy, turnId: options.busy ? 'running' : null, hasMore: false, requests: options.busy ? [] : options.inputRequest ? [inputRequest] : [plan], nativeQueuedCount: 0,
-    messages: [{ id: 'plan-message', role: 'assistant', phase: 'final', text: plan.detail, turnId: 'turn-plan', turnStatus: 'completed' }],
+  const snapshot: any = { ...conversation, epoch: 'fixture', busy: !!options.busy, turnId: options.busy ? 'running' : null, hasMore: false, requests: options.busy || options.failedReason !== undefined ? [] : options.inputRequest ? [inputRequest] : [plan], nativeQueuedCount: 0,
+    messages: options.failedReason !== undefined ? [{ id: 'failed-message', role: 'user', text: '继续', turnId: 'turn-failed', turnStatus: 'failed', ...(options.failedReason ? { turnReason: options.failedReason } : {}) }] : [{ id: 'plan-message', role: 'assistant', phase: 'final', text: plan.detail, turnId: 'turn-plan', turnStatus: 'completed' }],
     settings: { model: 'fixture-model', effort: 'high', mode: options.unsynced ? undefined : options.mode ?? 'plan', revision: 'settings-1', ...(options.permissionUnsynced ? {} : { permission: options.permission ?? 'ask' }) } };
   const second = { ...conversation, id: '12345678-1234-4234-8234-123456789abe', title: '另一任务' };
   const secondSnapshot = { ...snapshot, ...second, requests: [], settings: { ...snapshot.settings, mode: 'default', permission: 'full', revision: 'other-settings' } };
@@ -26,8 +26,10 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
     control: { role: options.viewer ? 'viewer' : 'controller', epoch: '12345678-1234-4234-8234-123456789abd', terminals: [] },
     client: { available: true, version: '26.903.61454', capabilities: options.legacy ? [] : ['task-mode', 'plan-implementation', 'model-settings', 'permission-settings', 'safety-status', 'queued-send', 'attachments'] } };
   const commands: any[] = []; let update!: () => void; let statusUpdate!: () => void; let disconnect!: () => void; let settle!: () => void;
-  const reads: (() => void)[] = []; let holdReads = false;
+  const reads: (() => void)[] = []; let holdReads = false; let readFailure = '';
   await mockPairedBrowser(page);
+  await page.route('**/api/bootstrap', route => route.fulfill({ json: { mode: 'mobile' } }));
+  await page.route('**/api/notifications', route => route.fulfill({ json: { items: [], unread: 0 } }));
   await page.routeWebSocket('**/ws/mobile*', socket => {
     update = () => socket.send(JSON.stringify({ type: 'changed', conversationIds: [conversation.id] }));
     statusUpdate = () => socket.send(JSON.stringify(status));
@@ -36,6 +38,7 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
     socket.onMessage(raw => {
       const { id, command } = JSON.parse(String(raw)); commands.push(command);
       const reply = () => {
+        if (command.method === 'read' && readFailure) { socket.send(JSON.stringify({ type: 'result', id, error: { code: 'CLIENT_UNAVAILABLE', message: readFailure } })); return; }
         if (command.method === 'mode.update' && !options.reject) { snapshot.settings.mode = command.params.mode; snapshot.settings.revision = 'settings-2'; }
         if (command.method === 'permissions.update' && !options.reject) { snapshot.settings.permission = command.params.permission; snapshot.settings.revision = 'permission-settings-2'; }
         if (command.method === 'plan.respond' && !options.reject) { snapshot.requests = []; snapshot.busy = true; snapshot.turnId = 'next-turn'; snapshot.settings.mode = command.params.action === 'implement' ? 'default' : 'plan'; }
@@ -53,8 +56,44 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
   await page.getByRole('button', { name: conversation.title, exact: true }).click(); await expect(page.getByLabel('消息', { exact: true })).toBeVisible();
   await expect.poll(() => commands.filter(c => c.method === 'read').length).toBeGreaterThan(0);
   return { snapshot, status, commands, update: () => update(), statusUpdate: () => statusUpdate(), disconnect: () => disconnect(), settle: () => settle(),
+    failReads: (message: string) => { readFailure = message; },
     holdReads: () => { holdReads = true; }, releaseReads: () => { holdReads = false; reads.splice(0).forEach(reply => reply()); } };
 }
+
+test('clears a recovered read error without losing the draft or allowing stale sends', async ({ page }) => {
+  const f = await fixture(page, { mode: 'default' });
+  await page.getByLabel('消息', { exact: true }).fill('弱网草稿');
+  f.failReads('请先在电脑端打开此任务。'); f.update();
+  await expect(page.getByRole('alert')).toContainText('请先在电脑端打开此任务');
+  await expect(page.getByTitle('发送消息', { exact: true })).toBeDisabled();
+  f.failReads(''); f.update();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByTitle('发送消息', { exact: true })).toBeEnabled();
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('弱网草稿');
+});
+
+test('does not erase a rejected operation when reading and reconnecting succeed', async ({ page }) => {
+  const f = await fixture(page, { reject: true, mode: 'default' });
+  await add(page).click(); await planOption(page).click();
+  await expect(page.getByRole('alert')).toContainText('计划或设置已变化');
+  f.update(); await page.waitForTimeout(500); await expect(page.getByRole('alert')).toContainText('计划或设置已变化');
+  f.disconnect(); await expect(closePlan(page)).toBeHidden();
+  await expect(page.getByRole('alert')).toContainText('计划或设置已变化');
+  await expect(add(page)).toBeEnabled();
+});
+test('shows the desktop failure reason and an honest fallback on mobile', async ({ page }) => {
+  const f = await fixture(page, { failedReason: '模型服务暂时不可用' });
+  await expect(page.locator('.turn-outcome')).toHaveText('任务未完成：模型服务暂时不可用');
+  delete f.snapshot.messages[0].turnReason;
+  f.update();
+  await expect(page.locator('.turn-outcome')).toHaveText('任务未完成：暂未获取到具体原因，请在电脑端查看。');
+  f.snapshot.messages[0].turnReason = '<img src=x onerror=alert(1)>';
+  f.update();
+  await expect(page.locator('.turn-outcome')).toContainText('<img src=x onerror=alert(1)>');
+  await expect(page.locator('.turn-outcome img')).toHaveCount(0);
+  await page.setViewportSize({ width: 320, height: 568 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
 test('shows a sanitized complete plan and implements only after an explicit click', async ({ page }) => {
   const { commands } = await fixture(page);
   await expect(page.getByText('此请求尚未支持远程处理。', { exact: true })).toBeHidden();
@@ -213,7 +252,7 @@ test('shows the helper version separately from Codex and does not guess legacy v
   const f = await fixture(page); await page.getByTitle('更多操作', { exact: true }).click();
   await expect(page.locator('.connection-versions')).toContainText('助手 v0.4.4'); await expect(page.locator('.connection-versions')).toContainText('Codex 26.903.61454');
   delete f.status.helperVersion; f.statusUpdate(); await expect(page.locator('.connection-versions')).toContainText('助手 版本未知');
-  f.status.helperVersion = '99.0.0'; f.status.client.capabilities = ['compatibility-checked']; f.statusUpdate(); await page.getByRole('button', { name: '关闭菜单', exact: true }).click(); await add(page).click(); await expect(planOption(page)).toBeDisabled(); await expect(planOption(page)).toContainText('接口暂不兼容');
+  f.status.helperVersion = '99.0.0'; f.status.client.capabilities = ['compatibility-checked']; f.statusUpdate(); await page.getByTitle('更多操作', { exact: true }).click(); await add(page).click(); await expect(planOption(page)).toBeDisabled(); await expect(planOption(page)).toContainText('接口暂不兼容');
 });
 test('fits the composer chip and menu at 320, 390 and 1280 pixels, including a keyboard-sized viewport', async ({ page }, info) => {
   await fixture(page);

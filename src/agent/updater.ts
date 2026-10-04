@@ -16,8 +16,12 @@ export class HelperUpdater {
   private candidate?: SignedRelease;
   private previous?: SignedRelease;
   private operation?: Promise<void>;
+  private preparingInstall = false;
   private abort?: AbortController;
   private timer?: NodeJS.Timeout;
+  private resultTimer?: NodeJS.Timeout;
+  private reporting = false;
+  private reportedResult?: string;
   private retry?: NodeJS.Timeout;
   private failures = 0;
   private closed = false;
@@ -26,9 +30,9 @@ export class HelperUpdater {
     this.dir = join(options.dir, 'updates'); mkdirSync(this.dir, { recursive: true });
     this.state.autoDownload = options.store.get('update:auto') !== 'false';
   }
-  start() { const initial = setTimeout(() => { void this.check(); }, 15000); initial.unref(); this.timer = setInterval(() => { void this.check(); }, 6 * 3600000); this.timer.unref(); }
+  start() { const initial = setTimeout(() => { void this.check(); }, 15000); initial.unref(); this.timer = setInterval(() => { void this.check(); }, 6 * 3600000); this.timer.unref(); this.resultTimer = setInterval(() => { void this.reportPrevious(); }, 2000); this.resultTimer.unref(); }
   setting(enabled: boolean) { this.state.autoDownload = enabled; this.options.store.set('update:auto', String(enabled)); if (enabled && this.state.phase === 'available') void this.download(); return this.state; }
-  cancel() { this.abort?.abort(); clearTimeout(this.retry); this.state.phase = this.candidate ? 'available' : 'idle'; this.state.message = '下载已暂停'; }
+  cancel() { if (this.preparingInstall || this.state.phase === 'installing') return; this.abort?.abort(); clearTimeout(this.retry); this.state.phase = this.candidate ? 'available' : 'idle'; this.state.message = '下载已暂停'; }
   connected() { return this.state.phase === 'error' ? this.check() : Promise.resolve(); }
   private succeeded() { clearTimeout(this.retry); this.retry = undefined; this.failures = 0; }
   private failed(error: unknown, downloading: boolean) {
@@ -38,7 +42,7 @@ export class HelperUpdater {
     if (!this.closed && this.state.autoDownload && this.failures < 3) { this.retry = setTimeout(() => { void this.check(); }, 60000 * 2 ** this.failures++); this.retry.unref(); }
   }
   check(): Promise<void> {
-    if (this.closed || this.operation || this.state.phase === 'installing') return this.operation ?? Promise.resolve();
+    if (this.closed || this.operation || this.preparingInstall || this.state.phase === 'installing') return this.operation ?? Promise.resolve();
     clearTimeout(this.retry); this.retry = undefined; this.abort = undefined;
     this.state.phase = 'checking'; this.state.message = '';
     let downloading = false;
@@ -64,7 +68,7 @@ export class HelperUpdater {
     return this.operation;
   }
   download(): Promise<void> {
-    if (this.closed || this.operation || !this.candidate) return this.operation ?? Promise.resolve();
+    if (this.closed || this.operation || this.preparingInstall || this.state.phase === 'installing' || !this.candidate) return this.operation ?? Promise.resolve();
     this.operation = this.fetchPackages().catch(error => { if (!this.abort?.signal.aborted) this.failed(error, true); }).finally(() => { this.operation = undefined; }); return this.operation;
   }
   private async fetchPackages() {
@@ -111,8 +115,8 @@ export class HelperUpdater {
     renameSync(part, file);
   }
   async install() {
-    if (this.operation || this.state.phase !== 'ready' || !this.candidate || !this.previous) throw new RemoteError('UPDATE_NOT_READY', '更新尚未下载完成。');
-    this.options.freeze(true);
+    if (this.closed || this.operation || this.preparingInstall || this.state.phase !== 'ready' || !this.candidate || !this.previous) throw new RemoteError('UPDATE_NOT_READY', '更新尚未下载完成。');
+    this.preparingInstall = true; this.options.freeze(true);
     try {
       const blockers = await this.options.blockers(); if (blockers.length) throw new RemoteError('UPDATE_BLOCKED', blockers.join('；'));
       for (const signed of [this.previous, this.candidate]) { const { manifest: m } = verifyRelease(signed, this.options.publicKey); const file = join(this.dir, m.sha256 + '.exe'); if (statSync(file).size !== m.size || await fileDigest(file) !== m.sha256) throw new Error('Corrupt cached package'); await this.options.request('/api/updates/device/verify/' + m.sha256); }
@@ -124,11 +128,22 @@ export class HelperUpdater {
       const child = spawn(join(runner, 'node.exe'), [join(runner, 'updater.mjs'), path], { detached: true, stdio: 'ignore', windowsHide: true, cwd: runner });
       await once(child, 'spawn'); child.unref(); this.state.phase = 'installing'; return { accepted: true };
     } catch (e) { this.options.freeze(false); if (e instanceof RemoteError) throw e; throw new RemoteError('UPDATE_FAILED', '安装准备失败，请重新检查更新。'); }
+    finally { this.preparingInstall = false; }
   }
-  async report(phase: 'ready' | 'installed' | 'failed' | 'rolled_back', version: string) { try { await this.options.request('/api/updates/device/result', { method: 'POST', body: JSON.stringify({ phase, version }), headers: { 'Content-Type': 'application/json' } }); } catch {} }
+  async report(phase: 'ready' | 'installed' | 'failed' | 'rolled_back', version: string) { try { await this.options.request('/api/updates/device/result', { method: 'POST', body: JSON.stringify({ phase, version }), headers: { 'Content-Type': 'application/json' } }); return true; } catch { return false; } }
   async reportPrevious() {
-    const file = join(this.dir, 'result.json');
-    if (existsSync(file)) { try { const result = JSON.parse(readFileSync(file, 'utf8')); if (['installed', 'failed', 'rolled_back'].includes(result.phase) && /^\d+\.\d+\.\d+$/.test(result.version)) { await this.report(result.phase, result.version); this.state.message = result.phase === 'rolled_back' ? '更新失败，已恢复上一版本' : result.phase === 'failed' ? '更新失败，请重新检查更新' : ''; } } catch {} }
+    if (this.closed || this.reporting) return;
+    this.reporting = true;
+    try {
+      const file = join(this.dir, 'result.json'); if (!existsSync(file)) return;
+      const contents = readFileSync(file, 'utf8'); if (contents === this.reportedResult) return;
+      const result = JSON.parse(contents);
+      if (['installed', 'failed', 'rolled_back'].includes(result.phase) && /^\d+\.\d+\.\d+$/.test(result.version)) {
+        const reported = await this.report(result.phase, result.version);
+        this.state.message = result.phase === 'rolled_back' ? '更新失败，已恢复上一版本' : result.phase === 'failed' ? '更新失败，请重新检查更新' : '';
+        if (reported) this.reportedResult = contents;
+      }
+    } catch {} finally { this.reporting = false; }
   }
-  close() { this.closed = true; clearInterval(this.timer); clearTimeout(this.retry); this.abort?.abort(); }
+  close() { this.closed = true; clearInterval(this.timer); clearInterval(this.resultTimer); clearTimeout(this.retry); this.abort?.abort(); }
 }

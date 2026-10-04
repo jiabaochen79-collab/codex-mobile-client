@@ -33,4 +33,19 @@ describe('conversation presentation', () => {
     expect(actual.messages.every(m=>m.turnId==='t'&&m.turnStatus==='completed')).toBe(true);
     expect(JSON.stringify(actual)).not.toContain('Private/raw');
   });
+  it('shows the desktop-provided reason for a failed turn without exposing error internals', () => {
+    const actual = normalizeSnapshot({ id:'task',turns:[{turnId:'failed-turn',status:'failed',error:{message:'模型服务暂时不可用',stack:'private stack trace'},items:[
+      {id:'u',type:'userMessage',content:[{type:'text',text:'继续'}]}
+    ]}]},'epoch');
+    const [turn] = conversationTurns(actual);
+    expect(turn.status).toBe('failed');
+    expect(turn.reason).toBe('模型服务暂时不可用');
+    expect(JSON.stringify(actual)).not.toContain('private stack trace');
+  });
+  it('does not invent a reason when the desktop reports only a failed status', () => {
+    const actual = normalizeSnapshot({ id:'task',turns:[{turnId:'failed-turn',status:'failed',items:[
+      {id:'u',type:'userMessage',content:[{type:'text',text:'继续'}]}
+    ]}]},'epoch');
+    expect(conversationTurns(actual)[0].reason).toBeUndefined();
+  });
 });

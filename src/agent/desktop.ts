@@ -20,7 +20,7 @@ enablePatches();
 const run = promisify(execFile);
 const ACTIVE_THREADS = "archived = 0 AND source = 'vscode' AND remote_rollout_exists(rollout_path)";
 type Discovery = { version: string | null; processId: number; toolsPipe: string | null; executablePath: string | null; cliExecutablePath?: string | null };
-type Followed = { id: string; owner: string; revision: number; state: any };
+type Followed = { id: string; owner: string; revision: number; state: any; ownerCheckedAt?: number };
 const permissionSettings: Record<PermissionMode, { permissions: string; approvalPolicy: 'on-request' | 'never'; approvalsReviewer: 'user' | 'guardian_subagent' }> = {
   ask: { permissions: ':workspace', approvalPolicy: 'on-request', approvalsReviewer: 'user' },
   approve: { permissions: ':workspace', approvalPolicy: 'on-request', approvalsReviewer: 'guardian_subagent' },
@@ -41,7 +41,9 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
   const messages: Message[] = [];
   const seen = new Set<string>();
   for (const [index, turn] of turns.entries()) {
-    const turnMeta = { turnId: turn.turnId ?? `pending:${turn.turnStartedAtMs ?? index}`, turnStatus: turnStatus(turn) ?? 'completed' };
+    const rawReason = turn.status === 'failed' ? (typeof turn.error === 'string' ? turn.error : turn.error?.message) : undefined;
+    const turnReason = typeof rawReason === 'string' ? rawReason.split(/[\r\n]/, 1)[0].replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 400) : '';
+    const turnMeta = { turnId: turn.turnId ?? `pending:${turn.turnStartedAtMs ?? index}`, turnStatus: turnStatus(turn) ?? 'completed', ...(turnReason ? { turnReason } : {}) };
     for (const item of turn.items ?? []) {
       if (!item.id || seen.has(item.id)) continue;
       seen.add(item.id);
@@ -321,16 +323,21 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
   private async follow(id: string, activate = false) {
     this.known(id);
     const existing = this.followed.get(id);
-    if (existing?.state) { this.current = existing; return; }
+    if (existing?.state && Date.now() - (existing.ownerCheckedAt ?? 0) < 30000) { this.current = existing; return; }
     let owner: any;
     try { owner = await this.ipc.request('thread-owner-discovery', { hostId: 'local', conversationId: id }); } catch { /* An unopened task needs its original desktop view. */ }
+    if (existing?.state && owner?.handledByClientId === existing.owner) { existing.ownerCheckedAt = Date.now(); this.current = existing; return; }
+    if (existing) existing.state = undefined;
     if (!owner?.handledByClientId && activate) {
       await this.appTool('navigate_to_codex_page', { threadId: id }, id);
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      owner = await this.ipc.request('thread-owner-discovery', { hostId: 'local', conversationId: id });
+      const deadline = Date.now() + 6000;
+      for (let delay = 250; !owner?.handledByClientId && Date.now() < deadline; delay = Math.min(1000, delay * 2)) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(delay, deadline - Date.now())));
+        owner = await this.ipc.request('thread-owner-discovery', { hostId: 'local', conversationId: id });
+      }
     }
     if (!owner?.handledByClientId) throw new RemoteError('CLIENT_UNAVAILABLE', '请先在电脑端打开此任务。');
-    this.current = { id, owner: owner.handledByClientId, state: undefined, revision: 0 };
+    this.current = { id, owner: owner.handledByClientId, state: undefined, revision: 0, ownerCheckedAt: Date.now() };
     this.followed.set(id, this.current);
     if (this.followed.size > 6) this.unfollow(this.followed.keys().next().value!);
     const waiting = new Promise<void>((resolve, reject) => {
@@ -338,7 +345,9 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       const timer = setTimeout(() => { this.wake.off(id, done); reject(new RemoteError('CLIENT_UNAVAILABLE', '会话暂时不可读取，请稍后重试。')); }, 6000);
       this.wake.once(id, done);
     });
+    const followed = this.current;
     this.requestSnapshot(); await waiting;
+    if (this.followed.get(id) !== followed || !followed.state) throw new RemoteError('CLIENT_UNAVAILABLE', '任务连接正在恢复，请稍后重试。');
   }
   private snapshot(limit = 100) {
     const result = normalizeSnapshot(this.current!.state, `${this.discovery!.processId}:${this.current!.owner}`, limit, this.images);
@@ -364,6 +373,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (version === 2 && response.result?.applied !== true) throw new RemoteError(response.result?.applied === false ? 'STALE' : 'OUTCOME_UNKNOWN', '电脑端未确认应用任务设置，请刷新后核对。');
   }
   async execute(command: Command, commandId: string, authorize?: () => void, attachments: LocalAttachment[] = []) {
+    if (command.method === 'command.status') throw new RemoteError('INVALID', '发送结果由电脑助手核对。');
     await this.ready(command);
     if (command.method === 'safety.status') {
       await this.follow(command.params.id, false); const snapshot = this.snapshot(20);

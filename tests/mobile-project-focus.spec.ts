@@ -45,12 +45,13 @@ test('initial navigation opens all running projects beyond the first global page
   for (const width of [320,390,1280]) { await page.setViewportSize({ width, height: 844 }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); await page.screenshot({ path: info.outputPath(`running-projects-${width}.png`) }); }
 });
 
-test('ordinary refresh respects collapsed projects and does not repeat the global scan', async ({ page }) => {
+test('ordinary activity polling respects manually collapsed projects', async ({ page }) => {
+  await page.clock.install();
   const f = await fixture(page); await expect(project(page, working.name)).toHaveAttribute('aria-expanded', 'true');
   await project(page, working.name).click(); const scans = f.calls.filter(c => c.method === 'list' && c.params.projectId === undefined).length;
-  await expect(page.getByTitle('刷新列表', { exact: true })).toHaveCount(0); await returnToPage(page);
+  await expect(page.getByTitle('刷新列表', { exact: true })).toHaveCount(0); await page.clock.fastForward(5000);
   await expect(project(page, working.name)).toHaveAttribute('aria-expanded', 'false');
-  expect(f.calls.filter(c => c.method === 'list' && c.params.projectId === undefined).length).toBeGreaterThanOrEqual(scans);
+  expect(f.calls.filter(c => c.method === 'list' && c.params.projectId === undefined).length).toBe(scans);
 });
 
 test('returning to the page discovers newly running projects and reopens them', async ({ page }) => {

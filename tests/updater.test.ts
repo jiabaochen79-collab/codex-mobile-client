@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { generateKeyPairSync, sign, createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { HelperUpdater } from '../src/agent/updater.js';
+
+vi.mock('node:child_process', () => ({ spawn: vi.fn(() => { throw new Error('Unexpected native process'); }) }));
+vi.mock('node:fs', async importOriginal => ({ ...await importOriginal<typeof import('node:fs')>(), copyFileSync: vi.fn() }));
 
 describe('helper updater', () => {
   const directories: string[] = [];
@@ -14,13 +19,83 @@ describe('helper updater', () => {
     const payload = Buffer.from(JSON.stringify({ version, sequence, platform: 'win32-x64', size: bytes.length, sha256, path: '/api/updates/download/' + sha256, notes: version, issuedAt: Date.now() }));
     return { payload: payload.toString('base64'), signature: sign(null, payload, keys.privateKey).toString('base64') };
   };
-  const fixture = (request: (path: string, init?: RequestInit) => Promise<Response>) => {
+  const fixture = (request: (path: string, init?: RequestInit) => Promise<Response>, options: Partial<Pick<ConstructorParameters<typeof HelperUpdater>[0], 'blockers' | 'freeze'>> = {}) => {
     const dir = mkdtempSync(join(process.cwd(), '.runtime-updater-test-')); directories.push(dir);
-    const updater = new HelperUpdater({ dir, root: dir, version: '0.4.16', store: { get: () => null, set: () => {} } as any, request, blockers: async () => [], freeze: () => {}, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() });
+    const updater = new HelperUpdater({ dir, root: dir, version: '0.4.16', store: { get: () => null, set: () => {} } as any, request, blockers: async () => [], freeze: () => {}, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), ...options });
     updaters.push(updater); return updater;
   };
   const latest = () => Response.json({ current: null, release: null });
-  afterEach(() => { for (const updater of updaters.splice(0)) updater.close(); vi.useRealTimers(); for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+  afterEach(() => { for (const updater of updaters.splice(0)) updater.close(); vi.useRealTimers(); vi.clearAllMocks(); for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+
+  const readyFixture = async (blockers: () => Promise<string[]>, freeze = vi.fn()) => {
+    const previous = release('0.4.16', 16), candidate = release('0.4.17', 17);
+    const request = vi.fn(async (path: string) => path.startsWith('/api/updates/device/check') ? Response.json({ current: previous, release: candidate }) : Response.json({}));
+    const updater = fixture(request, { blockers, freeze }); const dir = directories.at(-1)!;
+    for (const envelope of [previous, candidate]) {
+      const manifest = JSON.parse(Buffer.from(envelope.payload, 'base64').toString());
+      writeFileSync(join(dir, 'updates', manifest.sha256 + '.exe'), manifest.version);
+    }
+    await updater.check(); expect(updater.state.phase).toBe('ready'); request.mockClear();
+    vi.mocked(spawn).mockImplementation(() => {
+      const child = Object.assign(new EventEmitter(), { unref: vi.fn() });
+      queueMicrotask(() => child.emit('spawn')); return child as unknown as ChildProcess;
+    });
+    return { updater, dir, request, freeze };
+  };
+
+  it('accepts only one installation while the first preflight is pending', async () => {
+    let resume!: (blocks: string[]) => void;
+    const blockers = vi.fn().mockReturnValueOnce(new Promise<string[]>(resolve => { resume = resolve; })).mockResolvedValue([]);
+    const { updater, dir, freeze } = await readyFixture(blockers);
+    const first = updater.install(); const second = updater.install().then(() => 'accepted', error => error.code);
+    resume([]); await expect(first).resolves.toEqual({ accepted: true });
+    expect(await second).toBe('UPDATE_NOT_READY');
+    expect(spawn).toHaveBeenCalledTimes(1); expect(copyFileSync).toHaveBeenCalledTimes(2);
+    expect(freeze).toHaveBeenCalledExactlyOnceWith(true);
+    expect(JSON.parse(readFileSync(join(dir, 'updates/runner/job.json'), 'utf8'))).toMatchObject({ root: dir, dataDir: dir });
+  });
+
+  it('keeps installation locked against stale cancel, download and check requests', async () => {
+    let resume!: (blocks: string[]) => void;
+    const blockers = vi.fn().mockReturnValueOnce(new Promise<string[]>(resolve => { resume = resolve; })).mockResolvedValue([]);
+    const { updater, request } = await readyFixture(blockers);
+    const installing = updater.install(); updater.cancel(); await updater.download(); await updater.check();
+    const phase = updater.state.phase; const calls = request.mock.calls.length;
+    resume([]); await installing;
+    expect(phase).toBe('ready'); expect(updater.state.phase).toBe('installing'); expect(calls).toBe(0); expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores readiness and unfreezes after blocked preflight so installation can be retried', async () => {
+    const blockers = vi.fn().mockResolvedValueOnce(['pending approval']).mockResolvedValue([]);
+    const { updater, freeze } = await readyFixture(blockers);
+    await expect(updater.install()).rejects.toMatchObject({ code: 'UPDATE_BLOCKED' });
+    expect(updater.state.phase).toBe('ready'); expect(freeze).toHaveBeenLastCalledWith(false); expect(spawn).not.toHaveBeenCalled();
+    await expect(updater.install()).resolves.toEqual({ accepted: true }); expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['installed', 'rolled_back'])('reports a late %s result without reconnecting and stops polling on close', async phase => {
+    vi.useFakeTimers(); const request = vi.fn().mockResolvedValue(Response.json({})); const updater = fixture(request);
+    updater.start(); await updater.reportPrevious(); expect(request).not.toHaveBeenCalled();
+    const file = join(directories.at(-1)!, 'updates/result.json');
+    writeFileSync(file, JSON.stringify({ phase, version: '0.4.17', at: Date.now() }));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(request).toHaveBeenCalledExactlyOnceWith('/api/updates/device/result', expect.objectContaining({ body: JSON.stringify({ phase, version: '0.4.17' }) }));
+    await vi.advanceTimersByTimeAsync(4000); expect(request).toHaveBeenCalledTimes(1);
+    updater.close(); writeFileSync(file, JSON.stringify({ phase: 'failed', version: '0.4.18', at: Date.now() }));
+    await vi.advanceTimersByTimeAsync(20000); expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a late result after a request failure and serializes polling with connection reporting', async () => {
+    vi.useFakeTimers(); let finish!: (response: Response) => void;
+    const request = vi.fn().mockRejectedValueOnce(new TypeError('fetch failed')).mockImplementation(() => new Promise<Response>(resolve => { finish = resolve; }));
+    const updater = fixture(request); updater.start();
+    writeFileSync(join(directories.at(-1)!, 'updates/result.json'), JSON.stringify({ phase: 'rolled_back', version: '0.4.17', at: Date.now() }));
+    await vi.advanceTimersByTimeAsync(2000); expect(request).toHaveBeenCalledTimes(1); expect(updater.state.message).toContain('已恢复上一版本');
+    await vi.advanceTimersByTimeAsync(2000); expect(request).toHaveBeenCalledTimes(2);
+    const connection = updater.reportPrevious(); await vi.advanceTimersByTimeAsync(2000);
+    const calls = request.mock.calls.length; finish(Response.json({})); await connection;
+    await vi.advanceTimersByTimeAsync(2000); expect(calls).toBe(2); expect(request).toHaveBeenCalledTimes(2);
+  });
 
   it('distinguishes an unavailable update check from a failed download', async () => {
     const updater = fixture(async () => { throw new TypeError('fetch failed'); });
