@@ -1,9 +1,45 @@
 import { describe, expect, it } from 'vitest';
 import type { Message, Snapshot } from '../src/shared/protocol.js';
 import { normalizeSnapshot } from '../src/agent/desktop.js';
-import { conversationTurns } from '../web/conversation-model.js';
+import { conversationTurns, processEntries } from '../web/conversation-model.js';
 const snapshot = (messages: Message[], busy = false): Snapshot => ({ id:'task',title:'Task',epoch:'epoch',turnId:busy?'t2':null,busy,messages,requests:[],hasMore:false });
 describe('conversation presentation', () => {
+  it('renders an empty failed turn from terminal metadata and keeps error internals private', () => {
+    const actual = normalizeSnapshot({ id: 'task', turns: [
+      { turnId: 'earlier', status: 'completed', turnStartedAtMs: 1, items: [{ id: 'old', type: 'agentMessage', text: 'Earlier answer' }] },
+      { turnId: 'failed-empty', status: 'failed', turnStartedAtMs: 2, error: { message: 'Service unavailable\nprivate detail', stack: 'private stack' }, items: [] }
+    ] }, 'epoch');
+    const failed = conversationTurns(actual).at(-1)!;
+    expect(failed).toMatchObject({ id: 'failed-empty', status: 'failed', reason: 'Service unavailable', process: [], results: [] });
+    expect(JSON.stringify(actual)).not.toContain('private');
+  });
+  it('groups consecutive commands into stable batches without merging across progress or reasoning', () => {
+    const messages: Message[] = [
+      { id: 't1', role: 'tool', text: 'git status', status: 'completed' },
+      { id: 't2', role: 'tool', text: 'git diff', status: 'inProgress' },
+      { id: 'c', role: 'assistant', text: 'Next step', phase: 'commentary' },
+      { id: 't3', role: 'tool', text: 'npm test' },
+      { id: 'r', role: 'assistant', text: 'Finished reasoning', phase: 'reasoning' },
+      { id: 't4', role: 'tool', text: 'npm run check' }
+    ];
+    expect(processEntries(messages).map(entry => [entry.id, entry.kind, entry.messages.map(message => message.id)])).toEqual([
+      ['t1', 'commands', ['t1', 't2']], ['c', 'message', ['c']], ['t3', 'commands', ['t3']], ['t4', 'commands', ['t4']]
+    ]);
+    expect(messages).toHaveLength(6); expect(messages[4].text).toBe('Finished reasoning');
+  });
+  it('keeps image operations separate from command batches and does not consume message arrays', () => {
+    const messages: Message[] = [
+      { id: 't1', role: 'tool', text: 'git status' },
+      { id: 'i1', role: 'tool', text: 'View image', images: [{ id: 'photo-1', alt: 'Photo' }] },
+      { id: 'i2', role: 'tool', text: 'View image', images: [{ id: 'photo-2', alt: 'Other photo' }] },
+      { id: 't2', role: 'tool', text: 'npm test' }
+    ];
+    const before = JSON.stringify(messages);
+    expect(processEntries(messages).map(entry => [entry.kind, entry.messages.map(message => message.id)])).toEqual([
+      ['commands', ['t1']], ['images', ['i1', 'i2']], ['commands', ['t2']]
+    ]);
+    expect(JSON.stringify(messages)).toBe(before);
+  });
   it('keeps final answers separate from the visible execution process', () => {
     const result = conversationTurns(snapshot([
       {id:'u1',role:'user',text:'One',turnId:'t1',turnStatus:'completed'},

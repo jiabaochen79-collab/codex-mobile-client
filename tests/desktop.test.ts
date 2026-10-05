@@ -1,10 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { CodexDesktop, normalizeSnapshot } from '../src/agent/desktop.js';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 describe('desktop snapshot projection', () => {
+  it('blocks updates for queues on unfollowed tasks and unreadable queue state', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'remote-update-queue-')); const adapter = new CodexDesktop('unused', dir);
+    const path = join(dir, '.codex-global-state.json');
+    try {
+      expect(await adapter.updateBlockers()).toEqual([]);
+      writeFileSync(path, JSON.stringify({ 'queued-follow-ups': { 'unfollowed-task': [{ text: 'pending' }] } }));
+      expect(await adapter.updateBlockers()).toEqual(['电脑端有尚未发送的队列消息']);
+      writeFileSync(path, 'invalid JSON');
+      expect(await adapter.updateBlockers()).toEqual(['无法核对电脑端队列，请稍后安装']);
+      writeFileSync(path, JSON.stringify({ 'queued-follow-ups': {} }));
+      expect(await adapter.updateBlockers()).toEqual([]);
+    } finally { adapter.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
   const turn = { turnId: 'turn-1', status: 'inProgress', turnStartedAtMs: 10, items: [
     { id: 'a', type: 'userMessage', content: [{ type: 'text', text: '你好' }] },
     { id: 'b', type: 'agentMessage', text: '正在处理' },

@@ -6,17 +6,18 @@ import DOMPurify from 'dompurify';
 import MessageImages from './MessageImages.vue';
 import type { Message } from '../src/shared/protocol';
 import { presentUserMessage } from '../src/shared/user-message';
-const props = defineProps<{ message: Message; conversationId: string; deviceId?: string }>();
+const props = defineProps<{ message: Message; conversationId: string; deviceId?: string; live?: boolean }>();
 const html = computed(() => DOMPurify.sanitize(marked.parse(props.message.text, { async: false, breaks: true }) as string, { FORBID_TAGS: ['img', 'video', 'audio', 'iframe', 'style', 'form', 'input'], FORBID_ATTR: ['style'], ALLOW_DATA_ATTR: false }));
 const userText = computed(() => presentUserMessage(props.message.text, props.message.images?.map(image => image.alt)));
 const toolSummary = computed(() => props.message.text.replace(/\s+/g, ' ').trim() || '执行操作');
-const expandableTool = computed(() => props.message.role === 'tool' && !props.message.images?.length && (props.message.text.includes('\n') || toolSummary.value.length > 36));
-const statusText = computed(() => props.message.status === 'completed' ? '完成' : props.message.status === 'inProgress' ? '执行中' : props.message.status);
+const expandableTool = computed(() => props.message.role === 'tool' && !props.message.images?.length);
+const statusNames: Record<string, string> = { completed: '完成', inProgress: '执行中', failed: '失败', declined: '已拒绝', interrupted: '已停止' };
+const statusText = computed(() => statusNames[props.message.status ?? ''] ?? props.message.status);
 </script>
 <template>
   <article :class="['message', message.role, { reasoning: message.phase === 'reasoning' }]" :data-scroll-key="`message:${message.id}`">
     <template v-if="message.role === 'user'"><MessageImages v-if="message.images?.length" :conversation-id="conversationId" :images="message.images" :device-id="deviceId"/><div v-if="userText" class="user-text">{{ userText }}</div></template>
-    <details v-else-if="expandableTool" class="tool-message tool-step"><summary><ChevronRight :size="13" class="tool-chevron"/><Terminal :size="14"/><span class="tool-summary" :title="toolSummary">{{ toolSummary }}</span><span v-if="statusText" class="muted small tool-status">{{ statusText }}</span></summary><pre>{{ message.text }}</pre></details>
+    <details v-else-if="expandableTool" class="tool-message tool-step"><summary><ChevronRight :size="13" class="tool-chevron"/><Terminal :size="14"/><span class="tool-summary" :title="toolSummary">{{ live ? '正在运行：' : '' }}{{ toolSummary }}</span><span v-if="statusText && !live" class="muted small tool-status">{{ statusText }}</span></summary><pre>{{ message.text }}</pre></details>
     <div v-else-if="message.role === 'tool'" class="tool-message"><Terminal :size="14"/><span class="tool-summary">{{ toolSummary }}</span><span v-if="statusText" class="muted small tool-status">{{ statusText }}</span></div>
     <template v-else><div v-if="message.phase === 'reasoning'" class="reasoning-label"><Brain :size="14"/>思考摘要</div><div class="prose" v-html="html"></div></template>
     <MessageImages v-if="message.role !== 'user' && message.images?.length" :conversation-id="conversationId" :images="message.images" :device-id="deviceId"/>

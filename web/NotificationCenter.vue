@@ -158,7 +158,8 @@ async function readOne(item: NotificationItem) {
 async function readAll() {
   if (busy.value || !unread.value) return; busy.value = true; error.value = '';
   listRevision++;
-  try { await api('/api/notifications/read-all', {}, headers()); for (const item of items.value) item.readAt ??= Date.now(); updateUnread(0); }
+  const ids = new Set(items.value.map(item => item.id));
+  try { await api('/api/notifications/read-all', {}, headers()); for (const item of items.value) if (ids.has(item.id)) item.readAt ??= Date.now(); updateUnread(items.value.filter(item => !item.readAt).length); }
   catch (e: any) { error.value = e.message; }
   finally { busy.value = false; }
 }

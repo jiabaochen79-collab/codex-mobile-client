@@ -3,6 +3,7 @@ import { computed, nextTick, onActivated, onDeactivated, onUnmounted, reactive, 
 import { ArrowDown, ArrowRight, ArrowUp, Bell, Check, ChevronDown, ChevronRight, CircleStop, Ellipsis, Folder, ListOrdered, LogOut, Menu, Monitor, Plus, RefreshCw, Search, X, File, Brain, MonitorSmartphone, Images, Camera, Ticket, CornerUpRight, Lightbulb, Shield, ShieldCheck, ShieldAlert } from 'lucide-vue-next';
 import { api } from './api';
 import MessageContent from './MessageContent.vue';
+import TurnProcess from './TurnProcess.vue';
 import { conversationTurns } from './conversation-model';
 import { useChatScroll } from './use-chat-scroll';
 import { measureViewport, viewportSize, viewportOriginCorrection, viewportOriginHorizontalCorrection } from './mobile-viewport';
@@ -17,7 +18,7 @@ import PlanRequest from './PlanRequest.vue';
 import NotificationCenter from './NotificationCenter.vue';
 import type { Subscription } from '../src/shared/subscription';
 import type { Conversation, Snapshot, Command, Interaction, Project, ModelOption, Activity, ThreadSettings, QueuedMessage, PermissionMode, Attachment } from '../src/shared/protocol';
-import { readMethods } from '../src/shared/protocol';
+import { commandSchema, readMethods } from '../src/shared/protocol';
 
 const props = defineProps<{ deviceId: string; deviceName: string }>();
 const emit = defineEmits<{ devices: []; expired: [deviceId: string, message: string]; logout: [deviceId: string] }>();
@@ -70,6 +71,13 @@ function dismissError() {
   } else if (snapshot.value) readError.value = '';
 }
 const projectModal = ref(false); const projectId = ref(''); const newText = ref('');
+type PendingCreate = { requestId: string; command: Extract<Command, { method: 'create' }> };
+const pendingCreate = ref<PendingCreate>();
+try {
+  const saved = JSON.parse(sessionStorage.getItem('pending-create:' + props.deviceId) ?? 'null');
+  const command = commandSchema.safeParse(saved?.command);
+  if (/^[a-f0-9-]{36}$/.test(saved?.requestId) && command.success && command.data.method === 'create') pendingCreate.value = { requestId: saved.requestId, command: command.data };
+} catch {}
 const answers = ref<Record<string, string>>({}); const answerModes = reactive<Record<string, string>>({});
 const shell = ref<HTMLElement>(); const scroll = ref<HTMLElement>(); const content = ref<HTMLElement>(); const input = ref<HTMLTextAreaElement>(); const navigation = ref<HTMLElement>();
 const chatScroll = useChatScroll(scroll, content); const turns = computed(() => conversationTurns(snapshot.value));
@@ -297,7 +305,7 @@ function openSocket() {
     if (event.code === 4002) { clientId.value=crypto.randomUUID();try { sessionStorage.setItem(clientKey,clientId.value); } catch {} reconnect=setTimeout(openSocket,500);return; }
     if ([4001, 4003, 4004, 4005].includes(event.code)) {
       error.value = event.code === 4005 ? '该设备已被管理员封禁，请联系运营方。' : event.code === 4004 ? '已达到 3 个在线终端，请关闭一个页面后重试。' : event.code === 4003 ? '设备正由另一台手机控制，请更新电脑助手。' : '授权已失效，请使用当前连接密码重新连接。';
-      if (event.code === 4001 || event.code === 4005) { clearNavigation(); emit('expired', props.deviceId, error.value); } return;
+      if (event.code === 4001 || event.code === 4005) { clearNavigation(true); emit('expired', props.deviceId, error.value); } return;
     }
     reconnect = setTimeout(openSocket, Math.min(15000, 1000 * 2 ** Math.min(++reconnectFailures, 4)) + Math.floor(Math.random() * 500));
   };
@@ -483,7 +491,7 @@ async function perform(command: Command) {
   }
   catch (e: any) {
     if (command.method === 'send' && ['OUTCOME_UNKNOWN', 'INTERNAL'].includes(e.code)) { const attempt = pendingSends[command.params.id]; if (attempt) attempt.message = '发送结果待核对，内容已保留，不会自动重发。'; try { savePendingSends(); } catch {} }
-    else { if (command.method === 'send') { delete pendingSends[command.params.id]; try { savePendingSends(); } catch {} } error.value = e.message; }
+    else { if (command.method === 'send') { delete pendingSends[command.params.id]; try { savePendingSends(); } catch {} } if (active.value && (!('id' in command.params) || selected.value?.id === command.params.id)) error.value = e.message; }
     return false;
   }
   finally { busy.value = false; await read(); }
@@ -554,16 +562,21 @@ async function respondPlan(r: Interaction, action: 'implement'|'revise', feedbac
   await perform({ method: 'plan.respond', params: { id: s.id, epoch: s.epoch, requestId: String(r.id), revision: r.plan.revision, action, ...(action === 'revise' ? { feedback } : {}) } });
 }
 function subscriptionChanged(subscription: Subscription) { status.value.subscription = subscription; void loadNavigation(); void read(); }
-function clearNavigation() {
+function clearNavigation(preserveDrafts = false) {
+  if (preserveDrafts && selected.value) { drafts.set(selected.value.id, draft.value); try { savePendingSends(); } catch {} }
   notificationTaskIds.clear(); for (const id of Object.keys(notificationTasks)) delete notificationTasks[id];
   navigationEpoch++; focusedNavigationEpoch = -1; projectInteraction++; automaticProjects.clear();
   subscriptionOpen.value = false; notificationOpen.value = false; permissionPicker.value = false; fullAccessConfirm.value = false;
   selected.value = null; snapshot.value = null; drawer.value = false; moreMenu.value = false; projectModal.value = false;
   readError.value = ''; navigationError.value = ''; searchError.value = '';
   pendingActivations.clear(); activateSelected = false;
-  for (const id of Object.keys(pendingSends)) delete pendingSends[id];
-  try { sessionStorage.removeItem('pending-sends:' + props.deviceId); sessionStorage.removeItem('chat-drafts:' + props.deviceId); } catch {}
-  modelModal.value=false;takeoverModal.value=false;attachments.clear();drafts.clear();draft.value='';for(const key of Object.keys(activities))delete activities[key];
+  if (!preserveDrafts) {
+    for (const id of Object.keys(pendingSends)) delete pendingSends[id];
+    pendingCreate.value = undefined;
+    try { sessionStorage.removeItem('pending-sends:' + props.deviceId); sessionStorage.removeItem('chat-drafts:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); } catch {}
+    attachments.clear(); drafts.clear();
+  }
+  modelModal.value=false;takeoverModal.value=false;draft.value='';for(const key of Object.keys(activities))delete activities[key];
   attachmentPicker.value = false;
   queuedMessages.value = []; sendMenu.value = false;
   for (const key of Object.keys(groups)) delete groups[key]; projects.value = []; expandedProjects.clear();
@@ -577,13 +590,31 @@ async function logout() {
 async function newConversation(project?: string) {
   if (!canControl.value || !canUse('create-tasks')) return;
   moreMenu.value = false; error.value = '';
-  try { const r = await request({ method: 'projects', params: {} }); projects.value = r.projects; projectId.value = project ?? selected.value?.projectId ?? r.projects[0]?.id ?? ''; projectModal.value = true; }
+  try { const r = await request({ method: 'projects', params: {} }); projects.value = r.projects; projectId.value = pendingCreate.value?.command.params.projectId ?? project ?? selected.value?.projectId ?? r.projects[0]?.id ?? ''; if (pendingCreate.value) newText.value = pendingCreate.value.command.params.text; projectModal.value = true; }
   catch (e: any) { error.value = e.message; }
 }
 async function create() {
-  if (!canControl.value || !canUse('create-tasks') || !projectId.value || !newText.value.trim()) return; cancelNotificationNavigation(); busy.value = true;
-  try { const r = await request({ method: 'create', params: { projectId: projectId.value, text: newText.value, ...(newModel.value?{model:newModel.value,effort:newEffort.value as any}:{}) } }); projectModal.value = false; newText.value = ''; await loadNavigation(); if (r.threadId) await select({ id: r.threadId, title: '新任务', cwd: '', updatedAt: Date.now(), projectId: projectId.value }); }
-  catch (e: any) { error.value = e.message; } finally { busy.value = false; }
+  if (busy.value || !canControl.value || !canUse('create-tasks') || !projectId.value || !newText.value.trim()) return; cancelNotificationNavigation(); busy.value = true;
+  const revision = notificationNavigationRevision;
+  const reconciling = !!pendingCreate.value;
+  const attempt = pendingCreate.value ?? { requestId: crypto.randomUUID(), command: { method: 'create' as const, params: { projectId: projectId.value, text: newText.value, ...(newModel.value ? { model: newModel.value, effort: newEffort.value as any } : {}) } } };
+  try {
+    pendingCreate.value = attempt; sessionStorage.setItem('pending-create:' + props.deviceId, JSON.stringify(attempt));
+    const r = await request(attempt.command, attempt.requestId);
+    if (!r?.threadId) throw Object.assign(new Error('创建结果尚未确认，请在电脑端核对。'), { code: 'OUTCOME_UNKNOWN' });
+    pendingCreate.value = undefined; sessionStorage.removeItem('pending-create:' + props.deviceId); newText.value = '';
+    const navigate = active.value && revision === notificationNavigationRevision && projectModal.value;
+    if (navigate) projectModal.value = false;
+    await loadNavigation();
+    if (navigate && active.value && revision === notificationNavigationRevision && r.threadId) await select({ id: r.threadId, title: '新任务', cwd: '', updatedAt: Date.now(), projectId: attempt.command.params.projectId });
+  } catch (e: any) {
+    if (!reconciling && e.code && !['OUTCOME_UNKNOWN', 'INTERNAL'].includes(e.code)) { pendingCreate.value = undefined; try { sessionStorage.removeItem('pending-create:' + props.deviceId); } catch {} }
+    if (active.value && revision === notificationNavigationRevision) error.value = e.message;
+  } finally { busy.value = false; }
+}
+function releasePendingCreate() {
+  if (busy.value || !confirm('请先在电脑端核对新任务。恢复编辑后再次创建可能重复执行，确定已经核对？')) return;
+  pendingCreate.value = undefined; try { sessionStorage.removeItem('pending-create:' + props.deviceId); } catch {}
 }
 function taskState(c:Conversation){const state=activities[c.id]??c;return{...state,running:hasCapability('live-activity')&&state.running};}
 let activityLoading=false;let seenKey='';
@@ -722,7 +753,7 @@ onDeactivated(suspend);
 onUnmounted(() => { disposed.value = true; suspend(); attachments.clear(); });
 function canReloadHome() {
   return !selected.value && !busy.value && !modeChanging.value && !attachments.hasPending.value
-    && !draft.value && ![...drafts.values()].some(Boolean) && !newText.value && !search.value
+    && !draft.value && ![...drafts.values()].some(Boolean) && !newText.value && !pendingCreate.value && !search.value
     && !projectModal.value && !modelModal.value && !subscriptionOpen.value && !notificationOpen.value && !takeoverModal.value && !permissionPicker.value && !fullAccessConfirm.value && !moreMenu.value;
 }
 defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.uploading.value }), canReloadHome, cancelUploads: attachments.cancelPending, suspend, clear: clearNavigation, realign: resyncViewport, openNotificationFromUrl });
@@ -770,9 +801,9 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
           <button v-if="snapshot?.hasMore && limit < 500" class="text-button history-button" @click="limit += 100; read()">较早的消息</button>
           <div v-if="!snapshot && readError" class="empty-state" role="alert"><p>{{ readError }}</p><button class="text-button" @click="readError = ''; read(true)">重新读取</button></div>
           <div v-else-if="!snapshot" class="empty-state"><RefreshCw :size="22" class="spin"/><p>正在读取原会话</p></div>
-          <section v-for="turn in turns" :key="turn.id" class="conversation-turn">
+          <section v-for="turn in turns" :key="`${selected.id}:${turn.id}`" class="conversation-turn">
             <MessageContent v-for="m in turn.users" :key="m.id" :message="m" :conversation-id="selected.id" :device-id="deviceId"/>
-            <section v-if="turn.process.length" class="turn-process"><div class="process-heading" :data-scroll-key="`process:${turn.id}`"><RefreshCw v-if="turn.status === 'inProgress'" :size="14" class="spin"/><Check v-else :size="14"/><span>{{ turn.status === 'inProgress' ? '正在执行' : '执行过程' }}</span><small>{{ turn.process.length }} 项</small></div><div class="process-content"><MessageContent v-for="m in turn.process" :key="m.id" :message="m" :conversation-id="selected.id" :device-id="deviceId"/></div></section>
+            <TurnProcess v-if="turn.process.length" :turn="turn" :conversation-id="selected.id" :device-id="deviceId" :waiting="turn.status === 'inProgress' && !!snapshot?.requests.length" @change="update => chatScroll.change(update, 'preserve')"/>
             <MessageContent v-for="m in turn.results" :key="m.id" :message="m" :conversation-id="selected.id" :device-id="deviceId"/>
             <p v-if="turn.status === 'failed' || turn.status === 'interrupted'" class="turn-outcome">{{ turn.status === 'failed' ? `任务未完成：${turn.reason || '暂未获取到具体原因，请在电脑端查看。'}` : '已停止' }}</p>
           </section>
@@ -791,7 +822,7 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
         </form>
       </template>
     <button v-if="sendMenu" type="button" class="send-mode-scrim" aria-label="关闭发送方式" @click="sendMenu = false"/>
-    <div v-if="projectModal" class="modal-backdrop" @click.self="projectModal = false"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="new-title"><div class="modal-title"><h2 id="new-title">新建任务</h2><button class="icon-button" title="关闭" @click="projectModal = false"><X :size="20"/></button></div><form @submit.prevent="create"><label for="project">现有项目</label><select id="project" v-model="projectId"><option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name ?? p.path }}</option></select><p v-if="!projects.length" class="muted">暂无本机项目</p><button v-if="hasCapability('model-settings')" type="button" class="text-button" @click="openModels('new')"><Brain :size="14"/>{{ newModel || '默认模型' }} {{ effortNames[newEffort] || '' }}</button><label for="new-text">任务</label><textarea id="new-text" v-model="newText" rows="5" maxlength="32000" required/><button class="button primary" :disabled="busy || !canCreate || !projectId || !newText.trim()">创建任务<ArrowRight :size="16"/></button></form></section></div>
+    <div v-if="projectModal" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="new-title"><div class="modal-title"><h2 id="new-title">新建任务</h2><button class="icon-button" title="关闭" @click="projectModal = false"><X :size="20"/></button></div><form @submit.prevent="create"><label for="project">现有项目</label><select id="project" v-model="projectId" :disabled="busy || !!pendingCreate"><option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name ?? p.path }}</option></select><p v-if="!projects.length" class="muted">暂无本机项目</p><button v-if="hasCapability('model-settings')" type="button" class="text-button" :disabled="busy || !!pendingCreate" @click="openModels('new')"><Brain :size="14"/>{{ newModel || '默认模型' }} {{ effortNames[newEffort] || '' }}</button><label for="new-text">任务</label><textarea id="new-text" v-model="newText" :disabled="busy || !!pendingCreate" rows="5" maxlength="32000" required/><p v-if="pendingCreate && !busy" class="warning" role="status">创建结果待核对，原请求已保留，不会自动重复创建。</p><button class="button primary" :disabled="busy || !canCreate || !projectId || !newText.trim()">{{ pendingCreate ? '核对创建结果' : '创建任务' }}<ArrowRight :size="16"/></button><button v-if="pendingCreate" type="button" class="text-button" :disabled="busy" @click="releasePendingCreate">已核对，恢复编辑</button></form></section></div>
     <SubscriptionPanel v-if="subscriptionOpen" mode="mobile" :device-id="deviceId" @close="subscriptionOpen = false" @changed="subscriptionChanged"/>
     <NotificationCenter v-if="notificationOpen" :device-id="deviceId" :task-labels="notificationTaskLabels" :resolve-tasks="resolveNotificationTasks" :open-task="openNotificationTask" @close="notificationOpen = false" @unread="notificationUnread = $event"/>
     <div v-if="modelModal" class="modal-backdrop settings-backdrop" @click.self="modelModal=false"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="model-title"><div class="modal-title"><h2 id="model-title">模型与思考深度</h2><button class="icon-button" title="关闭模型设置" @click="modelModal=false"><X :size="20"/></button></div><form @submit.prevent="saveModel"><label for="model-choice">模型</label><select id="model-choice" v-model="chosenModel"><option v-for="m in models" :key="m.id" :value="m.id">{{ m.name }}</option></select><label for="effort-choice">思考深度</label><select id="effort-choice" v-model="chosenEffort"><option v-for="effort in availableEfforts" :key="effort" :value="effort">{{ effortNames[effort] ?? effort }}</option></select><button class="button primary" :disabled="busy || !canControl || !chosenModel || !chosenEffort"><Check :size="16"/>保存</button></form></section></div>

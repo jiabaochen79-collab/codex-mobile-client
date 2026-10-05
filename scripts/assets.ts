@@ -19,8 +19,8 @@ for (const [index, size] of sizes.entries()) {
 writeFileSync('release/companion.ico', Buffer.concat([icoHeader, ...bitmaps]));
 mkdirSync('release/icons', { recursive: true });
 writeFileSync('release/icons/brand.png', png);
-for (const [name, component] of [['copy', Copy], ['eye', Eye], ['eye-off', EyeOff], ['refresh', RefreshCw], ['settings', Settings], ['unplug', Unplug], ['external-white', ExternalLink], ['monitor', Monitor], ['shield', ShieldCheck], ['ticket', Ticket], ['moon', Moon], ['download', Download], ['feedback', MessageSquare]] as const) {
-  const color = name === 'unplug' ? '#a93d41' : name === 'external-white' ? '#ffffff' : '#445161';
+for (const [name, component] of [['copy', Copy], ['copy-white', Copy], ['eye', Eye], ['eye-off', EyeOff], ['refresh', RefreshCw], ['settings', Settings], ['unplug', Unplug], ['external', ExternalLink], ['monitor', Monitor], ['shield', ShieldCheck], ['ticket', Ticket], ['moon', Moon], ['download', Download], ['feedback', MessageSquare]] as const) {
+  const color = name === 'unplug' ? '#a93d41' : name === 'copy-white' ? '#ffffff' : '#445161';
   const svg = await renderToString(createSSRApp({ render: () => h(component, { size: 20, color }) }));
   await sharp(Buffer.from(svg)).png().toFile(`release/icons/${name}.png`);
 }

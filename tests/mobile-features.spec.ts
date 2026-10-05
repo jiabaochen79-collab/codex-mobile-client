@@ -32,11 +32,15 @@ test('uploads a file, reads its content and preserves the run/unread/view lifecy
   await page.locator('.nav-conversation').filter({hasText:'移动端验收记录'}).click();await expect(page.getByText('UPLOAD-CONTENT-VERIFIED 中文',{exact:false})).toBeVisible();
   await page.getByTitle('项目与会话',{exact:true}).click();await expect(page.getByLabel('完成未读',{exact:true})).toHaveCount(0);
 });
-test('shows the execution process while each long script expands independently', async ({ page }, testInfo) => {
+test('folds finished execution into a round and command batch with independent script details', async ({ page }, testInfo) => {
   await login(page);
   const turn = page.locator('.conversation-turn').filter({ hasText: '请整理第 4 次检查结果。' });
-  await expect(turn.getByText('思考摘要', { exact: true })).toBeVisible();
+  const process = turn.locator('details.turn-process'); await expect(process).not.toHaveAttribute('open', '');
+  await expect(turn.getByText('思考摘要', { exact: true })).toHaveCount(0);
+  await process.locator(':scope > summary').click();
   await expect(turn.getByText('正在核对本轮数据。', { exact: true })).toBeVisible();
+  const batch = process.locator('.tool-batch'); await expect(batch).not.toHaveAttribute('open', '');
+  await batch.locator(':scope > summary').click();
   const step = turn.locator('details.tool-step'); await expect(step).toBeVisible(); await expect(step).not.toHaveAttribute('open', '');
   await expect(step.locator('.tool-summary')).toHaveCSS('white-space', 'nowrap');
   await expect(step.locator('pre')).toBeHidden();

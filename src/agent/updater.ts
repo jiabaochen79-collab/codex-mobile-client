@@ -43,14 +43,16 @@ export class HelperUpdater {
   }
   check(): Promise<void> {
     if (this.closed || this.operation || this.preparingInstall || this.state.phase === 'installing') return this.operation ?? Promise.resolve();
-    clearTimeout(this.retry); this.retry = undefined; this.abort = undefined;
+    clearTimeout(this.retry); this.retry = undefined; const controller = new AbortController(); this.abort = controller;
     this.state.phase = 'checking'; this.state.message = '';
     let downloading = false;
     this.operation = (async () => {
-      const response = await this.options.request('/api/updates/device/check?version=' + this.options.version);
+      const response = await this.options.request('/api/updates/device/check?version=' + this.options.version, { signal: controller.signal });
+      if (controller.signal.aborted) { await response.body?.cancel(); return; }
       let next: ReturnType<typeof verifyRelease> | undefined;
       try {
         const data = checkResponseSchema.parse(await response.json());
+        if (controller.signal.aborted) return;
         const current = data.current ? verifyRelease(data.current, this.options.publicKey) : undefined;
         if (current && current.manifest.version !== this.options.version) throw new Error('Incorrect rollback version');
         const rollback = data.rollback ? verifyRelease(data.rollback, this.options.publicKey) : current;
@@ -65,7 +67,7 @@ export class HelperUpdater {
       this.options.store.set('update:sequence', String(manifest.sequence)); this.candidate = envelope;
       this.pruneCache();
       Object.assign(this.state, { phase: 'available', version: manifest.version, notes: manifest.notes });
-      if (this.state.autoDownload) { downloading = true; await this.fetchPackages(); }
+      if (this.state.autoDownload) { downloading = true; await this.fetchPackages(controller); }
       else this.succeeded();
     })().catch(error => { if (!this.abort?.signal.aborted) this.failed(error, downloading); }).finally(() => { this.operation = undefined; });
     return this.operation;
@@ -74,8 +76,8 @@ export class HelperUpdater {
     if (this.closed || this.operation || this.preparingInstall || this.state.phase === 'installing' || !this.candidate) return this.operation ?? Promise.resolve();
     this.operation = this.fetchPackages().catch(error => { if (!this.abort?.signal.aborted) this.failed(error, true); }).finally(() => { this.operation = undefined; }); return this.operation;
   }
-  private async fetchPackages() {
-    if (!this.candidate) return; this.abort = new AbortController(); this.state.phase = 'downloading'; this.state.message = '';
+  private async fetchPackages(controller = new AbortController()) {
+    if (!this.candidate || controller.signal.aborted || this.closed) return; this.abort = controller; this.state.phase = 'downloading'; this.state.message = '';
     if (!this.previous) throw new RemoteError('UPDATE_ROLLBACK_UNAVAILABLE', '暂不能自动更新：服务器尚未提供当前版本的恢复包。');
     const packages = [this.previous, this.candidate];
     const total = packages.reduce((sum, envelope) => sum + verifyRelease(envelope, this.options.publicKey).manifest.size, 0);

@@ -41,7 +41,17 @@ async function create() {
 }
 async function open(order: PaymentOrder) { loading.value = true; error.value = ''; readRevision++; reading = false; try { await showPayment(await api(`${base}/${order.id}/open`, {})); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
 async function closeOrder(order: PaymentOrder) { loading.value = true; error.value = ''; readRevision++; reading = false; try { await api(`${base}/${order.id}/close`, {}); await load(true); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
-async function copyLink() { try { await navigator.clipboard.writeText(payUrl.value); copied.value = true; } catch { error.value = '无法复制链接。'; } }
+async function copyLink() {
+  if (loading.value || !active.value) return; loading.value = true; error.value = ''; copied.value = false;
+  const link = api(`${base}/${active.value.id}/open`, {}).then(async result => { await showPayment(result); return result.payUrl as string; });
+  try {
+    // Start the clipboard operation in the click gesture; Safari can resolve its data later.
+    if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) await navigator.clipboard.write([new ClipboardItem({ 'text/plain': link.then(value => new Blob([value], { type: 'text/plain' })) })]);
+    else await navigator.clipboard.writeText(await link);
+    copied.value = true;
+  } catch { error.value = '无法复制付款链接，请重试或返回订单重新打开。'; }
+  finally { await link.catch(() => {}); loading.value = false; }
+}
 async function refund() { loading.value = true; error.value = ''; readRevision++; reading = false; try { await api(`${base}/${refundTarget.value.id}/refund`, { reason: refundReason.value, explanation: explanation.value }); refundTarget.value = undefined; explanation.value = ''; await load(true); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
 onMounted(async () => { loading.value = true; await load(); loading.value = false; polling = setInterval(() => { if (!loading.value && document.visibilityState === 'visible') void load(); }, 5000); });
 onUnmounted(() => { readRevision++; clearInterval(polling); });
@@ -54,7 +64,7 @@ onUnmounted(() => { readRevision++; clearInterval(polling); });
         <button class="text-button" @click="active = undefined; view = 'orders'"><ArrowLeft :size="16"/>返回订单</button>
         <p class="purchase-device">设备 {{ active.deviceId }}</p><h3>{{ active.planName }} · {{ active.days }} 天</h3><strong class="purchase-price">¥{{ money(active.priceFen) }}</strong>
         <p class="purchase-state" :class="{ good: active.status === 'paid' }"><Check v-if="active.status === 'paid'" :size="18"/>{{ paymentStatusNames[active.status] }} · {{ active.serviceStatus }}</p>
-        <template v-if="['pending','confirming'].includes(active.status)"><div class="purchase-payment-actions"><a class="button primary" :href="payUrl" target="_blank" rel="noopener noreferrer"><ArrowUpRight :size="17"/>{{ active.channel === 'alipay' ? '去支付宝支付' : '打开付款页面' }}</a><button class="text-button" @click="copyLink"><Check v-if="copied" :size="16"/><Copy v-else :size="16"/>{{ copied ? '已复制' : '复制付款链接' }}</button></div><p class="muted small">有效至 {{ date(active.expires) }}</p><img v-if="qr" :src="qr" class="purchase-qr" alt="本订单付款二维码" width="260" height="260"></template>
+        <template v-if="['pending','confirming'].includes(active.status)"><div class="purchase-payment-actions"><a class="button primary" :href="payUrl" target="_blank" rel="noopener noreferrer" @click="loading && $event.preventDefault()"><ArrowUpRight :size="17"/>{{ active.channel === 'alipay' ? '去支付宝支付' : '打开付款页面' }}</a><button class="text-button" :disabled="loading" @click="copyLink"><Check v-if="copied" :size="16"/><Copy v-else :size="16"/>{{ copied ? '已复制' : '复制付款链接' }}</button></div><p class="muted small">有效至 {{ date(active.expires) }}</p><img v-if="qr" :src="qr" class="purchase-qr" alt="本订单付款二维码" width="260" height="260"></template>
         <div v-if="active.lastError" class="alert">{{ active.lastError }}</div>
       </div>
       <template v-else-if="refundTarget">

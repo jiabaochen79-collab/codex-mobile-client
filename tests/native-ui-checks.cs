@@ -25,7 +25,7 @@ internal static class NativeUiChecks {
             Check(version.ProductVersion == args[2] && version.FileVersion == args[2] + ".0", "Executable version must match package.json");
             Check(assembly.GetName().Version.ToString() == args[2] + ".0", "Assembly version must match package.json");
             var results = new List<object>(); Directory.CreateDirectory(args[1]);
-            foreach (var sample in new[] { "automatic", "custom", "long-password", "offline", "wide", "scaled-150", "power-risk", "power-unknown", "compatibility-limited", "compatibility-blocked" }) {
+            foreach (var sample in new[] { "default", "automatic", "custom", "long-password", "offline", "wide", "scaled-150", "power-risk", "power-unknown", "compatibility-limited", "compatibility-blocked", "update-ready", "update-downloading" }) {
                 using (var signal = new EventWaitHandle(false, EventResetMode.AutoReset))
                 using (var form = (Form)Activator.CreateInstance(type, Hidden, null, new object[] { signal }, null)) {
                     Check(form.Text == "ChatGPT 远程助手", "Product title");
@@ -41,6 +41,7 @@ internal static class NativeUiChecks {
                     if (sample == "offline" || sample == "scaled-150") { data["connection"] = "offline"; data["connectionError"] = new Dictionary<string, object> { { "stage", "save" }, { "code", "CREDENTIAL_SAVE" }, { "message", "设备凭据保存失败，请检查安全软件拦截、磁盘空间及目录权限。" } }; }
                     if (sample.StartsWith("compatibility-")) data["client"] = new Dictionary<string, object> { { "available", sample == "compatibility-limited" }, { "version", "26.903.61454" }, { "reason", "发送消息接口需适配，请更新助手。" } };
                     if (sample == "automatic") data["update"] = new Dictionary<string, object> { { "phase", "idle" }, { "progress", 0 }, { "autoDownload", true }, { "message", "已是最新版本" }, { "notes", "" }, { "checkedAt", null } };
+                    if (sample.StartsWith("update-")) data["update"] = new Dictionary<string, object> { { "phase", sample == "update-ready" ? "ready" : "downloading" }, { "version", "0.4.29" }, { "progress", 45 }, { "autoDownload", true } };
                     Set(form, "token", "fixture-only"); Set(form, "state", data); type.GetMethod("Render", Hidden).Invoke(form, null);
                     if (sample == "automatic") {
                         type.GetField("working", Hidden).SetValue(form, true);
@@ -71,7 +72,7 @@ internal static class NativeUiChecks {
                     Check(revoke.Image != null && !Object.ReferenceEquals(revoke.Image, ((Button)Field(form, "refreshCode")).Image), "Revoke and refresh must use different icons");
                     Check(revoke.Enabled == (sample != "offline"), "No authorizations means revoke disabled");
                     Check(((Button)Field(form, "reveal")).AccessibleName == (sample == "long-password" ? "隐藏密码" : "显示密码"), "Password visibility label");
-                    form.ClientSize = sample == "wide" ? new Size(1040, 724) : sample == "automatic" ? new Size(760, 614) : new Size(form.MinimumSize.Width - (form.Width - form.ClientSize.Width), form.MinimumSize.Height - (form.Height - form.ClientSize.Height));
+                    form.ClientSize = sample == "wide" ? new Size(1040, 724) : sample == "default" ? new Size(760, 642) : sample == "automatic" ? new Size(760, 614) : new Size(form.MinimumSize.Width - (form.Width - form.ClientSize.Width), form.MinimumSize.Height - (form.Height - form.ClientSize.Height));
                     if (sample == "scaled-150") {
                         var fonts = Children(form).Select(c => new { Control = c, Font = c.Font }).ToArray();
                         var clientSize = Size.Ceiling(new SizeF(form.ClientSize.Width * 1.5f, form.ClientSize.Height * 1.5f));
@@ -82,6 +83,17 @@ internal static class NativeUiChecks {
                         foreach (var entry in fonts) entry.Control.Font = new Font(entry.Font.FontFamily, entry.Font.Size * 1.5f, entry.Font.Style);
                     }
                     form.PerformLayout(); Application.DoEvents();
+                    var copyAll = (Button)Field(form, "copyAll"); var openWeb = (Button)Field(form, "openWeb");
+                    Check(copyAll.BackColor == Color.FromArgb(39, 100, 208) && copyAll.ForeColor == Color.White && copyAll.FlatAppearance.BorderSize == 0, "Copy connection information must be the primary action");
+                    Check(openWeb.BackColor == Color.White && openWeb.ForeColor != Color.White && openWeb.FlatAppearance.BorderSize == 1, "Open webpage must remain a secondary action");
+                    Check(copyAll.Parent == openWeb.Parent && copyAll.Right <= openWeb.Left, "Primary copy action must come before the webpage action without overlap");
+                    Check(copyAll.Image != null && openWeb.Image != null, "Both connection actions must retain their icons");
+                    Check(Children(form).OfType<Label>().Any(label => label.Visible && label.Text == "手机连接"), "Connection actions must have a section heading");
+                    foreach (var button in new[] { copyAll, openWeb }) {
+                        var measured = TextRenderer.MeasureText(button.Text, button.Font, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+                        Check(measured.Width + button.Image.Width + button.Padding.Horizontal + 8 <= button.Width && measured.Height + button.Padding.Vertical <= button.Height, "Connection action text must fit: " + sample + " " + button.Text);
+                    }
+                    if (sample.StartsWith("update-")) Check(((Button)Field(form, "updateButton")).Visible, "Update indicator must remain visible alongside connection actions");
                     var feedbackMenu = (ToolStripMenuItem)Field(form, "helpFeedbackMenu");
                     Check(feedbackMenu.Text == "问题反馈", "Feedback must live under Help");
                     Check(((ToolStripMenuItem)Field(form, "trayFeedbackMenu")).Text == "问题反馈", "Tray feedback must use the same label");

@@ -74,7 +74,7 @@ export const MAX_IMAGE_BYTES = 1024 * 1024;
 export type Message = { id: string; role: 'user' | 'assistant' | 'tool'; text: string; images?: MessageImage[]; status?: string; turnId?: string; turnStatus?: string; turnReason?: string; phase?: 'commentary' | 'final' | 'reasoning' };
 export type Interaction = { id: string | number; kind: 'command' | 'file' | 'input' | 'plan' | 'unsupported'; title: string; detail: string; plan?: { turnId: string; revision: string }; questions?: { id: string; question: string; options: { label: string; description?: string }[] }[] };
 export type QueuedMessage = { id: string; text: string; attachments: { id: string; name: string }[]; state: 'pending' | 'paused' | 'sending' | 'uncertain'; reason: string | null; created: number };
-export type Snapshot = { id: string; title: string; epoch: string; turnId: string | null; busy: boolean; messages: Message[]; requests: Interaction[]; hasMore: boolean; settings?: ThreadSettings; completionId?: string; revision?: string; lastTurnStatus?: string; lastTurnId?: string | null; nativeQueuedCount?: number | null; queued?: QueuedMessage[] };
+export type Snapshot = { id: string; title: string; epoch: string; turnId: string | null; busy: boolean; messages: Message[]; requests: Interaction[]; hasMore: boolean; settings?: ThreadSettings; completionId?: string; revision?: string; lastTurnStatus?: string; lastTurnId?: string | null; lastTurnReason?: string; nativeQueuedCount?: number | null; queued?: QueuedMessage[] };
 export interface DesktopAdapter {
   updateBlockers?(): Promise<string[]>;
   notificationSources?(taskIds?: string[]): Promise<{ id: string; path: string }[]>;

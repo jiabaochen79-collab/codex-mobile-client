@@ -25,6 +25,19 @@ describe('helper updater', () => {
     updaters.push(updater); return updater;
   };
   const latest = () => Response.json({ current: null, release: null });
+  it('does not download or mutate the release after a cancelled check receives a late response', async () => {
+    let finish!: (response: Response) => void;
+    let signal: AbortSignal | undefined;
+    const request = vi.fn((path: string, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>(resolve => { finish = resolve; });
+    });
+    const updater = fixture(request); const checking = updater.check();
+    updater.cancel(); expect(signal?.aborted).toBe(true);
+    finish(Response.json({ current: release('0.4.16', 16), release: release('0.4.17', 17) }));
+    await checking;
+    expect(request).toHaveBeenCalledTimes(1); expect(updater.state.phase).toBe('idle'); expect(updater.state.message).toBe('下载已暂停');
+  });
   it('prunes superseded packages and partials while preserving rollback and unrelated files', async () => {
     let candidate = release('0.4.17', 17); const previous = release('0.4.16', 16);
     const updater = fixture(async path => path.includes('/check?') ? Response.json({ current: previous, release: candidate }) : Response.json({}));

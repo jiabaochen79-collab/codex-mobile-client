@@ -30,6 +30,10 @@ const permissionSettings: Record<PermissionMode, { permissions: string; approval
 export function normalizeSnapshot(state: any, epoch: string, limit = 100, images?: ConversationImages): Snapshot {
   const idle = state.threadRuntimeStatus?.type === 'idle';
   const turnStatus = (turn: any) => idle && turn?.status === 'inProgress' ? 'interrupted' : turn?.status;
+  const failureReason = (turn: any) => {
+    const raw = turn?.status === 'failed' ? (typeof turn.error === 'string' ? turn.error : turn.error?.message) : undefined;
+    return typeof raw === 'string' ? raw.split(/[\r\n]/, 1)[0].replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 400) : '';
+  };
   images?.begin(state.id);
   const projectImages = (references: { source: string; alt: string }[]) => references.slice(0, 20).flatMap(reference => {
     const image = images?.register(state.id, reference.source, reference.alt); return image ? [image] : [];
@@ -41,8 +45,7 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
   const messages: Message[] = [];
   const seen = new Set<string>();
   for (const [index, turn] of turns.entries()) {
-    const rawReason = turn.status === 'failed' ? (typeof turn.error === 'string' ? turn.error : turn.error?.message) : undefined;
-    const turnReason = typeof rawReason === 'string' ? rawReason.split(/[\r\n]/, 1)[0].replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 400) : '';
+    const turnReason = failureReason(turn);
     const turnMeta = { turnId: turn.turnId ?? `pending:${turn.turnStartedAtMs ?? index}`, turnStatus: turnStatus(turn) ?? 'completed', ...(turnReason ? { turnReason } : {}) };
     for (const item of turn.items ?? []) {
       if (!item.id || seen.has(item.id)) continue;
@@ -91,7 +94,7 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
   let bytes = 0;
   const bounded: Message[] = [];
   for (const m of messages.slice(-limit).reverse()) { bytes += Buffer.byteLength(JSON.stringify(m)); if (bytes > 700000) break; bounded.unshift(m); }
-  return { id: state.id, title: state.title ?? state.generatedTitle ?? '未命名会话', epoch, turnId: active?.turnId ?? null, busy: !!active || state.threadRuntimeStatus?.type === 'active', lastTurnStatus: turnStatus(turns.at(-1)), lastTurnId: turns.at(-1)?.turnId ?? null, messages: bounded, requests, hasMore: messages.length > bounded.length, settings: threadSettings(state) };
+  return { id: state.id, title: state.title ?? state.generatedTitle ?? '未命名会话', epoch, turnId: active?.turnId ?? null, busy: !!active || state.threadRuntimeStatus?.type === 'active', lastTurnStatus: turnStatus(turns.at(-1)), lastTurnId: turns.at(-1)?.turnId ?? null, ...(failureReason(turns.at(-1)) ? { lastTurnReason: failureReason(turns.at(-1)) } : {}), messages: bounded, requests, hasMore: messages.length > bounded.length, settings: threadSettings(state) };
 }
 
 export class CodexDesktop extends EventEmitter implements DesktopAdapter {
@@ -113,10 +116,13 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
   private queueCounts?: { mtime: number; size: number; counts: Map<string, number> };
   private notificationSourceCache?: { at: number; key: string; rows: { id: string; path: string }[] };
   async updateBlockers() {
+    if (existsSync(join(this.codexHome, '.codex-global-state.json'))) {
+      if (this.nativeQueuedCount('') === null) return ['无法核对电脑端队列，请稍后安装'];
+      if ([...this.queueCounts!.counts.values()].some(count => count > 0)) return ['电脑端有尚未发送的队列消息'];
+    }
     for (const followed of this.followed.values()) {
       if (!followed.state) return ['任务状态尚未同步，请稍后安装'];
       if (followed.state.requests?.length) return ['有待处理的审批或计划确认'];
-      if (this.nativeQueuedCount(followed.id)) return ['电脑端有尚未发送的队列消息'];
     }
     return [];
   }

@@ -45,14 +45,14 @@ try {
 } catch {}
 function savePreference() { if (!remember.value) rememberedDeviceId.value = ''; try { localStorage.setItem('remote-login', JSON.stringify({ remember: remember.value, deviceId: rememberedDeviceId.value })); } catch {} }
 function recordPanel(value: any) { panel.value = value; if (value && activeId.value) panels.set(activeId.value, value); }
-function clearPanel(id: string) { panels.get(id)?.clear(); panels.delete(id); revisions.value[id] = (revisions.value[id] ?? 0) + 1; }
+function clearPanel(id: string, preserveDrafts = false) { panels.get(id)?.clear(preserveDrafts); if (preserveDrafts) return; panels.delete(id); revisions.value[id] = (revisions.value[id] ?? 0) + 1; }
 function rememberSelection(id: string) { try { if (id) sessionStorage.setItem('remote-active-device', id); else sessionStorage.removeItem('remote-active-device'); } catch {} }
 function expired(id: string, message: string) {
-  clearPanel(id); const device = devices.value.find(d => d.deviceId === id); if (device) device.authorized = false;
+  clearPanel(id, true); const device = devices.value.find(d => d.deviceId === id); if (device) device.authorized = false;
   if (activeId.value === id) { panel.value?.suspend(); activeId.value = ''; rememberSelection(''); deviceId.value = id; code.value = ''; adding.value = true; directoryOpen.value = false; error.value = message; }
 }
 function applyDirectory(result: { devices: PairedDevice[] }) {
-  for (const id of panels.keys()) if (id !== activeId.value && !result.devices.some(d => d.deviceId === id && d.authorized)) clearPanel(id);
+  for (const id of panels.keys()) if (id !== activeId.value && !result.devices.some(d => d.deviceId === id && d.authorized)) clearPanel(id, result.devices.some(d => d.deviceId === id));
   devices.value = result.devices;
   if (!devices.value.length) directoryOpen.value = false;
   if (activeId.value && !current.value?.authorized) expired(activeId.value, current.value?.disabled ? '该设备已被管理员封禁，请联系运营方。' : '授权已失效，请使用当前连接密码重新连接。');
@@ -91,7 +91,7 @@ async function connect() {
     await refreshDirectory(true);
     const result = await api('/api/connect', { deviceId: id, code: password, remember: remembered, multiple: true });
     code.value = ''; rememberedDeviceId.value = remembered ? id : ''; savePreference();
-    directoryRevision++; applyDirectory(result); clearPanel(id); panel.value?.suspend(); activeId.value = id; rememberSelection(id); adding.value = false; directoryOpen.value = false;
+    directoryRevision++; applyDirectory(result); clearPanel(id, true); panel.value?.suspend(); activeId.value = id; rememberSelection(id); adding.value = false; directoryOpen.value = false;
   } catch (e: any) { error.value = e.message; } finally { connecting.value = false; }
 }
 async function change(path: string, body: unknown) {
@@ -111,7 +111,7 @@ async function remove() {
 async function logoutAll() {
   if (panel.value?.leaveState().busy) { error.value = '操作正在确认，请稍后退出。'; return; }
   if (working.value) return; working.value = true;
-  try { await api('/api/paired-devices/logout', {}); panel.value?.suspend(); activeId.value = ''; rememberSelection(''); devices.value = []; panels.clear(); generation.value++; directoryRevision++; confirmLogout.value = false; directoryOpen.value = false; adding.value = false; code.value = ''; error.value = ''; }
+  try { await api('/api/paired-devices/logout', {}); panel.value?.suspend(); for (const cached of panels.values()) cached.clear(); activeId.value = ''; rememberSelection(''); devices.value = []; panels.clear(); generation.value++; directoryRevision++; confirmLogout.value = false; directoryOpen.value = false; adding.value = false; code.value = ''; error.value = ''; }
   catch (e: any) { error.value = e.message; } finally { working.value = false; }
 }
 async function loggedOut(id: string) { clearPanel(id); if (activeId.value === id) { activeId.value = ''; rememberSelection(''); adding.value = false; directoryOpen.value = false; code.value = ''; deviceId.value = rememberedDeviceId.value; } try { await refreshDirectory(); } catch (e: any) { error.value = e.message; } }
