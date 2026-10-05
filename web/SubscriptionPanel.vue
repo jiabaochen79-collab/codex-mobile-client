@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, onMounted, ref } from 'vue';
 import { Check, ClipboardList, Eye, EyeOff, KeyRound, RefreshCw, ShoppingCart, X } from 'lucide-vue-next';
 import { api as requestApi } from './api';
 import { licenseCodeSchema, subscriptionLabel, type Catalog, type Subscription, type TrialEligibility } from '../src/shared/subscription';
+import { money as price } from '../src/shared/commerce';
 const props = defineProps<{ mode: 'desktop' | 'mobile' | 'guest'; deviceId?: string }>();
 const api = (path: string, body?: unknown) => requestApi(path, body, props.mode === 'mobile' && props.deviceId ? { 'X-Remote-Device': props.deviceId } : undefined);
 const OrdersPanel = defineAsyncComponent(() => import('./OrdersPanel.vue')); const ordersOpen = ref(false); const purchasePlan = ref<string>();
@@ -16,7 +17,6 @@ async function claimTrial() {
 }
 const code = ref(''); const accepted = ref(false); const showCode = ref(false); const busy = ref(false); const error = ref(''); const success = ref(false);
 const valid = computed(() => accepted.value && licenseCodeSchema.safeParse(code.value).success && !!catalog.value);
-const price = (fen: number) => (fen / 100).toFixed(fen % 100 ? 1 : 0);
 const expiry = computed(() => subscription.value?.expiresAt ? new Date(subscription.value.expiresAt).toLocaleString('zh-CN', { hour12: false }) : null);
 async function load() {
   busy.value = true; error.value = '';
@@ -29,7 +29,7 @@ async function activate() {
   if (!valid.value || busy.value) return; busy.value = true; error.value = ''; success.value = false;
   try {
     const result = await api(props.mode === 'desktop' ? '/local/license' : '/api/subscription/redeem', { code: code.value.trim(), termsVersion: catalog.value!.termsVersion });
-    catalog.value = result.catalog; subscription.value = result.subscription; code.value = ''; accepted.value = false; success.value = true; emit('changed', result.subscription);
+    catalog.value = result.catalog; subscription.value = result.subscription; trial.value = result.trial; code.value = ''; accepted.value = false; success.value = true; emit('changed', result.subscription);
   } catch (e: any) { error.value = e.message; } finally { busy.value = false; }
 }
 onMounted(load);

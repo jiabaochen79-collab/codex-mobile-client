@@ -23,6 +23,7 @@ const error = ref('');
 const info = ref('');
 const standalone = ref(false);
 let listRevision = 0;
+const incomingDuringLoad = new Map<string, NotificationItem>();
 
 const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
 const isIos = /iPhone|iPad|iPod/i.test(userAgent) || typeof navigator !== 'undefined' && navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
@@ -59,9 +60,15 @@ async function load() {
     settings.value = settingResult.settings;
     pushConfigured.value = settingResult.pushConfigured === true;
     vapidPublicKey.value = settingResult.vapidPublicKey ?? null;
-    items.value = listResult.items ?? [];
+    const snapshot = (listResult.items ?? []) as NotificationItem[];
+    const snapshotIds = new Set(snapshot.map(item => item.id));
+    items.value = [...incomingDuringLoad.values()].filter(item => !snapshotIds.has(item.id)).concat(snapshot.map(item => {
+      const incoming = incomingDuringLoad.get(item.id);
+      return incoming ? { ...incoming, readAt: incoming.readAt ?? item.readAt } : item;
+    })).sort((a, b) => b.createdAt - a.createdAt);
     nextCursor.value = listResult.nextCursor ?? null;
-    updateUnread(Number(listResult.unread) || 0);
+    updateUnread((Number(listResult.unread) || 0) + [...incomingDuringLoad.values()].filter(item => !snapshotIds.has(item.id) && !item.readAt).length);
+    incomingDuringLoad.clear();
     void props.resolveTasks(items.value.map(item => item.taskId));
     await refreshSystemPushState();
   } catch (e: any) { error.value = e.message; }
@@ -158,6 +165,7 @@ async function readAll() {
 function onIncoming(event: Event) {
   const item = (event as CustomEvent<NotificationItem>).detail;
   if (!item || item.deviceId !== props.deviceId) return;
+  if (loading.value) incomingDuringLoad.set(item.id, item);
   listRevision++;
   const index = items.value.findIndex(row => row.id === item.id);
   if (index >= 0) { if (items.value[index].readAt) item.readAt ??= items.value[index].readAt; items.value[index] = item; }

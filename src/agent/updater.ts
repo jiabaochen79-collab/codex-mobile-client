@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, statfsSync, unlinkSync, writeFileSync, createWriteStream } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, statfsSync, unlinkSync, writeFileSync, createWriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -60,9 +60,10 @@ export class HelperUpdater {
         this.previous = rollback?.envelope;
       } catch { throw new RemoteError('UPDATE_INVALID', '更新信息校验失败，已阻止更新。请通过“问题反馈”联系支持。'); }
       this.state.checkedAt = Date.now();
-      if (!next) { this.candidate = undefined; Object.assign(this.state, { phase: 'idle', version: undefined, progress: 0, notes: '', message: '已是最新版本' }); this.succeeded(); return; }
+      if (!next) { this.candidate = undefined; this.pruneCache(); Object.assign(this.state, { phase: 'idle', version: undefined, progress: 0, notes: '', message: '已是最新版本' }); this.succeeded(); return; }
       const { envelope, manifest } = next;
       this.options.store.set('update:sequence', String(manifest.sequence)); this.candidate = envelope;
+      this.pruneCache();
       Object.assign(this.state, { phase: 'available', version: manifest.version, notes: manifest.notes });
       if (this.state.autoDownload) { downloading = true; await this.fetchPackages(); }
       else this.succeeded();
@@ -88,6 +89,27 @@ export class HelperUpdater {
     if (this.abort.signal.aborted) return;
     this.succeeded(); this.state.phase = 'ready'; this.state.progress = 100;
     await this.report('ready', this.state.version!);
+  }
+  private pruneCache() {
+    const keep = new Set<string>();
+    try {
+      for (const envelope of [this.previous, this.candidate]) if (envelope) keep.add(verifyRelease(envelope, this.options.publicKey).manifest.sha256);
+      const jobPath = join(this.dir, 'runner/job.json');
+      if (existsSync(jobPath)) {
+        const job = JSON.parse(readFileSync(jobPath, 'utf8'));
+        const resultPath = join(this.dir, 'result.json');
+        const result = existsSync(resultPath) ? JSON.parse(readFileSync(resultPath, 'utf8')) : undefined;
+        if (!result || result.version !== job.version || result.installerRunning === true || !['installed', 'failed', 'rolled_back'].includes(result.phase)) {
+          for (const envelope of [job.previous, job.next]) keep.add(verifyRelease(envelope, this.options.publicKey).manifest.sha256);
+        }
+      }
+      for (const entry of readdirSync(this.dir, { withFileTypes: true })) {
+        const match = /^([a-f0-9]{64})\.exe(?:\.part)?$/.exec(entry.name);
+        if (entry.isFile() && match && !keep.has(match[1])) {
+          try { unlinkSync(join(this.dir, entry.name)); } catch {}
+        }
+      }
+    } catch { /* Preserve recovery files when their state cannot be verified. */ }
   }
   private async fetchPackage(envelope: SignedRelease, onProgress: (downloaded: number) => void) {
     const { manifest: m } = verifyRelease(envelope, this.options.publicKey); const file = join(this.dir, m.sha256 + '.exe');

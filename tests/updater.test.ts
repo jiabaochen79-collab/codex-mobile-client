@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { generateKeyPairSync, sign, createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
@@ -25,6 +25,32 @@ describe('helper updater', () => {
     updaters.push(updater); return updater;
   };
   const latest = () => Response.json({ current: null, release: null });
+  it('prunes superseded packages and partials while preserving rollback and unrelated files', async () => {
+    let candidate = release('0.4.17', 17); const previous = release('0.4.16', 16);
+    const updater = fixture(async path => path.includes('/check?') ? Response.json({ current: previous, release: candidate }) : Response.json({}));
+    updater.setting(false); const dir = join(directories.at(-1)!, 'updates');
+    const save = (envelope: ReturnType<typeof release>, suffix = '') => { const m = JSON.parse(Buffer.from(envelope.payload, 'base64').toString()); const name = m.sha256 + '.exe' + suffix; writeFileSync(join(dir, name), m.version); return name; };
+    const rollback = save(previous); let retained = save(candidate);
+    writeFileSync(join(dir, 'user-notes.txt'), 'keep'); mkdirSync(join(dir, 'runner'));
+    for (const version of [18, 19, 20]) {
+      const old = retained; save(candidate, '.part'); candidate = release('0.4.' + version, version); retained = save(candidate);
+      await updater.check(); expect(existsSync(join(dir, old))).toBe(false); expect(existsSync(join(dir, old + '.part'))).toBe(false);
+      expect(readdirSync(dir).filter(name => name.endsWith('.exe')).sort()).toEqual([rollback, retained].sort());
+      expect(readFileSync(join(dir, 'user-notes.txt'), 'utf8')).toBe('keep');
+    }
+  });
+  it('preserves packages referenced by an unfinished installer and skips unsafe cleanup state', async () => {
+    const previous = release('0.4.16', 16), candidate = release('0.4.18', 18), active = release('0.4.17', 17);
+    const updater = fixture(async () => Response.json({ current: previous, release: candidate })); updater.setting(false);
+    const dir = join(directories.at(-1)!, 'updates'); mkdirSync(join(dir, 'runner'));
+    const sha = JSON.parse(Buffer.from(active.payload, 'base64').toString()).sha256; writeFileSync(join(dir, sha + '.exe'), 'active');
+    writeFileSync(join(dir, 'runner/job.json'), JSON.stringify({ previous, next: active, version: '0.4.17' }));
+    await updater.check(); expect(existsSync(join(dir, sha + '.exe'))).toBe(true);
+    writeFileSync(join(dir, 'runner/job.json'), 'invalid'); await updater.check(); expect(existsSync(join(dir, sha + '.exe'))).toBe(true);
+    writeFileSync(join(dir, 'runner/job.json'), JSON.stringify({ previous, next: active, version: '0.4.17' }));
+    writeFileSync(join(dir, 'result.json'), JSON.stringify({ phase: 'installed', version: '0.4.17' }));
+    await updater.check(); expect(existsSync(join(dir, sha + '.exe'))).toBe(false);
+  });
   afterEach(() => { for (const updater of updaters.splice(0)) updater.close(); vi.useRealTimers(); vi.clearAllMocks(); for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
   const readyFixture = async (blockers: () => Promise<string[]>, freeze = vi.fn()) => {

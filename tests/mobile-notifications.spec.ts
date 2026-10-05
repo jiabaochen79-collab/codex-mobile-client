@@ -10,9 +10,11 @@ const tasks = [
 const notifications = tasks.map((task, index) => ({ id: `33333333-3333-4333-8333-33333333333${index}`, deviceId, taskId: task.id, turnId: `turn-${index}`, status: 'completed', occurredAt: Date.now(), createdAt: Date.now(), readAt: null, delivery: 'accepted' }));
 const link = (index = 0, device = deviceId) => `${origin}/?notification=${notifications[index].id}&notificationDevice=${device}`;
 
-async function fixture(page: Page, initiallyReady = true, missing = false, longHistory = false) {
+async function fixture(page: Page, initiallyReady = true, missing = false, longHistory = false, controlling = false) {
   const commands: { device: string; command: any }[] = []; const reads: string[] = []; const statuses = new Map<string, (ready: boolean) => void>();
   let notify!: () => void;
+  let readTaskId: string | undefined;
+  let heldTaskId: string | undefined; let heldRead: (() => void) | undefined;
   await page.route('**/api/bootstrap', route => route.fulfill({ json: { mode: 'mobile' } }));
   const devices = [deviceId, otherDeviceId].map((device, index) => ({ deviceId: device, name: index ? 'Office computer' : 'Home computer', lastUsed: 2 - index, remembered: true, authorized: true, online: true, enabled: true }));
   await page.route('**/api/paired-devices**', route => route.fulfill({ json: { devices } }));
@@ -26,24 +28,27 @@ async function fixture(page: Page, initiallyReady = true, missing = false, longH
   });
   await page.routeWebSocket('**/ws/mobile*', ws => {
     const device = new URL(ws.url()).searchParams.get('remoteDevice')!;
-    const status = (ready: boolean) => ws.send(JSON.stringify({ type: 'status', online: ready, enabled: true, client: { available: ready, capabilities: ['project-navigation', 'multi-terminal'] }, control: { role: 'viewer', epoch: null, terminals: [] } }));
+    const status = (ready: boolean) => ws.send(JSON.stringify({ type: 'status', online: ready, enabled: true, client: { available: ready, capabilities: ['project-navigation', 'multi-terminal'] }, control: { role: controlling ? 'controller' : 'viewer', epoch: null, terminals: [] } }));
     statuses.set(device, status); status(initiallyReady);
     notify = () => ws.send(JSON.stringify({ type: 'notification', notification: { ...notifications[0], deviceId: device } }));
     ws.onMessage(data => {
-      const { id, command } = JSON.parse(String(data)); commands.push({ device, command }); let result: any;
+      const { id, command } = JSON.parse(String(data)); commands.push({ device, command }); let result: any = { accepted: true };
       if (command.method === 'projects') result = { projects: [{ id: 'project-a', name: 'Operations', path: 'C:/test' }] };
       if (command.method === 'list') result = command.params.projectId === null ? { conversations: [], hasMore: false }
         : command.params.projectId ? { conversations: tasks, hasMore: false }
         : { conversations: tasks.slice(command.params.offset, command.params.offset + 1), hasMore: command.params.offset === 0 };
       if (command.method === 'read') {
         if (missing) { ws.send(JSON.stringify({ type: 'result', id, error: { code: 'NOT_FOUND', message: 'Task no longer exists' } })); return; }
-        const task = tasks.find(row => row.id === command.params.id)!;
+        const task = tasks.find(row => row.id === (readTaskId ?? command.params.id))!;
         result = { id: task.id, title: task.title, epoch: 'fixture', busy: false, turnId: null, lastTurnId: notifications[tasks.indexOf(task)].turnId, messages: [...(longHistory ? Array.from({ length: 40 }, (_, index) => ({ id: 'history-' + index, turnId: 'old-' + index, role: 'assistant', text: 'Earlier history '.repeat(30) })) : []), { id: 'final', role: 'assistant', text: 'Result: ' + task.title }], requests: [], hasMore: false };
       }
-      ws.send(JSON.stringify({ type: 'result', id, result }));
+      const reply = () => ws.send(JSON.stringify({ type: 'result', id, result }));
+      if (command.method === 'read' && command.params.id === heldTaskId) { heldTaskId = undefined; heldRead = reply; return; }
+      reply();
     });
   });
-  return { commands, reads, statuses, notify: () => notify() };
+  return { commands, reads, statuses, notify: () => notify(), overrideRead: (id?: string) => readTaskId = id,
+    holdRead: (id: string) => heldTaskId = id, readHeld: () => !!heldRead, releaseRead: () => { heldRead?.(); heldRead = undefined; } };
 }
 
 async function pushClick(page: Page, url: string) {
@@ -128,6 +133,95 @@ test('does not consume a newer notification when an earlier request finishes lat
     expect(state.reads).toEqual([deviceId]);
     expect(state.commands.filter(row => row.command.method === 'read').map(row => row.command.params.id)).toEqual([tasks[1].id]);
   } finally { release(); }
+});
+
+test('does not reopen a delayed notification after manually selecting and sending in another task', async ({ page }) => {
+  const state = await fixture(page, true, false, false, true);
+  let release!: () => void; let requested = false;
+  const gate = new Promise<void>(resolve => release = resolve);
+  await page.route(`**/api/notifications/${notifications[1].id}`, async route => { requested = true; await gate; await route.fulfill({ json: { item: notifications[1] } }); });
+  await page.goto(link(1)); await expect.poll(() => requested).toBe(true);
+  try {
+    await page.locator('.project-toggle').filter({ hasText: 'Operations' }).click();
+    await page.getByRole('button', { name: tasks[0].title, exact: true }).click();
+    await page.getByLabel('消息', { exact: true }).fill('Send only to the task I selected');
+    await page.getByTitle('发送消息', { exact: true }).click();
+    await expect(page.getByLabel('消息', { exact: true })).toHaveValue('');
+    const response = page.waitForResponse(url => url.url().endsWith('/api/notifications/' + notifications[1].id));
+    release(); await response;
+    await expect.poll(() => new URL(page.url()).searchParams.has('notification')).toBe(false);
+    await expect(page.locator('.chat-heading h1')).toHaveText(tasks[0].title);
+    expect(state.reads).toEqual([]);
+    expect(state.commands.filter(row => row.command.method === 'send').map(row => row.command.params.id)).toEqual([tasks[0].id]);
+    expect(state.commands.filter(row => row.command.method === 'read').every(row => row.command.params.id === tasks[0].id)).toBe(true);
+  } finally { release(); }
+});
+
+test('does not return to an old notification after its read receipt failed and the user sends elsewhere', async ({ page }) => {
+  const state = await fixture(page, true, false, false, true);
+  let receipts = 0;
+  await page.route(`**/api/notifications/${notifications[1].id}/read`, route => ++receipts === 1
+    ? route.fulfill({ status: 503, json: { error: { message: 'Read receipt temporarily unavailable' } } })
+    : route.fallback());
+  await page.goto(link(1));
+  await expect(page.locator('.chat-heading h1')).toHaveText(tasks[1].title);
+  await expect(page.getByRole('alert')).toContainText('Read receipt temporarily unavailable');
+  await page.getByTitle('项目与会话', { exact: true }).click();
+  await page.locator('.project-toggle').filter({ hasText: 'Operations' }).click();
+  await page.getByRole('button', { name: tasks[0].title, exact: true }).click();
+  await page.getByLabel('消息', { exact: true }).fill('Keep this task open after sending');
+  await page.getByTitle('发送消息', { exact: true }).click();
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('');
+  await expect.poll(() => new URL(page.url()).searchParams.has('notification')).toBe(false);
+  await expect(page.locator('.chat-heading h1')).toHaveText(tasks[0].title);
+  expect(receipts).toBe(1); expect(state.reads).toEqual([]);
+});
+
+test('sending cancels an already-started notification task read without clearing the next draft', async ({ page }) => {
+  const state = await fixture(page, true, false, false, true); await page.goto(origin);
+  await page.locator('.project-toggle').filter({ hasText: 'Operations' }).click();
+  await page.getByRole('button', { name: tasks[0].title, exact: true }).click();
+  state.holdRead(tasks[1].id); await pushClick(page, link(1));
+  await expect.poll(state.readHeld).toBe(true);
+  try {
+    await page.getByLabel('消息', { exact: true }).fill('Do not navigate away while this sends');
+    await page.getByTitle('发送消息', { exact: true }).click();
+    await expect(page.getByLabel('消息', { exact: true })).toHaveValue('');
+    await page.getByLabel('消息', { exact: true }).fill('Next draft in the same task');
+    state.releaseRead();
+    await expect.poll(() => new URL(page.url()).searchParams.has('notification')).toBe(false);
+    await page.waitForTimeout(100);
+    await expect(page.locator('.chat-heading h1')).toHaveText(tasks[0].title);
+    await expect(page.getByLabel('消息', { exact: true })).toHaveValue('Next draft in the same task');
+    expect(state.reads).toEqual([]);
+    expect(state.commands.filter(row => row.command.method === 'send').map(row => row.command.params.id)).toEqual([tasks[0].id]);
+  } finally { state.releaseRead(); }
+});
+
+test('does not open or mark a notification read when its snapshot belongs to another task', async ({ page }) => {
+  const state = await fixture(page); state.overrideRead(tasks[1].id); await page.goto(link());
+  await expect(page.getByRole('alert')).toContainText('会话状态不匹配');
+  await expect(page.locator('.chat-heading h1')).toHaveCount(0);
+  expect(state.reads).toEqual([]);
+  expect(new URL(page.url()).searchParams.has('notification')).toBe(true);
+});
+
+test('rejects another task snapshot after sending without replacing the current task or its new draft', async ({ page }) => {
+  const state = await fixture(page, true, false, false, true); await page.goto(origin);
+  await page.locator('.project-toggle').filter({ hasText: 'Operations' }).click();
+  await page.getByRole('button', { name: tasks[0].title, exact: true }).click();
+  await page.getByLabel('消息', { exact: true }).fill('Send in this task');
+  state.overrideRead(tasks[1].id);
+  await page.getByTitle('发送消息', { exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('会话状态不匹配');
+  await page.getByLabel('消息', { exact: true }).fill('New draft must stay here');
+  await expect(page.locator('.chat-heading h1')).toHaveText(tasks[0].title);
+  await expect(page.getByText('Result: ' + tasks[1].title, { exact: true })).toHaveCount(0);
+  expect(state.commands.filter(row => row.command.method === 'send').map(row => row.command.params.id)).toEqual([tasks[0].id]);
+  state.overrideRead();
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('New draft must stay here');
 });
 
 test('honors the latest computer notification while an earlier device switch is pending', async ({ page }) => {

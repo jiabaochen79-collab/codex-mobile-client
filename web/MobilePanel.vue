@@ -27,6 +27,7 @@ const notificationTasks = reactive<Record<string, Conversation>>({});
 const notificationTaskIds = new Set<string>();
 let resolvingNotificationTasks: Promise<void> | undefined;
 let openingNotification = false;
+let notificationNavigationRevision = 0;
 const session = ref({ deviceId: props.deviceId }); const active = ref(false);
 const status = ref<any>({ online: false }); const connected = ref(false); const error = ref(''); const busy = ref(false);
 const selected = ref<Conversation | null>(null); const snapshot = ref<Snapshot | null>(null); const draft = ref(''); const limit = ref(100);
@@ -201,8 +202,10 @@ async function openNotificationTask(taskId: string, stillRequested = () => true)
   if (!active.value || !canRead.value) throw new Error(`暂时无法查看任务：${connectionLabel.value}。恢复连接后请重试。`);
   if (busy.value || modeChanging.value || permissionChanging.value) throw new Error('操作正在确认，请稍后查看提醒。');
   const cycle = modeSyncCycle;
+  const revision = notificationNavigationRevision;
   const next: Snapshot = await request({ method: 'read', params: { id: taskId, limit: 100, activate: false } });
-  if (!active.value || !canRead.value || cycle !== modeSyncCycle || !stillRequested()) return false;
+  if (!active.value || !canRead.value || cycle !== modeSyncCycle || revision !== notificationNavigationRevision || !stillRequested()) return false;
+  if (next.id !== taskId) throw new Error('会话状态不匹配，已保留当前会话，请稍后重试。');
   const known = knownNotificationTask(taskId);
   showConversation({ ...known, id: taskId, title: next.title, cwd: known?.cwd ?? '', updatedAt: known?.updatedAt ?? Date.now() });
   await chatScroll.change(() => { snapshot.value = next; queuedMessages.value = next.queued ?? []; }, 'bottom');
@@ -218,9 +221,10 @@ async function openNotificationFromUrl() {
   const id = url.searchParams.get('notification');
   const targetDevice = url.searchParams.get('notificationDevice');
   if (!id || !/^[0-9a-f-]{36}$/i.test(id) || targetDevice && targetDevice !== props.deviceId) return;
+  const revision = notificationNavigationRevision;
   const stillRequested = () => {
     const current = new URL(location.href);
-    return current.searchParams.get('notification') === id && current.searchParams.get('notificationDevice') === targetDevice;
+    return revision === notificationNavigationRevision && current.searchParams.get('notification') === id && current.searchParams.get('notificationDevice') === targetDevice;
   };
   openingNotification = true;
   try {
@@ -376,7 +380,16 @@ async function runSearch(append = false) {
 watch(search, () => { clearTimeout(searchTimer); searchRevision++; searchRows.value = []; searchMore.value = false; searchLoading.value = !!search.value.trim(); searchError.value = ''; searchTimer = setTimeout(() => { void runSearch(); }, 200); });
 async function select(conversation: Conversation) {
   if (!canRead.value) { subscriptionOpen.value = !serviceActive.value; return; }
+  cancelNotificationNavigation();
   showConversation(conversation, true); await read(true);
+}
+function cancelNotificationNavigation() {
+  notificationNavigationRevision++;
+  const url = new URL(location.href);
+  if (!url.searchParams.has('notification')) return;
+  // A pending notification must not override a newer explicit task action.
+  url.searchParams.delete('notification'); url.searchParams.delete('notificationDevice');
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
 }
 function showConversation(conversation: Conversation, activate = false) {
   activateSelected = activate; pendingActivations.clear();
@@ -395,7 +408,7 @@ async function read(activate = false) {
   if (!serviceActive.value) {
     if (reading || !hasCapability('safety-status')) return; reading = true;
     const id = selected.value.id;
-    try { const state = await request({ method: 'safety.status', params: { id } }); if (selected.value?.id === id) { if (!snapshot.value) snapshot.value = { id, title: selected.value.title, epoch: state.epoch, busy: state.busy, turnId: state.turnId, messages: [], requests: [], hasMore: false }; else { snapshot.value.busy = state.busy; snapshot.value.turnId = state.turnId; snapshot.value.epoch = state.epoch; } } }
+    try { const state = await request({ method: 'safety.status', params: { id } }); if (state.id === id && selected.value?.id === id) { if (!snapshot.value) snapshot.value = { id, title: selected.value.title, epoch: state.epoch, busy: state.busy, turnId: state.turnId, messages: [], requests: [], hasMore: false }; else { snapshot.value.busy = state.busy; snapshot.value.turnId = state.turnId; snapshot.value.epoch = state.epoch; } } }
     catch { /* Keep the last known stop target if the desktop is unavailable. */ }
     finally { reading = false; }
     return;
@@ -403,7 +416,7 @@ async function read(activate = false) {
   if (reading) { dirty = true; return; } reading = true;
   const id = selected.value.id; const initial = !snapshot.value; const cycle = modeSyncCycle;
   const activateTask=pendingActivations.has(id) && canControl.value;
-  try { const next = await request({ method: 'read', params: { id, limit: limit.value, ...(hasCapability('multi-terminal') ? {activate:activateTask} : {}), ...(hasCapability('conditional-read') && modeSynced.value && snapshot.value?.revision ? { ifRevision: snapshot.value.revision } : {}) } }); if (selected.value?.id === id && cycle === modeSyncCycle) { pendingActivations.delete(id); readError.value = ''; if (!next.notModified) await chatScroll.change(() => { snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } void markSeen(); void reconcileSends(); } }
+  try { const next = await request({ method: 'read', params: { id, limit: limit.value, ...(hasCapability('multi-terminal') ? {activate:activateTask} : {}), ...(hasCapability('conditional-read') && modeSynced.value && snapshot.value?.revision ? { ifRevision: snapshot.value.revision } : {}) } }); if (next.id !== id) throw new Error('会话状态不匹配，已保留当前会话，请稍后重试。'); if (selected.value?.id === id && cycle === modeSyncCycle) { pendingActivations.delete(id); readError.value = ''; if (!next.notModified) await chatScroll.change(() => { snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } void markSeen(); void reconcileSends(); } }
   catch (e: any) {
     if (selected.value?.id !== id || cycle !== modeSyncCycle) return;
     if (e.code === 'NOT_FOUND') {
@@ -477,6 +490,7 @@ async function perform(command: Command) {
 }
 async function send(mode?: 'steer') {
   if (!(mode === 'steer' ? canSteer.value : canSend.value) || !snapshot.value) return;
+  cancelNotificationNavigation();
   sendMenu.value = false; const id = snapshot.value.id; const text = draft.value; const queued = mode !== 'steer' && (snapshot.value.busy || queuedMessages.value.length > 0);
   chatScroll.toBottom();
   await perform({ method: 'send', params: { id, text, epoch: snapshot.value.epoch, ...(mode === 'steer' ? { mode, turnId: snapshot.value.turnId! } : queued ? { mode: 'queue' } : {}), ...(attachments.current.value.length ? { attachmentIds: attachments.current.value.map(a => a.attachment!.id) } : {}) } });
@@ -567,7 +581,7 @@ async function newConversation(project?: string) {
   catch (e: any) { error.value = e.message; }
 }
 async function create() {
-  if (!canControl.value || !canUse('create-tasks') || !projectId.value || !newText.value.trim()) return; busy.value = true;
+  if (!canControl.value || !canUse('create-tasks') || !projectId.value || !newText.value.trim()) return; cancelNotificationNavigation(); busy.value = true;
   try { const r = await request({ method: 'create', params: { projectId: projectId.value, text: newText.value, ...(newModel.value?{model:newModel.value,effort:newEffort.value as any}:{}) } }); projectModal.value = false; newText.value = ''; await loadNavigation(); if (r.threadId) await select({ id: r.threadId, title: '新任务', cwd: '', updatedAt: Date.now(), projectId: projectId.value }); }
   catch (e: any) { error.value = e.message; } finally { busy.value = false; }
 }

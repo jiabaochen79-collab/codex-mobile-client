@@ -4,11 +4,12 @@ import NotificationCenter from '../web/NotificationCenter.vue';
 import SubscriptionPanel from '../web/SubscriptionPanel.vue';
 import OrdersPanel from '../web/OrdersPanel.vue';
 import PayApp from '../web/PayApp.vue';
+import UpdatePanel from '../web/UpdatePanel.vue';
 import '../web/style.css';
 import '../web/mobile-touch.css';
 import '../web/mobile-chat.css';
 
-const components = { feedback: FeedbackPanel, notifications: NotificationCenter, subscription: SubscriptionPanel, orders: OrdersPanel, pay: PayApp };
+const components = { feedback: FeedbackPanel, notifications: NotificationCenter, subscription: SubscriptionPanel, orders: OrdersPanel, pay: PayApp, update: UpdatePanel };
 const kind = new URL(location.href).searchParams.get('component') as keyof typeof components;
 const open = ref(true); const unread = ref(0);
 createApp({ setup: () => () => h('div', [
