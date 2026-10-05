@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { generateKeyPairSync, sign, createHash } from 'node:crypto';
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
@@ -71,6 +71,40 @@ describe('helper updater', () => {
     await expect(updater.install()).rejects.toMatchObject({ code: 'UPDATE_BLOCKED' });
     expect(updater.state.phase).toBe('ready'); expect(freeze).toHaveBeenLastCalledWith(false); expect(spawn).not.toHaveBeenCalled();
     await expect(updater.install()).resolves.toEqual({ accepted: true }); expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('unfreezes a surviving helper after installation fails even when result reporting is offline', async () => {
+    const { updater, dir, freeze, request } = await readyFixture(async () => []);
+    await updater.install(); expect(updater.state.phase).toBe('installing');
+    writeFileSync(join(dir, 'updates/result.json'), JSON.stringify({ phase: 'failed', version: '0.4.17', at: Date.now() }));
+    request.mockRejectedValue(new TypeError('offline'));
+    await updater.reportPrevious();
+    expect(freeze).toHaveBeenLastCalledWith(false);
+    expect(updater.state.phase).toBe('ready'); expect(updater.state.message).toContain('更新失败');
+    request.mockResolvedValue(Response.json({})); await updater.install();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(existsSync(join(dir, 'updates/result.json'))).toBe(false);
+    await updater.reportPrevious(); expect(updater.state.phase).toBe('installing'); expect(freeze).toHaveBeenLastCalledWith(true);
+  });
+
+  it('restarts a partial download when an intermediary returns a full 200 response', async () => {
+    const previousBytes = Buffer.from('previous-package'), nextBytes = Buffer.from('next-package');
+    const previous = release('0.4.16', 16, previousBytes), candidate = release('0.4.17', 17, nextBytes);
+    const previousSha = createHash('sha256').update(previousBytes).digest('hex');
+    const candidateSha = createHash('sha256').update(nextBytes).digest('hex');
+    const ranges: string[] = [];
+    const updater = fixture(async (path, init) => {
+      if (path.startsWith('/api/updates/device/check')) return Response.json({ current: previous, release: candidate });
+      if (path.startsWith('/api/updates/device/result')) return Response.json({});
+      ranges.push(new Headers(init?.headers).get('Range') ?? '');
+      return new Response(nextBytes, { headers: { 'Content-Length': String(nextBytes.length) } });
+    });
+    const dir = directories.at(-1)!;
+    writeFileSync(join(dir, 'updates', previousSha + '.exe'), previousBytes);
+    writeFileSync(join(dir, 'updates', candidateSha + '.exe.part'), nextBytes.subarray(0, 4));
+    await updater.check();
+    expect(updater.state.phase).toBe('ready'); expect(ranges).toEqual(['bytes=4-']);
+    expect(readFileSync(join(dir, 'updates', candidateSha + '.exe'))).toEqual(nextBytes);
   });
 
   it.each(['installed', 'rolled_back'])('reports a late %s result without reconnecting and stops polling on close', async phase => {

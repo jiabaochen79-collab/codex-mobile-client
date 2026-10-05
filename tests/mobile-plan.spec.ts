@@ -43,11 +43,12 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
         if (command.method === 'permissions.update' && !options.reject) { snapshot.settings.permission = command.params.permission; snapshot.settings.revision = 'permission-settings-2'; }
         if (command.method === 'plan.respond' && !options.reject) { snapshot.requests = []; snapshot.busy = true; snapshot.turnId = 'next-turn'; snapshot.settings.mode = command.params.action === 'implement' ? 'default' : 'plan'; }
         if (command.method === 'respond' && !options.reject) snapshot.requests = [];
-        const result = command.method === 'list' ? { conversations: options.secondTask ? [conversation, second] : [conversation], hasMore: false } : command.method === 'read' || command.method === 'safety.status' ? command.params.id === second.id ? secondSnapshot : snapshot : { accepted: true };
-        if (options.reject && ['plan.respond', 'mode.update', 'permissions.update'].includes(command.method)) socket.send(JSON.stringify({ type: 'result', id, error: { code: 'STALE', message: '计划或设置已变化，请刷新后核对。' } }));
+        if (command.method === 'settings.update' && !options.reject) { snapshot.settings.model = command.params.model; snapshot.settings.revision = 'model-settings-2'; }
+        const result = command.method === 'list' ? { conversations: options.secondTask ? [conversation, second] : [conversation], hasMore: false } : command.method === 'read' || command.method === 'safety.status' ? command.params.id === second.id ? secondSnapshot : snapshot : command.method === 'models' ? { models: [{ id: 'fixture-model', name: 'Fixture', efforts: ['high'], defaultEffort: 'high' }, { id: 'other-model', name: 'Other', efforts: ['high'], defaultEffort: 'high' }] } : command.method === 'settings.update' ? { settings: snapshot.settings } : { accepted: true };
+        if (options.reject && ['respond', 'plan.respond', 'mode.update', 'permissions.update', 'settings.update'].includes(command.method)) socket.send(JSON.stringify({ type: 'result', id, error: { code: 'STALE', message: '计划或设置已变化，请刷新后核对。' } }));
         else socket.send(JSON.stringify({ type: 'result', id, result }));
       };
-      if (options.delayed && command.method === 'mode.update') settle = reply;
+      if (options.delayed && ['mode.update', 'settings.update'].includes(command.method)) settle = reply;
       else if (command.method === 'read' && holdReads) reads.push(reply);
       else reply();
     });
@@ -120,6 +121,48 @@ test('allows a manual answer when none of the suggested plan options fit', async
   const custom = page.getByLabel('处理方式：其他', { exact: true }); await expect(custom).toBeFocused(); await custom.fill('只调整交互，不改已有数据');
   await page.getByLabel('补充要求', { exact: true }).fill('完成后保留当前草稿'); await expect(submit).toBeEnabled(); await submit.click();
   expect(commands.find(command => command.method === 'respond')?.params.answers).toEqual({ scope: ['仅界面'], approach: ['只调整交互，不改已有数据'], note: ['完成后保留当前草稿'] });
+});
+
+test('preserves selected and manual clarification answers after a rejected submission', async ({ page }) => {
+  const f = await fixture(page, { inputRequest: true, reject: true });
+  await page.getByLabel('修改范围', { exact: true }).selectOption('0');
+  await page.getByLabel('处理方式', { exact: true }).selectOption('custom');
+  await page.getByLabel('处理方式：其他', { exact: true }).fill('Keep this manual answer');
+  await page.getByLabel('补充要求', { exact: true }).fill('Keep this note');
+  await page.getByRole('button', { name: '提交', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('计划或设置已变化');
+  await expect(page.getByLabel('修改范围', { exact: true })).toHaveValue('0');
+  await expect(page.getByLabel('处理方式：其他', { exact: true })).toHaveValue('Keep this manual answer');
+  await expect(page.getByLabel('补充要求', { exact: true })).toHaveValue('Keep this note');
+  expect(f.commands.filter(command => command.method === 'respond')).toHaveLength(1);
+});
+
+test('blocks sends after a model change timeout until a fresh snapshot confirms the actual model', async ({ page }) => {
+  await page.clock.install(); const f = await fixture(page, { mode: 'default', delayed: true });
+  await page.getByLabel('消息', { exact: true }).fill('Model confirmation draft');
+  await page.locator('.model-trigger').click(); await page.getByLabel('模型', { exact: true }).selectOption('other-model');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await expect.poll(() => f.commands.filter(c => c.method === 'settings.update').length).toBe(1);
+  f.snapshot.settings.model = 'other-model'; f.holdReads(); await page.clock.fastForward(26000);
+  await expect(page.getByRole('alert')).toContainText('未收到操作确认');
+  await expect(page.getByTitle('发送消息', { exact: true })).toBeDisabled();
+  f.releaseReads(); await expect(page.locator('.model-trigger')).toContainText('other-model');
+  await expect(page.getByTitle('发送消息', { exact: true })).toBeEnabled();
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('Model confirmation draft');
+  expect(f.commands.filter(c => c.method === 'settings.update')).toHaveLength(1);
+  expect(f.commands.some(c => c.method === 'send' || c.method === 'stop')).toBe(false);
+});
+
+test('automatically clears a recovered snapshot timeout without a changed event or manual refresh', async ({ page }) => {
+  await page.clock.install(); const f = await fixture(page, { mode: 'default' });
+  await page.getByLabel('消息', { exact: true }).fill('Recovered connection draft');
+  f.failReads('会话暂时不可读取，请稍后重试。'); f.update();
+  await expect(page.getByRole('alert')).toContainText('会话暂时不可读取');
+  f.failReads(''); await page.clock.runFor(11000);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByTitle('发送消息', { exact: true })).toBeEnabled();
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('Recovered connection draft');
+  expect(f.commands.some(c => c.method === 'send' || c.method === 'stop')).toBe(false);
 });
 test('enables from plus in one tap and closes from the chip without interrupting execution', async ({ page }) => {
   const { commands } = await fixture(page, { busy: true, mode: 'default' }); await page.getByLabel('消息', { exact: true }).fill('执行时的草稿');

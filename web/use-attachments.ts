@@ -29,6 +29,7 @@ export function useAttachments(options: { request: (command: Command, id?: strin
         if (item.cancelled) return;
         item.attachment = await options.request({ method:'upload.begin', params:{id:item.threadId,name:item.file.name,size:item.file.size,mediaType:item.file.type,sha256} }, item.key);
       } else item.attachment = await options.request({method:'upload.status',params:{attachmentId:item.attachment.id}});
+      if (item.cancelled) { await remove(item); return; }
       let chunkSize = 16 * 1024; let failures = 0;
       while (item.attachment!.offset < item.file.size && !item.cancelled) {
         const control = options.control(); if(!control.allowed||!control.epoch) throw new Error('控制权已改变，附件上传已暂停。');

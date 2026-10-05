@@ -20,7 +20,7 @@ console.log(JSON.stringify({ type: 'ready', port, token: agent.localToken }));
 const healthNonce = process.env.CODEX_MOBILE_UPDATE_HEALTH;
 if (healthNonce && /^[a-f0-9-]{36}(-rollback)?$/.test(healthNonce)) {
   const dir = join(process.env.AGENT_DATA_DIR ?? join(homedir(), 'AppData/Local/CodexMobile'), 'updates'); mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'health-' + healthNonce + '.json'), JSON.stringify({ nonce: healthNonce, version: packageInfo.version, localReady: true }), { mode: 0o600 });
+  writeFileSync(join(dir, 'health-' + healthNonce + '.json'), JSON.stringify({ nonce: healthNonce, version: packageInfo.version, localReady: true, port, pid: process.pid }), { mode: 0o600 });
 }
 void agent.start();
 let stopping = false;

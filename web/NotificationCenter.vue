@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { Bell, Check, ExternalLink, RefreshCw, ShieldAlert, Smartphone, X } from 'lucide-vue-next';
 import { api } from './api';
+import { pushRegistration } from './push-registration';
 import type { NotificationItem, NotificationSettings } from '../src/shared/notifications';
 
 const props = defineProps<{ deviceId: string; taskLabels: Record<string, { title: string; project?: string }>; resolveTasks: (ids: string[]) => Promise<void>; openTask: (taskId: string) => Promise<boolean> }>();
@@ -66,7 +67,7 @@ async function refreshSystemPushState() {
   systemPushState.value = 'unknown';
   if (!settings.value.enabled || !pushConfigured.value || !pushAvailable.value) return;
   try {
-    const registration = await navigator.serviceWorker.ready;
+    const registration = await pushRegistration();
     systemPushState.value = await registration.pushManager.getSubscription() ? 'enabled' : 'needed';
   } catch { systemPushState.value = 'needed'; }
 }
@@ -88,7 +89,7 @@ async function registerPush() {
   if (Notification.permission === 'denied') return browserMessage.value;
   const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
   if (permission !== 'granted') return '系统通知权限未开启，站内通知仍可用。';
-  const registration = await navigator.serviceWorker.ready;
+  const registration = await pushRegistration();
   const subscription = await registration.pushManager.getSubscription() ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodeKey(vapidPublicKey.value) });
   const json = subscription.toJSON();
   if (!json.endpoint || !json.keys?.p256dh || !json.keys.auth) throw new Error('浏览器未返回有效的推送订阅。');

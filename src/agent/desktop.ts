@@ -293,13 +293,20 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
   }
   private known(id: string) {
     const db = this.index();
-    try { if (!db.prepare(`SELECT id FROM threads WHERE id = ? AND ${ACTIVE_THREADS}`).get(id)) throw new RemoteError('NOT_FOUND', '会话已归档或删除，已从列表移除。'); }
+    try {
+      const row = db.prepare("SELECT rollout_path FROM threads WHERE id=? AND archived=0 AND source='vscode'").get(id);
+      if (!row || typeof row.rollout_path === 'string' && win32.normalize(row.rollout_path).toLowerCase().split(win32.sep).includes('archived_sessions')) throw new RemoteError('NOT_FOUND', '会话已归档或删除，已从列表移除。');
+      if (typeof row.rollout_path !== 'string' || !existsSync(row.rollout_path)) throw new RemoteError('CLIENT_UNAVAILABLE', '任务记录正在恢复，请稍后重试。');
+    }
     finally { db.close(); }
   }
   private taskActivity(id: string, db: DatabaseSync): Activity {
-    const row = db.prepare(`SELECT rollout_path FROM threads WHERE id=? AND ${ACTIVE_THREADS}`).get(id);
-    if (!row) throw new RemoteError('NOT_FOUND', '会话已归档或删除。');
-    const saved = this.activity.read(String(row.rollout_path)); const state = this.followed.get(id)?.state;
+    const row = db.prepare("SELECT rollout_path FROM threads WHERE id=? AND archived=0 AND source='vscode'").get(id);
+    if (!row || typeof row.rollout_path === 'string' && win32.normalize(row.rollout_path).toLowerCase().split(win32.sep).includes('archived_sessions')) throw new RemoteError('NOT_FOUND', '会话已归档或删除。');
+    let saved: ReturnType<DesktopActivity['read']>;
+    try { saved = this.activity.read(String(row.rollout_path)); }
+    catch { throw new RemoteError('CLIENT_UNAVAILABLE', '任务记录正在恢复，请稍后重试。'); }
+    const state = this.followed.get(id)?.state;
     const running = runtimeRunning(state?.threadRuntimeStatus) === true;
     return { id, running, completionId: saved.completionId, unread: !running && this.activity.isUnread(id, saved.completionId) };
   }
@@ -326,10 +333,11 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (existing?.state && Date.now() - (existing.ownerCheckedAt ?? 0) < 30000) { this.current = existing; return; }
     let owner: any;
     try { owner = await this.ipc.request('thread-owner-discovery', { hostId: 'local', conversationId: id }); } catch { /* An unopened task needs its original desktop view. */ }
-    if (existing?.state && owner?.handledByClientId === existing.owner) { existing.ownerCheckedAt = Date.now(); this.current = existing; return; }
+    const recoverActivation = activate && existing?.ownerCheckedAt === 0 && !existing.state;
     if (existing) existing.state = undefined;
-    if (!owner?.handledByClientId && activate) {
+    if (activate && (!owner?.handledByClientId || recoverActivation)) {
       await this.appTool('navigate_to_codex_page', { threadId: id }, id);
+      owner = await this.ipc.request('thread-owner-discovery', { hostId: 'local', conversationId: id });
       const deadline = Date.now() + 6000;
       for (let delay = 250; !owner?.handledByClientId && Date.now() < deadline; delay = Math.min(1000, delay * 2)) {
         await new Promise(resolve => setTimeout(resolve, Math.min(delay, deadline - Date.now())));
@@ -337,16 +345,22 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       }
     }
     if (!owner?.handledByClientId) throw new RemoteError('CLIENT_UNAVAILABLE', '请先在电脑端打开此任务。');
-    this.current = { id, owner: owner.handledByClientId, state: undefined, revision: 0, ownerCheckedAt: Date.now() };
-    this.followed.set(id, this.current);
+    const followed: Followed = existing && existing.owner === owner.handledByClientId ? existing : { id, owner: owner.handledByClientId, state: undefined, revision: 0 };
+    followed.ownerCheckedAt = Date.now(); this.current = followed;
+    this.followed.set(id, followed);
     if (this.followed.size > 6) this.unfollow(this.followed.keys().next().value!);
     const waiting = new Promise<void>((resolve, reject) => {
-      const done = () => { clearTimeout(timer); resolve(); };
-      const timer = setTimeout(() => { this.wake.off(id, done); reject(new RemoteError('CLIENT_UNAVAILABLE', '会话暂时不可读取，请稍后重试。')); }, 6000);
+      const cleanup = () => { clearTimeout(timer); clearInterval(renew); this.wake.off(id, done); };
+      const done = () => { cleanup(); resolve(); };
+      const renew = setInterval(() => {
+        try { if (this.followed.get(id) !== followed) { done(); return; } this.requestSnapshot(followed); }
+        catch { cleanup(); reject(new RemoteError('CLIENT_UNAVAILABLE', '任务连接正在恢复，请稍后重试。')); }
+      }, 3000);
+      const timer = setTimeout(() => { cleanup(); followed.ownerCheckedAt = 0; reject(new RemoteError('CLIENT_UNAVAILABLE', '任务连接正在恢复，正在自动重新读取。')); }, 12000);
       this.wake.once(id, done);
+      try { this.requestSnapshot(followed); } catch (error) { cleanup(); reject(error); }
     });
-    const followed = this.current;
-    this.requestSnapshot(); await waiting;
+    await waiting;
     if (this.followed.get(id) !== followed || !followed.state) throw new RemoteError('CLIENT_UNAVAILABLE', '任务连接正在恢复，请稍后重试。');
   }
   private snapshot(limit = 100) {

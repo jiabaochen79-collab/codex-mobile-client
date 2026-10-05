@@ -9,6 +9,7 @@ async function fixture(page: Page, sendError?: string) {
   const snapshot = { ...task, epoch: 'fixture', busy: true, turnId: 'running', hasMore: false, queued: [], requests: [], messages: [{ id: 'old', role: 'assistant', text: '已有结果' }], settings: { mode: 'default', revision: 'settings', permission: 'ask' } };
   const status: any = { type: 'status', transport: { heartbeat: true }, online: true, enabled: true, subscription: { access: true }, control: { role: 'controller', epoch: '12345678-1234-4234-8234-123456789abd', terminals: [] }, client: { available: true, capabilities: ['multi-terminal','queued-send','task-mode','command-status','send-messages','project-navigation'] } };
   const frames: any[] = []; let sends = 0, connects = 0, state = 'unknown', silent = false, readFailure = false, activationFailed = false, listFailure = false, searchFailure = false, projectFailure = false;
+  let heldNavigation: 'list'|'projects'|'search'|undefined, acceptSends = false;
   let update!: () => void, disconnect!: () => void;
   await mockPairedBrowser(page);
   await page.route('**/api/bootstrap', route => route.fulfill({ json: { mode: 'mobile' } }));
@@ -21,8 +22,9 @@ async function fixture(page: Page, sendError?: string) {
       if (silent) return;
       if (frame.type === 'ping') { socket.send(JSON.stringify({ type: 'pong', id: frame.id })); return; }
       const command = frame.command;
-      if (command.method === 'send') { sends++; if (sendError) socket.send(JSON.stringify({ type: 'result', id: frame.id, error: { code: sendError, message: 'fixture send exception' } })); return; }
+      if (command.method === 'send') { sends++; if (sendError) socket.send(JSON.stringify({ type: 'result', id: frame.id, error: { code: sendError, message: 'fixture send exception' } })); else if (acceptSends) socket.send(JSON.stringify({ type: 'result', id: frame.id, result: { accepted: true } })); return; }
       if (command.method === 'read' && (readFailure || !activationFailed)) { activationFailed = true; socket.send(JSON.stringify({ type: 'result', id: frame.id, error: { code: 'CLIENT_UNAVAILABLE', message: '任务连接正在恢复' } })); return; }
+      if (command.method === 'projects' && heldNavigation === 'projects' || command.method === 'list' && heldNavigation === (command.params.query ? 'search' : 'list')) return;
       if (command.method === 'list' && (command.params.query ? searchFailure : listFailure) || command.method === 'projects' && projectFailure) { socket.send(JSON.stringify({ type: 'result', id: frame.id, error: { code: 'READ_TIMEOUT', message: '列表读取暂时失败' } })); return; }
       const result = command.method === 'list' ? { conversations: [task], hasMore: false } : command.method === 'projects' ? { projects: [] } : command.method === 'read' ? snapshot : command.method === 'command.status' ? { state } : {};
       socket.send(JSON.stringify({ type: 'result', id: frame.id, result }));
@@ -33,7 +35,8 @@ async function fixture(page: Page, sendError?: string) {
   await expect(page.getByText('已有结果', { exact: true })).toBeVisible();
   return { task, frames, update: () => update(), disconnect: () => disconnect(), sends: () => sends, connects: () => connects,
     confirm: () => { state = 'succeeded'; }, silent: () => { silent = true; }, rejectReads: (value: boolean) => { readFailure = value; },
-    rejectNavigation: (source: 'list'|'projects'|'search', value: boolean) => { if (source === 'list') listFailure = value; else if (source === 'projects') projectFailure = value; else searchFailure = value; } };
+    rejectNavigation: (source: 'list'|'projects'|'search', value: boolean) => { if (source === 'list') listFailure = value; else if (source === 'projects') projectFailure = value; else searchFailure = value; },
+    holdNavigation: (source?: 'list'|'projects'|'search') => { heldNavigation = source; }, acceptSends: () => { acceptSends = true; } };
 }
 
 test('retains explicit activation until the task reconnects, and restores it on reconnect', async ({ page }) => {
@@ -43,6 +46,39 @@ test('retains explicit activation until the task reconnects, and restores it on 
   await expect.poll(() => f.frames.filter(f => f.command?.method === 'read').length).toBeGreaterThan(2);
   expect(f.frames.filter(f => f.command?.method === 'read').at(-1).command.params.activate).toBe(true);
   expect(f.frames.some(f => ['send','stop'].includes(f.command?.method))).toBe(false);
+});
+
+for (const source of ['list', 'projects', 'search'] as const) test(`does not show an interrupted hidden ${source} request after chat reconnects and sends successfully`, async ({ page }, info) => {
+  const f = await fixture(page); const before = f.frames.length;
+  await page.getByLabel('消息', { exact: true }).fill('重连后保留的消息');
+  f.holdNavigation(source); await page.getByTitle('项目与会话', { exact: true }).click();
+  if (source === 'search') await page.getByLabel('搜索会话', { exact: true }).fill('弱网');
+  await expect.poll(() => f.frames.slice(before).some(frame => source === 'projects' ? frame.command?.method === 'projects' : frame.command?.method === 'list' && !!frame.command.params.query === (source === 'search'))).toBe(true);
+  await page.getByTitle('关闭项目列表', { exact: true }).click(); f.disconnect();
+  await expect(page.locator('.chat-status')).toContainText('正在重连');
+  await expect.poll(f.connects, { timeout: 10000 }).toBe(2);
+  await expect(page.getByTitle('排队发送', { exact: true })).toBeEnabled();
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('重连后保留的消息');
+  f.acceptSends(); await page.getByTitle('排队发送', { exact: true }).click();
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue(''); expect(f.sends()).toBe(1);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(f.frames.some(frame => frame.command?.method === 'stop')).toBe(false);
+  f.holdNavigation(); await page.getByTitle('项目与会话', { exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.getByTitle('关闭项目列表', { exact: true }).click();
+  await page.screenshot({ path: info.outputPath(`reconnected-${source}.png`) });
+});
+
+test('dismisses only the visible navigation error without erasing an unresolved task read error', async ({ page }) => {
+  const f = await fixture(page); f.rejectReads(true); f.update();
+  await expect(page.getByRole('alert')).toContainText('任务连接正在恢复');
+  f.rejectNavigation('projects', true);
+  await page.getByTitle('项目与会话', { exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('列表读取暂时失败');
+  await page.getByTitle('关闭提示', { exact: true }).click(); await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.getByTitle('关闭项目列表', { exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('任务连接正在恢复');
+  f.rejectNavigation('projects', false); f.rejectReads(false); f.update(); await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
 test('retains an unknown send across reload and queries instead of repeating it', async ({ page }, info) => {
@@ -94,6 +130,8 @@ for (const source of ['list', 'projects', 'search'] as const) test(`clears only 
   f.rejectNavigation(source, true); await page.getByTitle('项目与会话', { exact: true }).click();
   if (source === 'search') await page.getByLabel('搜索会话', { exact: true }).fill('弱网');
   await expect(page.getByRole('alert')).toContainText('列表读取暂时失败');
+  await page.getByTitle('关闭项目列表', { exact: true }).click(); await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.getByTitle('项目与会话', { exact: true }).click(); await expect(page.getByRole('alert')).toContainText('列表读取暂时失败');
   f.rejectNavigation(source, false);
   await page.getByTitle('关闭项目列表', { exact: true }).click(); await page.getByTitle('项目与会话', { exact: true }).click();
   await expect(page.getByRole('alert')).toHaveCount(0);

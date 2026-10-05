@@ -58,13 +58,15 @@ const automaticProjects = new Set<string>();
 let navigationEpoch = 0; let focusedNavigationEpoch = -1; let projectInteraction = 0;
 type Group = { rows: Conversation[]; loading: boolean; loaded: boolean; hasMore: boolean; error?: string };
 const groups = reactive<Record<string, Group>>({});
-const visibleError = computed(() => error.value || (snapshot.value ? readError.value : '') || navigationError.value || searchError.value || Object.values(groups).find(g => g.error)?.error);
+const visibleErrorGroup = computed(() => [groups.recent, ...projects.value.filter(p => expandedProjects.has(p.id)).map(p => groups[p.id])].find(g => g?.error));
+const visibleError = computed(() => error.value || (listVisible.value ? search.value.trim() ? searchError.value : navigationError.value || visibleErrorGroup.value?.error : snapshot.value ? readError.value : ''));
 function dismissError() {
   if (error.value) error.value = '';
-  else if (snapshot.value && readError.value) readError.value = '';
-  else if (navigationError.value) navigationError.value = '';
-  else if (searchError.value) searchError.value = '';
-  else { const group = Object.values(groups).find(g => g.error); if (group) group.error = ''; }
+  else if (listVisible.value) {
+    if (search.value.trim()) searchError.value = '';
+    else if (navigationError.value) navigationError.value = '';
+    else if (visibleErrorGroup.value) visibleErrorGroup.value.error = '';
+  } else if (snapshot.value) readError.value = '';
 }
 const projectModal = ref(false); const projectId = ref(''); const newText = ref('');
 const answers = ref<Record<string, string>>({}); const answerModes = reactive<Record<string, string>>({});
@@ -160,12 +162,14 @@ async function refreshNotificationBadge() {
   } catch {} finally { refreshingNotifications = false; }
 }
 async function suppressVisibleNotification(item: any) {
-  if (document.visibilityState !== 'visible' || drawer.value || !selected.value || selected.value.id !== item.taskId || !snapshot.value || snapshot.value.busy || snapshot.value.lastTurnId !== item.turnId) return;
+  const viewed = () => document.visibilityState === 'visible' && !drawer.value && !notificationOpen.value && !chatScroll.awayFromBottom.value && selected.value?.id === item.taskId && snapshot.value && !snapshot.value.busy && snapshot.value.lastTurnId === item.turnId;
+  if (!viewed()) return;
   try {
     const result = await api('/api/notifications', undefined, notificationHeaders());
     const row = (result.items ?? []).find((entry: any) => entry.id === item.id);
+    if (!viewed()) return;
     if (row && !row.readAt) await api(`/api/notifications/${encodeURIComponent(item.id)}/read`, undefined, notificationHeaders(), 'POST');
-    notificationUnread.value = Number(result.unread) || 0;
+    notificationUnread.value = Math.max(0, (Number(result.unread) || 0) - (row && !row.readAt ? 1 : 0));
   } catch {}
 }
 function knownNotificationTask(taskId: string) {
@@ -282,6 +286,8 @@ function openSocket() {
   };
   ws.onclose = event => {
     if (socket !== ws) return; clearInterval(socketHeartbeat); connected.value = false; invalidateMode();
+    // Discard navigation failures from the closed connection, just like task reads.
+    navigationEpoch++; searchRevision++; searchLoading.value = false;
     for (const p of pending.values()) { clearTimeout(p.timer); p.reject(Object.assign(new Error(p.readOnly ? '连接已中断，正在重新同步。' : '连接已中断，请核对原会话，勿重复提交。'), { code: p.readOnly ? 'READ_DISCONNECTED' : 'OUTCOME_UNKNOWN' })); } pending.clear();
     if (disposed.value || !active.value) return;
     if (event.code === 4002) { clientId.value=crypto.randomUUID();try { sessionStorage.setItem(clientKey,clientId.value); } catch {} reconnect=setTimeout(openSocket,500);return; }
@@ -490,8 +496,8 @@ function composerPointerdown(event: PointerEvent) {
 async function stop() { sendMenu.value = false; const s = snapshot.value; if (s?.turnId) await perform({ method: 'stop', params: { id: s.id, turnId: s.turnId, epoch: s.epoch } }); }
 async function respond(r: Interaction, decision?: 'accept' | 'decline') {
   const s = snapshot.value; if (!s) return;
-  await perform({ method: 'respond', params: { id: s.id, requestId: r.id, epoch: s.epoch, ...(decision ? { decision } : { answers: Object.fromEntries((r.questions ?? []).map(q => [q.id, [answers.value[q.id] ?? '']])) }) } });
-  if (!decision) for (const question of r.questions ?? []) { delete answers.value[question.id]; delete answerModes[question.id]; }
+  const accepted = await perform({ method: 'respond', params: { id: s.id, requestId: r.id, epoch: s.epoch, ...(decision ? { decision } : { answers: Object.fromEntries((r.questions ?? []).map(q => [q.id, [answers.value[q.id] ?? '']])) }) } });
+  if (accepted && !decision && selected.value?.id === s.id) for (const question of r.questions ?? []) { delete answers.value[question.id]; delete answerModes[question.id]; }
 }
 const customAnswerMode = 'custom';
 function chooseAnswer(question: NonNullable<Interaction['questions']>[number], event: Event) {
@@ -588,7 +594,7 @@ const availableEfforts=computed(()=>models.value.find(m=>m.id===chosenModel.valu
 const effortNames:Record<string,string>={none:'默认',minimal:'最少',low:'低',medium:'中',high:'高',xhigh:'极高',max:'最大',ultra:'超高'};
 watch(chosenModel,()=>{if(!availableEfforts.value.includes(chosenEffort.value))chosenEffort.value=models.value.find(m=>m.id===chosenModel.value)?.defaultEffort??availableEfforts.value[0]??'';});
 async function openModels(target:'current'|'new'='current'){try{const result=await request({method:'models',params:{}});models.value=result.models;modelTarget.value=target;editingSettings.value=snapshot.value?.settings;chosenModel.value=(target==='new'?newModel.value:snapshot.value?.settings?.model)||models.value[0]?.id||'';chosenEffort.value=(target==='new'?newEffort.value:snapshot.value?.settings?.effort)||models.value.find(m=>m.id===chosenModel.value)?.defaultEffort||'';modelModal.value=true;moreMenu.value=false;}catch(e:any){error.value=e.message;}}
-async function saveModel(){if(modelTarget.value==='new'){newModel.value=chosenModel.value;newEffort.value=chosenEffort.value;modelModal.value=false;return;}const s=snapshot.value;if(!s||!editingSettings.value)return;busy.value=true;try{const result=await request({method:'settings.update',params:{id:s.id,epoch:s.epoch,revision:editingSettings.value.revision,model:chosenModel.value,effort:chosenEffort.value as any}});if(snapshot.value?.id===s.id)snapshot.value.settings=result.settings;modelModal.value=false;}catch(e:any){error.value=e.message;modelModal.value=false;}finally{busy.value=false;}}
+async function saveModel(){if(modelTarget.value==='new'){newModel.value=chosenModel.value;newEffort.value=chosenEffort.value;modelModal.value=false;return;}const s=snapshot.value;if(!s||!editingSettings.value||busy.value)return;busy.value=true;invalidateMode();try{const result=await request({method:'settings.update',params:{id:s.id,epoch:s.epoch,revision:editingSettings.value.revision,model:chosenModel.value,effort:chosenEffort.value as any}});if(snapshot.value?.id===s.id)snapshot.value.settings=result.settings;modelModal.value=false;}catch(e:any){error.value=e.message;modelModal.value=false;}finally{invalidateMode();busy.value=false;if(active.value)await read();}}
 function openTakeover(){claimEpoch.value=status.value.control?.epoch??null;takeoverModal.value=true;moreMenu.value=false;}
 function openNotifications() { notificationOpen.value = true; moreMenu.value = false; }
 async function takeControl(){busy.value=true;try{await request({method:'control.claim',params:{epoch:claimEpoch.value}});takeoverModal.value=false;}catch(e:any){error.value=e.message;takeoverModal.value=false;}finally{busy.value=false;}}
@@ -663,6 +669,7 @@ function restartSocket() {
   const previous = socket; socket = undefined;
   if (previous) { previous.onclose = null; previous.onmessage = null; previous.close(); }
   connected.value = false; invalidateMode(); clearInterval(socketHeartbeat);
+  navigationEpoch++; searchRevision++; searchLoading.value = false;
   for (const p of pending.values()) { clearTimeout(p.timer); p.reject(Object.assign(new Error(p.readOnly ? '正在恢复连接。' : '连接已中断，请核对原会话，勿重复提交。'), { code: p.readOnly ? 'READ_DISCONNECTED' : 'OUTCOME_UNKNOWN' })); } pending.clear();
   openSocket();
 }
@@ -685,6 +692,7 @@ onActivated(async () => {
 });
 function suspend() {
   active.value = false; chatScroll.pause(); connected.value = false; invalidateMode();
+  navigationEpoch++; searchRevision++; searchLoading.value = false;
   inputObserver?.disconnect();
   subscriptionOpen.value = false; notificationOpen.value = false; modelModal.value = false; projectModal.value = false; takeoverModal.value = false; attachmentPicker.value = false; permissionPicker.value = false; fullAccessConfirm.value = false; sendMenu.value = false; moreMenu.value = false;
   cancelViewportSync(); stopViewportWatchdog(); clearTimeout(reconnect); clearTimeout(searchTimer); clearTimeout(changedTimer); changedTimer = undefined; clearInterval(socketHeartbeat); clearInterval(poll); clearInterval(navigationPoll);

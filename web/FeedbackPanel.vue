@@ -11,7 +11,8 @@ const base = props.mode === 'desktop' ? '/local/feedback' : '/api/feedback';
 const headers = props.mode === 'mobile' ? { 'X-Remote-Device': props.deviceId } : undefined;
 const request = (path = '', body?: unknown) => api(base + path, body, headers);
 const rows = ref<any[]>([]); const detail = ref<any>(); const writing = ref(false); const busy = ref(false); const error = ref(''); const page = ref(1); const total = ref(0);
-const text = ref(''); const category = ref<FeedbackCreate['category']>('connection'); const contact = ref(''); const images = ref<{ data: string }[]>([]); const extra = ref(false); const requestId = ref(crypto.randomUUID()); const occurredAt = ref(new Date().toISOString().slice(0, 16));
+const localTime = () => { const now = new Date(); return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
+const text = ref(''); const category = ref<FeedbackCreate['category']>('connection'); const contact = ref(''); const images = ref<{ data: string }[]>([]); const extra = ref(false); const requestId = ref(crypto.randomUUID()); const occurredAt = ref(localTime());
 const input = ref<HTMLInputElement>(); const pending = ref<any>(); const loaded = ref(false);
 const draftKey = computed(() => props.deviceId + ':' + (detail.value?.ticket.id ?? 'new'));
 const imageUrl = (id: string) => base + '/images/' + id + (props.mode === 'mobile' ? '?remoteDevice=' + props.deviceId : '');
@@ -24,18 +25,22 @@ const diagnostics = computed(() => {
   return [base];
 });
 async function list() { try { const result = await request('?page=' + page.value); rows.value = result.rows; total.value = result.total; } catch (e: any) { error.value = e.message; } }
-async function restore() { loaded.value = false; try { const saved = await feedbackDraft(draftKey.value); text.value = saved?.text ?? ''; images.value = saved?.images ?? []; contact.value = saved?.contact ?? ''; category.value = saved?.category ?? 'connection'; extra.value = saved?.extra ?? false; requestId.value = saved?.requestId ?? crypto.randomUUID(); pending.value = saved?.pending; } catch { error.value = '浏览器无法保存反馈草稿，请保持页面打开。'; } loaded.value = true; }
-async function saveDraft() { if (!loaded.value) return; try { await feedbackDraft(draftKey.value, { text: text.value, images: images.value.map(i => ({ data: i.data })), contact: contact.value, category: category.value, extra: extra.value, requestId: requestId.value, pending: pending.value ? JSON.parse(JSON.stringify(pending.value)) : null }); } catch { error.value = '草稿保存失败，请检查浏览器存储空间。'; } }
-watch([text, images, contact, category, extra, pending], () => { void saveDraft(); }, { deep: true });
+async function restore() { loaded.value = false; try { const saved = await feedbackDraft(draftKey.value); text.value = saved?.text ?? ''; images.value = saved?.images ?? []; contact.value = saved?.contact ?? ''; category.value = saved?.category ?? 'connection'; extra.value = saved?.extra ?? false; occurredAt.value = saved?.occurredAt ?? localTime(); requestId.value = saved?.requestId ?? crypto.randomUUID(); pending.value = saved?.pending; } catch { error.value = '浏览器无法保存反馈草稿，请保持页面打开。'; } loaded.value = true; }
+async function saveDraft() { if (!loaded.value) return true; try { await feedbackDraft(draftKey.value, { text: text.value, images: images.value.map(i => ({ data: i.data })), contact: contact.value, category: category.value, extra: extra.value, occurredAt: occurredAt.value, requestId: requestId.value, pending: pending.value ? JSON.parse(JSON.stringify(pending.value)) : null }); return true; } catch { error.value = '草稿保存失败，请检查浏览器存储空间。'; return false; } }
+watch([text, images, contact, category, extra, occurredAt, pending], () => { void saveDraft(); }, { deep: true });
 async function show(row: any) { busy.value = true; error.value = ''; try { detail.value = await request('/' + row.id); writing.value = false; await restore(); const through = detail.value.messages.at(-1)?.seq ?? 0; await request('/' + row.id + '/read', { through }); emit('changed'); } catch (e: any) { error.value = e.message; } finally { busy.value = false; } }
-async function create() { await saveDraft(); detail.value = undefined; writing.value = true; error.value = ''; await restore(); }
-async function back() { await saveDraft(); detail.value = undefined; writing.value = false; loaded.value = false; await list(); }
+async function create() { busy.value = true; try { if (!await saveDraft()) return; detail.value = undefined; writing.value = true; error.value = ''; await restore(); } finally { busy.value = false; } }
+async function back() { busy.value = true; try { if (!await saveDraft()) return; detail.value = undefined; writing.value = false; loaded.value = false; await list(); } finally { busy.value = false; } }
+async function close() { busy.value = true; try { if (await saveDraft()) emit('close'); } finally { busy.value = false; } }
 async function photos(event: Event) { const selected = (event.target as HTMLInputElement).files; const files = selected ? Array.from(selected) : []; (event.target as HTMLInputElement).value = ''; busy.value = true; error.value = ''; try { if (images.value.length + files.length > 3) throw new Error('每条消息最多三张图片。'); for (const original of files) { if (original.size > 5 * 1024 * 1024) throw new Error('每张图片不能超过 5MB。'); const file = await preparePhoto(original, true); if (file.size > 5 * 1024 * 1024) throw new Error('转换后的图片超过 5MB。'); const data = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = reject; reader.readAsDataURL(file); }); images.value.push({ data }); } } catch (e: any) { error.value = e.message; } finally { busy.value = false; } }
 async function send() {
   busy.value = true; error.value = '';
-  try { const id = detail.value?.ticket.id; pending.value ??= { requestId: requestId.value, text: text.value, images: images.value, diagnostics: diagnostics.value, ...(!id ? { category: category.value, occurredAt: new Date(occurredAt.value).getTime(), contact: contact.value } : {}) }; await saveDraft();
+  try { const id = detail.value?.ticket.id; pending.value ??= { requestId: requestId.value, text: text.value, images: images.value, diagnostics: diagnostics.value, ...(!id ? { category: category.value, occurredAt: new Date(occurredAt.value).getTime(), contact: contact.value } : {}) }; if (!await saveDraft()) { pending.value = undefined; return; }
     const result = await request(id ? '/' + id + '/messages' : '', pending.value); const oldKey = draftKey.value; loaded.value = false; text.value = ''; images.value = []; pending.value = undefined; await feedbackDraft(oldKey, null); detail.value = result; writing.value = false; await restore(); emit('changed');
-  } catch (e: any) { error.value = e.message + ' 草稿已保留，可重试原提交。'; } finally { busy.value = false; }
+  } catch (e: any) {
+    if (['INVALID', 'CAPACITY'].includes(e.code)) { pending.value = undefined; requestId.value = crypto.randomUUID(); error.value = e.message + ' 请修改反馈内容后重新提交。'; await saveDraft(); }
+    else error.value = e.message + ' 草稿已保留，可重试原提交。';
+  } finally { busy.value = false; }
 }
 async function state(value: string) {
   const ticketId = detail.value.ticket.id; busy.value = true; error.value = '';
@@ -49,7 +54,7 @@ onMounted(list);
 </script>
 <template>
   <div class="modal-backdrop feedback-backdrop"><section class="modal feedback-panel" role="dialog" aria-modal="true" aria-label="问题反馈">
-    <header class="modal-title"><button v-if="detail || writing" class="icon-button" title="返回反馈列表" :disabled="busy" @click="back"><ArrowLeft :size="20"/></button><h2>{{ detail ? '反馈详情' : writing ? '问题反馈' : '我的反馈' }}</h2><button class="icon-button" title="关闭反馈" :disabled="busy" @click="saveDraft(); emit('close')"><X :size="20"/></button></header>
+    <header class="modal-title"><button v-if="detail || writing" class="icon-button" title="返回反馈列表" :disabled="busy" @click="back"><ArrowLeft :size="20"/></button><h2>{{ detail ? '反馈详情' : writing ? '问题反馈' : '我的反馈' }}</h2><button class="icon-button" title="关闭反馈" :disabled="busy" @click="close"><X :size="20"/></button></header>
     <p class="small muted">此电脑已授权终端共享反馈记录。</p>
     <div v-if="error" class="alert" role="alert">{{ error }}</div>
     <template v-if="!detail && !writing"><button class="button primary" @click="create"><Plus :size="17"/>提交问题</button><ul class="feedback-list"><li v-for="row in rows" :key="row.id"><button @click="show(row)"><strong>{{ feedbackCategories[row.category as keyof typeof feedbackCategories] }}<span v-if="row.unread" class="feedback-dot"/></strong><span>{{ feedbackStates[row.state as keyof typeof feedbackStates] }} · {{ date(row.updated) }}</span><small>{{ row.id }}</small></button></li></ul><p v-if="!rows.length" class="muted">暂无反馈</p><footer><button class="button" :disabled="page <= 1" @click="page--; list()">上一页</button><span>{{ page }}</span><button class="button" :disabled="page * 30 >= total" @click="page++; list()">下一页</button></footer></template>

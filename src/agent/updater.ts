@@ -97,9 +97,10 @@ export class HelperUpdater {
     const space = statfsSync(this.dir); if (space.bavail * space.bsize < m.size - offset + 512 * 1024 * 1024) throw new RemoteError('UPDATE_DISK_SPACE', '更新包下载失败，磁盘可用空间不足。');
     if (offset < m.size) {
       const response = await this.options.request(m.path, { headers: offset ? { Range: `bytes=${offset}-` } : {}, signal: this.abort!.signal });
-      if (offset && (response.status !== 206 || response.headers.get('content-range') !== `bytes ${offset}-${m.size - 1}/${m.size}`)) { await response.body?.cancel(); throw new Error('Invalid range response'); }
+      if (offset && response.status === 200) offset = 0;
+      else if (offset && (response.status !== 206 || response.headers.get('content-range') !== `bytes ${offset}-${m.size - 1}/${m.size}`)) { await response.body?.cancel(); throw new Error('Invalid range response'); }
       if (!response.body || Number(response.headers.get('content-length')) !== m.size - offset) { await response.body?.cancel(); throw new Error('Invalid response size'); }
-      const output = createWriteStream(part, { flags: 'a', mode: 0o600 }); let outputError: Error | undefined; output.on('error', e => { outputError = e; });
+      const output = createWriteStream(part, { flags: offset ? 'a' : 'w', mode: 0o600 }); let outputError: Error | undefined; output.on('error', e => { outputError = e; });
       try {
         for await (const chunk of response.body as any) {
           if (this.abort!.signal.aborted) throw new Error('Cancelled'); offset += chunk.length;
@@ -125,6 +126,7 @@ export class HelperUpdater {
       copyFileSync(process.execPath, join(runner, 'node.exe')); copyFileSync(join(this.options.root, 'dist/updater.mjs'), join(runner, 'updater.mjs'));
       const job = { root: this.options.root, dataDir: this.options.dir, next: this.candidate, previous: this.previous, nonce: randomUUID() };
       const path = join(runner, 'job.json'); writeFileSync(path, JSON.stringify(job), { mode: 0o600 });
+      const resultFile = join(this.dir, 'result.json'); if (existsSync(resultFile)) unlinkSync(resultFile);
       const child = spawn(join(runner, 'node.exe'), [join(runner, 'updater.mjs'), path], { detached: true, stdio: 'ignore', windowsHide: true, cwd: runner });
       await once(child, 'spawn'); child.unref(); this.state.phase = 'installing'; return { accepted: true };
     } catch (e) { this.options.freeze(false); if (e instanceof RemoteError) throw e; throw new RemoteError('UPDATE_FAILED', '安装准备失败，请重新检查更新。'); }
@@ -139,8 +141,9 @@ export class HelperUpdater {
       const contents = readFileSync(file, 'utf8'); if (contents === this.reportedResult) return;
       const result = JSON.parse(contents);
       if (['installed', 'failed', 'rolled_back'].includes(result.phase) && /^\d+\.\d+\.\d+$/.test(result.version)) {
-        const reported = await this.report(result.phase, result.version);
+        if (result.phase === 'failed' && this.state.phase === 'installing' && result.version === this.state.version) { this.state.phase = 'ready'; this.options.freeze(false); }
         this.state.message = result.phase === 'rolled_back' ? '更新失败，已恢复上一版本' : result.phase === 'failed' ? '更新失败，请重新检查更新' : '';
+        const reported = await this.report(result.phase, result.version);
         if (reported) this.reportedResult = contents;
       }
     } catch {} finally { this.reporting = false; }

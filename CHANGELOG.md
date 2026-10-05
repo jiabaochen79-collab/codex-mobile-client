@@ -15,6 +15,17 @@ Dates describe development baselines, not a guarantee that a public binary relea
 - Set root-page scroll restoration before the app bundle and remembered authentication load; remove the redundant fixed-position body layer.
 - Verified after migration by public HTTPS health checks, certificate inspection, WSS handshake, Origin isolation, database integrity and migration-digest comparison; the full local suite passes 297/297 tests. Real iPhone suspension and cellular-network acceptance remain separate checks.
 
+## 0.4.26 - 2026-10-05
+
+### Fixed
+
+- Recover task snapshots after interrupted subscriptions without sending messages or stopping tasks.
+- Preserve queued work while task files are temporarily unavailable and preserve clarification answers after rejected submissions.
+- Reconcile model changes before allowing sends and recover rejected feedback without losing drafts.
+- Remove cancelled upload reservations and avoid marking a new task completion as read from older transcript content.
+- Bound notification worker readiness so notification history remains available after registration failures.
+- Restore helper readiness after failed updates and restart partial downloads when proxies ignore Range requests.
+
 ## 0.4.19 - 2026-09-23
 
 ### Fixed

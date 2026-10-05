@@ -73,7 +73,12 @@ describe('project navigation', () => {
       expect(adapter.list(30, {projectId:'parent'}, projects).conversations).toHaveLength(5);
       expect(adapter.list(0, {query:'Hidden'}, projects).conversations).toEqual([]);
       expect((await (adapter as any).projects(true))[0].count).toBe(35);
-      for (const id of ['archived','deleted','moved']) expect(() => (adapter as any).known(id)).toThrow(expect.objectContaining({code:'NOT_FOUND'}));
+      for (const id of ['archived','moved']) {
+        expect(() => (adapter as any).known(id)).toThrow(expect.objectContaining({code:'NOT_FOUND'}));
+        expect(() => (adapter as any).taskActivity(id, db)).toThrow(expect.objectContaining({code:'NOT_FOUND'}));
+      }
+      expect(() => (adapter as any).known('deleted')).toThrow(expect.objectContaining({code:'CLIENT_UNAVAILABLE'}));
+      expect(() => (adapter as any).taskActivity('deleted', db)).toThrow(expect.objectContaining({code:'CLIENT_UNAVAILABLE'}));
       expect(() => (adapter as any).known('active-0')).not.toThrow();
       db.prepare('UPDATE threads SET archived=1 WHERE id=?').run('active-0');
       db.prepare('DELETE FROM threads WHERE id=?').run('active-1');

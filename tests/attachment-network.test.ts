@@ -5,6 +5,20 @@ import type { Attachment, Command } from '../src/shared/protocol.js';
 
 afterEach(() => vi.restoreAllMocks());
 describe('attachment offset recovery', () => {
+  it('removes a reservation confirmed after the user cancelled upload initialization', async () => {
+    const task = randomUUID();
+    const attachment: Attachment = { id: randomUUID(), name: 'cancelled.txt', size: 4, mediaType: 'text/plain', offset: 0, ready: false };
+    let deliver!: (value: Attachment) => void;
+    const request = vi.fn((command: Command) => command.method === 'upload.begin'
+      ? new Promise<Attachment>(resolve => { deliver = resolve; }) : Promise.resolve({ removed: true }));
+    const uploads = useAttachments({ thread: () => task, request, control: () => ({ clientId: randomUUID(), allowed: true }) });
+    const adding = uploads.add([new File(['test'], attachment.name)]);
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    await uploads.remove(uploads.current.value[0]);
+    deliver(attachment); await adding;
+    expect(uploads.current.value).toHaveLength(0);
+    expect(request).toHaveBeenLastCalledWith({ method: 'upload.remove', params: { attachmentId: attachment.id } });
+  });
   it('restores completed attachment references without uploading empty placeholder files', () => {
     const task = randomUUID(); const request = vi.fn();
     const uploads = useAttachments({ thread: () => task, request, control: () => ({ clientId: randomUUID(), allowed: true }) });

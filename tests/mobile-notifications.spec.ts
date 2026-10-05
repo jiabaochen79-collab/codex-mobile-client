@@ -10,8 +10,9 @@ const tasks = [
 const notifications = tasks.map((task, index) => ({ id: `33333333-3333-4333-8333-33333333333${index}`, deviceId, taskId: task.id, turnId: `turn-${index}`, status: 'completed', occurredAt: Date.now(), createdAt: Date.now(), readAt: null, delivery: 'accepted' }));
 const link = (index = 0, device = deviceId) => `${origin}/?notification=${notifications[index].id}&notificationDevice=${device}`;
 
-async function fixture(page: Page, initiallyReady = true, missing = false) {
+async function fixture(page: Page, initiallyReady = true, missing = false, longHistory = false) {
   const commands: { device: string; command: any }[] = []; const reads: string[] = []; const statuses = new Map<string, (ready: boolean) => void>();
+  let notify!: () => void;
   await page.route('**/api/bootstrap', route => route.fulfill({ json: { mode: 'mobile' } }));
   const devices = [deviceId, otherDeviceId].map((device, index) => ({ deviceId: device, name: index ? 'Office computer' : 'Home computer', lastUsed: 2 - index, remembered: true, authorized: true, online: true, enabled: true }));
   await page.route('**/api/paired-devices**', route => route.fulfill({ json: { devices } }));
@@ -27,6 +28,7 @@ async function fixture(page: Page, initiallyReady = true, missing = false) {
     const device = new URL(ws.url()).searchParams.get('remoteDevice')!;
     const status = (ready: boolean) => ws.send(JSON.stringify({ type: 'status', online: ready, enabled: true, client: { available: ready, capabilities: ['project-navigation', 'multi-terminal'] }, control: { role: 'viewer', epoch: null, terminals: [] } }));
     statuses.set(device, status); status(initiallyReady);
+    notify = () => ws.send(JSON.stringify({ type: 'notification', notification: { ...notifications[0], deviceId: device } }));
     ws.onMessage(data => {
       const { id, command } = JSON.parse(String(data)); commands.push({ device, command }); let result: any;
       if (command.method === 'projects') result = { projects: [{ id: 'project-a', name: 'Operations', path: 'C:/test' }] };
@@ -36,12 +38,12 @@ async function fixture(page: Page, initiallyReady = true, missing = false) {
       if (command.method === 'read') {
         if (missing) { ws.send(JSON.stringify({ type: 'result', id, error: { code: 'NOT_FOUND', message: 'Task no longer exists' } })); return; }
         const task = tasks.find(row => row.id === command.params.id)!;
-        result = { id: task.id, title: task.title, epoch: 'fixture', busy: false, turnId: null, messages: [{ id: 'final', role: 'assistant', text: 'Result: ' + task.title }], requests: [], hasMore: false };
+        result = { id: task.id, title: task.title, epoch: 'fixture', busy: false, turnId: null, lastTurnId: notifications[tasks.indexOf(task)].turnId, messages: [...(longHistory ? Array.from({ length: 40 }, (_, index) => ({ id: 'history-' + index, turnId: 'old-' + index, role: 'assistant', text: 'Earlier history '.repeat(30) })) : []), { id: 'final', role: 'assistant', text: 'Result: ' + task.title }], requests: [], hasMore: false };
       }
       ws.send(JSON.stringify({ type: 'result', id, result }));
     });
   });
-  return { commands, reads, statuses };
+  return { commands, reads, statuses, notify: () => notify() };
 }
 
 async function pushClick(page: Page, url: string) {
@@ -149,6 +151,32 @@ test('keeps history open and unread when its task cannot be loaded', async ({ pa
   await expect(page.getByRole('dialog', { name: '任务完成提醒', exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Task no longer exists');
   expect(state.reads).toEqual([]); await expect(page.locator('.notification-item.unread')).toHaveCount(2);
+});
+
+test('does not mark a new completion read while the user is reading older history', async ({ page }) => {
+  const state = await fixture(page, true, false, true); await page.goto(link());
+  await expect(page.getByText('Result: ' + tasks[0].title, { exact: true })).toBeVisible();
+  await expect.poll(() => state.reads.length).toBe(1); state.reads.length = 0;
+  await page.locator('.messages').evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
+  await expect(page.getByTitle('回到最新消息', { exact: true })).toBeVisible();
+  state.notify(); await page.waitForTimeout(400); expect(state.reads).toEqual([]);
+  await page.locator('.messages').evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')); });
+  state.notify(); await expect.poll(() => state.reads.length).toBe(1);
+});
+
+test('keeps reminder history accessible when the worker never becomes ready', async ({ page }) => {
+  await page.clock.install();
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator.serviceWorker, 'getRegistration', { value: async () => ({ active: {} }) });
+    Object.defineProperty(navigator.serviceWorker, 'ready', { value: new Promise(() => {}) });
+  });
+  await fixture(page);
+  await page.route('**/api/notifications/settings', route => route.fulfill({ json: { settings: { enabled: true, completed: true, failed: true }, pushConfigured: true } }));
+  await page.goto(origin); await history(page);
+  await expect(page.locator('.notification-loading')).toBeVisible();
+  await page.clock.runFor(5500);
+  await expect(page.locator('.notification-loading')).toHaveCount(0);
+  await expect(page.locator('.notification-item')).toHaveCount(2);
 });
 
 test.describe('native Service Worker bridge', () => {
