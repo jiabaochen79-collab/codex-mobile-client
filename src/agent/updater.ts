@@ -10,7 +10,7 @@ import { RemoteError } from '../shared/protocol.js';
 import type { AgentStore } from './store.js';
 
 type Request = (path: string, init?: RequestInit) => Promise<Response>;
-const checkResponseSchema = z.object({ release: signedReleaseSchema.nullable(), current: signedReleaseSchema.nullable() });
+const checkResponseSchema = z.object({ release: signedReleaseSchema.nullable(), current: signedReleaseSchema.nullable(), rollback: signedReleaseSchema.nullable().optional() });
 export class HelperUpdater {
   readonly state: UpdateState = { phase: 'idle', progress: 0, autoDownload: true, message: '', notes: '', checkedAt: null };
   private candidate?: SignedRelease;
@@ -53,9 +53,11 @@ export class HelperUpdater {
         const data = checkResponseSchema.parse(await response.json());
         const current = data.current ? verifyRelease(data.current, this.options.publicKey) : undefined;
         if (current && current.manifest.version !== this.options.version) throw new Error('Incorrect rollback version');
+        const rollback = data.rollback ? verifyRelease(data.rollback, this.options.publicKey) : current;
+        if (rollback && compareVersions(rollback.manifest.version, this.options.version) > 0) throw new Error('Rollback is newer than the installed version');
         next = data.release ? verifyRelease(data.release, this.options.publicKey) : undefined;
         if (next && (compareVersions(next.manifest.version, this.options.version) <= 0 || next.manifest.sequence < Number(this.options.store.get('update:sequence') ?? 0))) throw new Error('Release replay');
-        this.previous = current?.envelope;
+        this.previous = rollback?.envelope;
       } catch { throw new RemoteError('UPDATE_INVALID', '更新信息校验失败，已阻止更新。请通过“问题反馈”联系支持。'); }
       this.state.checkedAt = Date.now();
       if (!next) { this.candidate = undefined; Object.assign(this.state, { phase: 'idle', version: undefined, progress: 0, notes: '', message: '已是最新版本' }); this.succeeded(); return; }
@@ -124,7 +126,7 @@ export class HelperUpdater {
       const blocks = await this.options.blockers(); if (blocks.length) throw new RemoteError('UPDATE_BLOCKED', blocks.join('；'));
       const runner = join(this.dir, 'runner'); mkdirSync(runner, { recursive: true });
       copyFileSync(process.execPath, join(runner, 'node.exe')); copyFileSync(join(this.options.root, 'dist/updater.mjs'), join(runner, 'updater.mjs'));
-      const job = { root: this.options.root, dataDir: this.options.dir, next: this.candidate, previous: this.previous, nonce: randomUUID() };
+      const job = { root: this.options.root, dataDir: this.options.dir, next: this.candidate, previous: this.previous, nonce: randomUUID(), version: this.state.version };
       const path = join(runner, 'job.json'); writeFileSync(path, JSON.stringify(job), { mode: 0o600 });
       const resultFile = join(this.dir, 'result.json'); if (existsSync(resultFile)) unlinkSync(resultFile);
       const child = spawn(join(runner, 'node.exe'), [join(runner, 'updater.mjs'), path], { detached: true, stdio: 'ignore', windowsHide: true, cwd: runner });
@@ -141,7 +143,8 @@ export class HelperUpdater {
       const contents = readFileSync(file, 'utf8'); if (contents === this.reportedResult) return;
       const result = JSON.parse(contents);
       if (['installed', 'failed', 'rolled_back'].includes(result.phase) && /^\d+\.\d+\.\d+$/.test(result.version)) {
-        if (result.phase === 'failed' && this.state.phase === 'installing' && result.version === this.state.version) { this.state.phase = 'ready'; this.options.freeze(false); }
+        if (result.installerRunning === true) { this.state.message = '安装器超时且尚未确认退出，请关闭安装器后重启助手。'; return; }
+        if (this.state.phase === 'installing' && result.version === this.state.version) { this.state.phase = 'ready'; this.options.freeze(false); }
         this.state.message = result.phase === 'rolled_back' ? '更新失败，已恢复上一版本' : result.phase === 'failed' ? '更新失败，请重新检查更新' : '';
         const reported = await this.report(result.phase, result.version);
         if (reported) this.reportedResult = contents;

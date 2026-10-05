@@ -86,6 +86,14 @@ describe('helper updater', () => {
     expect(existsSync(join(dir, 'updates/result.json'))).toBe(false);
     await updater.reportPrevious(); expect(updater.state.phase).toBe('installing'); expect(freeze).toHaveBeenLastCalledWith(true);
   });
+  it('does not unfreeze while a timed-out installer may still be running', async () => {
+    const { updater, dir, freeze } = await readyFixture(async () => []);
+    await updater.install();
+    writeFileSync(join(dir, 'updates/result.json'), JSON.stringify({ phase: 'failed', version: '0.4.17', installerRunning: true }));
+    await updater.reportPrevious();
+    expect(updater.state.phase).toBe('installing'); expect(freeze).toHaveBeenCalledExactlyOnceWith(true);
+    expect(updater.state.message).toContain('尚未确认退出');
+  });
 
   it('restarts a partial download when an intermediary returns a full 200 response', async () => {
     const previousBytes = Buffer.from('previous-package'), nextBytes = Buffer.from('next-package');
@@ -211,6 +219,21 @@ describe('helper updater', () => {
     expect(updater.state.phase).toBe('error');
     expect(updater.state.message).toContain('恢复包');
     expect(updater.state.message).not.toMatch(/网络|磁盘/);
+  });
+  it('upgrades a withdrawn installed build using an approved older rollback', async () => {
+    const rollback=release('0.4.15',15),candidate=release('0.4.17',17);
+    const updater=fixture(async path=>path.startsWith('/api/updates/device/check') ? Response.json({current:null,rollback,release:candidate}) : Response.json({}));
+    const dir=directories.at(-1)!;
+    for(const envelope of [rollback,candidate]){const m=JSON.parse(Buffer.from(envelope.payload,'base64').toString());writeFileSync(join(dir,'updates',m.sha256+'.exe'),m.version);}
+    await updater.check();expect(updater.state.phase).toBe('ready');
+    vi.mocked(spawn).mockImplementation(()=>{const child=Object.assign(new EventEmitter(),{unref:vi.fn()});queueMicrotask(()=>child.emit('spawn'));return child as unknown as ChildProcess;});
+    await updater.install();
+    expect(JSON.parse(readFileSync(join(dir,'updates/runner/job.json'),'utf8')).previous).toEqual(rollback);
+  });
+  it.each(['forged','newer'])('rejects an unsafe %s rollback', async kind => {
+    const rollback=kind==='newer'?release('0.4.17',17):{payload:'e30=',signature:'AA=='};
+    const updater=fixture(async()=>Response.json({current:null,rollback,release:release('0.4.18',18)}));
+    await updater.check();expect(updater.state.phase).toBe('error');expect(spawn).not.toHaveBeenCalled();
   });
 
   it('identifies a download failure after a successful version check', async () => {

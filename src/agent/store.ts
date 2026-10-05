@@ -20,6 +20,7 @@ export class AgentStore {
     if (!this.db.prepare('PRAGMA table_info(notification_watches)').all().some(c => c.name === 'lastWatchedAt')) this.db.exec('ALTER TABLE notification_watches ADD COLUMN lastWatchedAt INTEGER NOT NULL DEFAULT 0');
     this.db.exec('UPDATE notification_watches SET lastWatchedAt=startedAt WHERE lastWatchedAt=0');
     this.db.exec('CREATE TABLE IF NOT EXISTS notification_outbox (eventId TEXT PRIMARY KEY, taskId TEXT NOT NULL, turnId TEXT NOT NULL, status TEXT NOT NULL, occurredAt INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, lastAttempt INTEGER, createdAt INTEGER NOT NULL, ackedAt INTEGER);');
+    if (!this.db.prepare('PRAGMA table_info(notification_outbox)').all().some(c => c.name === 'serverOccurredAt')) this.db.exec('ALTER TABLE notification_outbox ADD COLUMN serverOccurredAt INTEGER');
     try { this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS notification_outbox_round_status ON notification_outbox(taskId,turnId,status);'); }
     catch {
       this.db.exec(`DELETE FROM notification_outbox WHERE rowid NOT IN (
@@ -87,6 +88,15 @@ export class AgentStore {
     return this.db.prepare('SELECT eventId,taskId,turnId,status,occurredAt,attempts,lastAttempt,createdAt,ackedAt FROM notification_outbox WHERE ackedAt IS NULL AND (lastAttempt IS NULL OR lastAttempt<?) ORDER BY createdAt LIMIT 20').all(now - 10000) as { eventId: string; taskId: string; turnId: string; status: 'completed' | 'failed' | 'interrupted'; occurredAt: number; attempts: number; lastAttempt: number | null; createdAt: number; ackedAt: number | null }[];
   }
   markNotificationAttempt(eventId: string) { this.db.prepare('UPDATE notification_outbox SET attempts=attempts+1,lastAttempt=? WHERE eventId=? AND ackedAt IS NULL').run(Date.now(), eventId); }
+  syncNotificationClock(origin: string, serverTime: number, localTime = Date.now()) { this.set(`notification:clock:${hash(origin)}`, String(serverTime - localTime)); }
+  notificationTime(eventId: string, origin: string) {
+    const row = this.db.prepare('SELECT occurredAt,serverOccurredAt FROM notification_outbox WHERE eventId=?').get(eventId) as { occurredAt: number; serverOccurredAt: number | null };
+    if (row.serverOccurredAt !== null) return row.serverOccurredAt;
+    const saved = this.get(`notification:clock:${hash(origin)}`); if (saved === null) return undefined;
+    const at = Math.max(0, Math.round(row.occurredAt + Number(saved)));
+    this.db.prepare('UPDATE notification_outbox SET serverOccurredAt=? WHERE eventId=?').run(at, eventId);
+    return at;
+  }
   ackNotification(eventId: string) { this.db.prepare('UPDATE notification_outbox SET ackedAt=? WHERE eventId=?').run(Date.now(), eventId); }
   pruneNotifications(before = Date.now() - 30 * 86400000) { this.db.prepare('DELETE FROM notification_outbox WHERE ackedAt IS NOT NULL AND createdAt<?').run(before); this.db.prepare('DELETE FROM notification_watches WHERE lastWatchedAt<?').run(before); }
   commandStatus(id: string, session: string, conversation: string) {

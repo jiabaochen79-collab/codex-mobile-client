@@ -1,9 +1,19 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import sharp from 'sharp';
 import { preparePhoto } from '../web/prepare-photo.js';
 import { useAttachments } from '../web/use-attachments.js';
 
 describe('mobile photo preparation', () => {
+  beforeEach(() => vi.stubGlobal('createImageBitmap', async (file: Blob) => {
+    const decoded = await sharp(Buffer.from(await file.arrayBuffer()), { failOn: 'warning', limitInputPixels:40000000 }).raw().toBuffer({resolveWithObject:true});
+    return {width:decoded.info.width,height:decoded.info.height,close:()=>{}};
+  }));
+  afterEach(() => vi.unstubAllGlobals());
+  it('rejects header-only images before uploading', async () => {
+    const file=new File([new Uint8Array([137,80,78,71,13,10,26,10])],'broken.png',{type:'image/png'});
+    await expect(preparePhoto(file,true)).rejects.toThrow('图片损坏');
+    await expect(preparePhoto(file,false)).rejects.toThrow('图片损坏');
+  });
   it('keeps ordinary files intact', async () => {
     const file = new File(['report'], 'report.txt', { type:'text/plain' });
     expect(await preparePhoto(file, false)).toBe(file);

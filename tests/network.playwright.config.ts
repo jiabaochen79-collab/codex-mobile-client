@@ -2,7 +2,7 @@ import { defineConfig } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
-  testDir: '.', testMatch: ['mobile-plan.spec.ts', 'mobile-network.spec.ts', 'mobile-feedback-recovery.spec.ts'], workers: 1,
+  testDir: '.', testMatch: ['mobile-plan.spec.ts', 'mobile-network.spec.ts', 'mobile-feedback-recovery.spec.ts', 'review-regressions.spec.ts'], workers: 1,
   timeout: 20000, use: { headless: true, serviceWorkers: 'block' },
   webServer: {
     cwd: fileURLToPath(new URL('../', import.meta.url)),

@@ -168,8 +168,8 @@ async function suppressVisibleNotification(item: any) {
     const result = await api('/api/notifications', undefined, notificationHeaders());
     const row = (result.items ?? []).find((entry: any) => entry.id === item.id);
     if (!viewed()) return;
-    if (row && !row.readAt) await api(`/api/notifications/${encodeURIComponent(item.id)}/read`, undefined, notificationHeaders(), 'POST');
-    notificationUnread.value = Math.max(0, (Number(result.unread) || 0) - (row && !row.readAt ? 1 : 0));
+    const readResult = row && !row.readAt ? await api(`/api/notifications/${encodeURIComponent(item.id)}/read`, undefined, notificationHeaders(), 'POST') : undefined;
+    notificationUnread.value = typeof readResult?.unread === 'number' ? readResult.unread : Math.max(0, (Number(result.unread) || 0) - (row && !row.readAt ? 1 : 0));
   } catch {}
 }
 function knownNotificationTask(taskId: string) {
@@ -227,8 +227,8 @@ async function openNotificationFromUrl() {
     const { item } = await api(`/api/notifications/${encodeURIComponent(id)}`, undefined, notificationHeaders());
     if (!stillRequested() || !active.value || !canRead.value) return;
     if (!await openNotificationTask(item.taskId, stillRequested)) return;
-    if (!item.readAt) await api(`/api/notifications/${encodeURIComponent(id)}/read`, undefined, notificationHeaders(), 'POST');
-    notificationUnread.value = Math.max(0, notificationUnread.value - (item.readAt ? 0 : 1));
+    const readResult = !item.readAt ? await api(`/api/notifications/${encodeURIComponent(id)}/read`, undefined, notificationHeaders(), 'POST') : undefined;
+    notificationUnread.value = typeof readResult?.unread === 'number' ? readResult.unread : Math.max(0, notificationUnread.value - (item.readAt ? 0 : 1));
     notificationOpen.value = false;
     if (stillRequested()) {
       const current = new URL(location.href); current.searchParams.delete('notification'); current.searchParams.delete('notificationDevice');
@@ -479,9 +479,7 @@ async function send(mode?: 'steer') {
   if (!(mode === 'steer' ? canSteer.value : canSend.value) || !snapshot.value) return;
   sendMenu.value = false; const id = snapshot.value.id; const text = draft.value; const queued = mode !== 'steer' && (snapshot.value.busy || queuedMessages.value.length > 0);
   chatScroll.toBottom();
-  if (await perform({ method: 'send', params: { id, text, epoch: snapshot.value.epoch, ...(mode === 'steer' ? { mode, turnId: snapshot.value.turnId! } : queued ? { mode: 'queue' } : {}), ...(attachments.current.value.length ? { attachmentIds: attachments.current.value.map(a => a.attachment!.id) } : {}) } })) {
-    if (selected.value?.id === id && draft.value === text) draft.value = ''; drafts.delete(id); attachments.clear(id);
-  }
+  await perform({ method: 'send', params: { id, text, epoch: snapshot.value.epoch, ...(mode === 'steer' ? { mode, turnId: snapshot.value.turnId! } : queued ? { mode: 'queue' } : {}), ...(attachments.current.value.length ? { attachmentIds: attachments.current.value.map(a => a.attachment!.id) } : {}) } });
 }
 let buttonSendAt = 0;
 function sendFromButton(event?: Event) {

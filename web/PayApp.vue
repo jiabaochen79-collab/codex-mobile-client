@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { Check, Copy, CreditCard, RefreshCw } from 'lucide-vue-next';
 import { api } from './api';
 import { money, paymentStatusNames, type PaymentOrder } from '../src/shared/commerce';
-const order = ref<PaymentOrder>(); const ready = ref(false); const loading = ref(true); const error = ref(''); const externalLink = ref(''); const copied = ref(false); let timer: ReturnType<typeof setInterval> | undefined;
+const order = ref<PaymentOrder>(); const ready = ref(false); const loading = ref(true); const operationError = ref(''); const readError = ref(''); const error = computed(() => operationError.value || readError.value); const externalLink = ref(''); const copied = ref(false); let timer: ReturnType<typeof setInterval> | undefined;
 const intendedOrder = ref(new URL(location.href).searchParams.get('order') ?? '');
 function rememberOrder(id: string) { intendedOrder.value = id; history.replaceState(null, '', location.pathname + '?order=' + encodeURIComponent(id)); }
-async function load() { if (!intendedOrder.value) { error.value = '请从订阅页面打开对应订单。'; return; } try { const result = await api('/api/payments/session?orderId=' + encodeURIComponent(intendedOrder.value)); order.value = result.order; ready.value = result.readiness.ready; if (!ready.value && ['pending','confirming'].includes(result.order.status)) error.value = result.readiness.reason; else if (error.value === result.readiness.reason) error.value = ''; } catch (e: any) { error.value = e.message; ready.value = false; } }
+let reading = false;
+async function load() { if (reading) return; if (!intendedOrder.value) { readError.value = '请从订阅页面打开对应订单。'; return; } reading = true; try { const result = await api('/api/payments/session?orderId=' + encodeURIComponent(intendedOrder.value)); order.value = result.order; ready.value = result.readiness.ready; readError.value = !ready.value && ['pending','confirming'].includes(result.order.status) ? result.readiness.reason : ''; } catch (e: any) { readError.value = e.message; ready.value = false; } finally { reading = false; } }
 async function pay() {
-  loading.value = true; error.value = '';
+  loading.value = true; operationError.value = '';
   try {
     const result = await api('/api/payments/start', { orderId: intendedOrder.value });
     if (result.kind === 'redirect') { location.assign(result.url); return; }
@@ -18,17 +19,17 @@ async function pay() {
       await new Promise<void>(resolve => bridge.invoke('getBrandWCPayRequest', result.params, () => resolve()));
       await api('/api/payments/recheck', { orderId: intendedOrder.value }); await load();
     }
-  } catch (e: any) { error.value = e.message; } finally { loading.value = false; }
+  } catch (e: any) { operationError.value = e.message; } finally { loading.value = false; }
 }
-async function recheck() { loading.value = true; error.value = ''; try { await api('/api/payments/recheck', { orderId: intendedOrder.value }); await load(); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
-async function copy() { try { await navigator.clipboard.writeText(externalLink.value); copied.value = true; } catch { error.value = '无法复制链接。'; } }
+async function recheck() { loading.value = true; operationError.value = ''; try { await api('/api/payments/recheck', { orderId: intendedOrder.value }); await load(); } catch (e: any) { operationError.value = e.message; } finally { loading.value = false; } }
+async function copy() { try { await navigator.clipboard.writeText(externalLink.value); copied.value = true; } catch { operationError.value = '无法复制链接。'; } }
 onMounted(async () => {
   const fragment = new URLSearchParams(location.hash.slice(1)); history.replaceState(null, '', location.pathname + location.search);
   try {
     if (fragment.has('ticket')) rememberOrder((await api('/api/payments/session', { ticket: fragment.get('ticket') })).orderId);
     if (fragment.has('oauthCode')) rememberOrder((await api('/api/payments/wechat/oauth/complete', { code: fragment.get('oauthCode'), state: fragment.get('state') })).orderId);
     await load();
-  } catch (e: any) { error.value = e.message; } finally { loading.value = false; }
+  } catch (e: any) { operationError.value = e.message; } finally { loading.value = false; }
   timer = setInterval(() => { if (!loading.value && document.visibilityState === 'visible') void load(); }, 3000);
 });
 onUnmounted(() => clearInterval(timer));

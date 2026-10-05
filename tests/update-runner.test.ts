@@ -3,11 +3,12 @@ import { generateKeyPairSync, sign, createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { runUpdate } from '../src/agent/update-runner.js';
+import { HelperUpdater } from '../src/agent/updater.js';
 
 const verification = vi.hoisted(() => ({ publicKey: '' }));
-vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
+vi.mock('node:child_process', () => ({ spawn: vi.fn(), execFile: vi.fn() }));
 vi.mock('node:timers/promises', () => ({ setTimeout: (ms: number) => new Promise(resolve => setTimeout(resolve, ms)) }));
 vi.mock('../src/shared/release-signature.js', async original => {
   const real = await original<typeof import('../src/shared/release-signature.js')>();
@@ -23,6 +24,8 @@ describe.skipIf(process.platform !== 'win32')('isolated update installation and 
   let nextExit: number;
   let previousExit: number;
   let legacyRollback: boolean;
+  let hungVersion: string;
+  let hungChild: EventEmitter;
   const installs: string[] = [];
   const launches: string[] = [];
 
@@ -42,8 +45,12 @@ describe.skipIf(process.platform !== 'win32')('isolated update installation and 
       const payload = Buffer.from(JSON.stringify({ version, sequence, platform: 'win32-x64', size: bytes.length, sha256, path: '/api/updates/download/' + sha256, notes: 'Synthetic test release', issuedAt: Date.now() }));
       return { payload: payload.toString('base64'), signature: sign(null, payload, keys.privateKey).toString('base64') };
     };
-    job = { root, dataDir: join(dir, 'data'), next: release('0.4.26', 26), previous: release('0.4.25', 25), nonce: randomUUID() };
-    installs.length = 0; launches.length = 0; runningVersion = ''; nextExit = 0; previousExit = 0; legacyRollback = false;
+    job = { root, dataDir: join(dir, 'data'), next: release('0.4.26', 26), previous: release('0.4.25', 25), nonce: randomUUID(), version: '0.4.26' };
+    installs.length = 0; launches.length = 0; runningVersion = ''; nextExit = 0; previousExit = 0; legacyRollback = false; hungVersion = '';
+    vi.mocked(execFile).mockImplementation((file: any, args: any, options: any, callback: any) => {
+      expect(file).toBe('taskkill.exe'); expect(args).toEqual(['/PID', '12344', '/T', '/F']); expect(options.timeout).toBe(15000);
+      hungChild.emit('exit', 1); callback(null); return {} as any;
+    });
     vi.spyOn(process, 'kill').mockImplementation(() => true);
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ mode: 'desktop' })));
     vi.mocked(spawn).mockImplementation((file, args) => {
@@ -58,7 +65,10 @@ describe.skipIf(process.platform !== 'win32')('isolated update installation and 
         const manifest = [job.next, job.previous].map(release => JSON.parse(Buffer.from(release.payload, 'base64').toString())).find(release => String(file).endsWith(release.sha256 + '.exe'));
         expect(manifest).toBeDefined(); installs.push(manifest.version);
       }
-      queueMicrotask(() => { child.emit('spawn'); child.emit('exit', String(file).endsWith('RemoteCompanion.exe') ? 0 : installs.at(-1) === '0.4.26' ? nextExit : previousExit); });
+      const helper = String(file).endsWith('RemoteCompanion.exe');
+      const hung = !helper && installs.at(-1) === hungVersion;
+      if (hung) hungChild = child;
+      queueMicrotask(() => { child.emit('spawn'); if (!hung) child.emit('exit', helper ? 0 : installs.at(-1) === '0.4.26' ? nextExit : previousExit); });
       return child as unknown as ChildProcess;
     });
   });
@@ -119,5 +129,36 @@ describe.skipIf(process.platform !== 'win32')('isolated update installation and 
     const file = join(dir, 'job.json'); writeFileSync(file, JSON.stringify(job));
     await expect(runUpdate(file)).rejects.toThrow('Package verification failed');
     expect(spawn).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(join(cache, 'result.json'), 'utf8'))).toMatchObject({ phase: 'failed', version: '0.4.26', installerRunning: false });
+    const freeze = vi.fn(); const updater = new HelperUpdater({ dir: job.dataDir, root, version: '0.4.25', store: { get: () => null } as any, request: async () => { throw new TypeError('Offline'); }, blockers: async () => [], freeze });
+    updater.state.phase = 'installing'; updater.state.version = '0.4.26';
+    await updater.reportPrevious(); expect(updater.state.phase).toBe('ready'); expect(freeze).toHaveBeenCalledWith(false); updater.close();
+  });
+  it('persists an early failure even if the signed payload becomes unreadable', async () => {
+    job.next.payload = Buffer.from('unreadable manifest').toString('base64');
+    const file = join(dir, 'job.json'); writeFileSync(file, JSON.stringify(job));
+    await expect(runUpdate(file)).rejects.toThrow();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(join(cache, 'result.json'), 'utf8'))).toMatchObject({ phase: 'failed', version: '0.4.26' });
+  });
+  it('terminates a hung installer before recovering the previous version', async () => {
+    hungVersion = '0.4.26';
+    const result = await perform(360000);
+    expect(result.phase).toBe('rolled_back'); expect(installs).toEqual(['0.4.26', '0.4.25']);
+    expect(execFile).toHaveBeenCalledTimes(1); expect(launches).toEqual(['0.4.25']);
+  });
+  it('bounds a hung rollback installer and starts the existing helper only after termination', async () => {
+    nextExit = 1; hungVersion = '0.4.25';
+    expect((await perform(360000)).phase).toBe('failed'); expect(launches).toEqual(['fallback']);
+  });
+  it('does not roll back or restart alongside an installer whose termination failed', async () => {
+    hungVersion = '0.4.26';
+    vi.mocked(execFile).mockImplementation((_file: any, _args: any, _options: any, callback: any) => { callback(new Error('Access denied')); return {} as any; });
+    const file = join(dir, 'job.json'); writeFileSync(file, JSON.stringify(job));
+    const pending = runUpdate(file); void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(360000);
+    await expect(pending).rejects.toThrow('Installer termination failed');
+    expect(installs).toEqual(['0.4.26']); expect(launches).toEqual([]);
+    expect(JSON.parse(readFileSync(join(cache, 'result.json'), 'utf8')).installerRunning).toBe(true);
   });
 });

@@ -1,20 +1,43 @@
 import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { verifyRelease, fileDigest } from '../shared/release-signature.js';
 import { signedReleaseSchema } from '../shared/updates.js';
 
-const jobSchema = z.object({ root: z.string(), dataDir: z.string(), next: signedReleaseSchema, previous: signedReleaseSchema, nonce: z.string().uuid() }).strict();
+const jobSchema = z.object({ root: z.string(), dataDir: z.string(), next: signedReleaseSchema, previous: signedReleaseSchema, nonce: z.string().uuid(), version: z.string().regex(/^\d+\.\d+\.\d+$/).optional() }).strict();
+const INSTALL_TIMEOUT_MS = 5 * 60000;
+class InstallerStillRunning extends Error {}
 export async function runUpdate(jobPath: string) {
   const job = jobSchema.parse(JSON.parse(readFileSync(jobPath, 'utf8')));
   if (process.platform !== 'win32' || !isAbsolute(job.root) || !isAbsolute(job.dataDir) || resolve(job.root) === resolve(job.dataDir)) throw new Error('Invalid installation paths');
-  const next = verifyRelease(job.next).manifest, previous = verifyRelease(job.previous).manifest;
   const cache = join(job.dataDir, 'updates');
-  const execute = (file: string, args: string[], wait = true) => new Promise<number>((done, reject) => { const child = spawn(file, args, { windowsHide: true, stdio: 'ignore', cwd: job.root, detached: !wait }); child.once('error', reject); if (wait) child.once('exit', code => done(code ?? 1)); else child.once('spawn', () => { child.unref(); done(child.pid ?? 0); }); });
-  for (const manifest of [next, previous]) { const path = join(cache, manifest.sha256 + '.exe'); if (statSync(path).size !== manifest.size || await fileDigest(path) !== manifest.sha256) throw new Error('Package verification failed'); }
+  const version = job.version ?? JSON.parse(Buffer.from(job.next.payload, 'base64').toString()).version;
+  const result = (phase: string, installerRunning = false) => writeFileSync(join(cache, 'result.json'), JSON.stringify({ phase, version, at: Date.now(), installerRunning }), { mode: 0o600 });
+  let next: ReturnType<typeof verifyRelease>['manifest'], previous: typeof next;
+  try {
+    next = verifyRelease(job.next).manifest; previous = verifyRelease(job.previous).manifest;
+    for (const manifest of [next, previous]) { const path = join(cache, manifest.sha256 + '.exe'); if (statSync(path).size !== manifest.size || await fileDigest(path) !== manifest.sha256) throw new Error('Package verification failed'); }
+  } catch (error) { result('failed'); throw error; }
+  const execute = (file: string, args: string[], wait = true) => new Promise<number>((done, reject) => {
+    const child = spawn(file, args, { windowsHide: true, stdio: 'ignore', cwd: job.root, detached: !wait });
+    let timer: NodeJS.Timeout | undefined, exited = false, terminating = false, terminationFinished = false;
+    child.once('error', error => { clearTimeout(timer); reject(error); });
+    if (!wait) { child.once('spawn', () => { child.unref(); done(child.pid ?? 0); }); return; }
+    child.once('exit', code => { exited = true; clearTimeout(timer); if (!terminating) done(code ?? 1); else if (terminationFinished) done(1); });
+    timer = setTimeout(() => {
+      terminating = true;
+      // Inno Setup uses child processes; never start rollback alongside a live installer.
+      execFile('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 15000 }, error => {
+        terminationFinished = true;
+        if (exited) { done(1); return; }
+        if (error) { reject(new InstallerStillRunning('Installer termination failed')); return; }
+        timer = setTimeout(() => exited ? done(1) : reject(new InstallerStillRunning('Installer did not exit')), 5000);
+      });
+    }, INSTALL_TIMEOUT_MS);
+  });
   const install = (sha: string) => execute(join(cache, sha + '.exe'), ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/DIR=' + job.root]);
   const launch = (version: string, nonce: string) => execute(join(job.root, 'RemoteCompanion.exe'), ['--update-health', nonce, version], false);
   const healthy = async (version: string, nonce: string, helperPid: number) => {
@@ -50,9 +73,11 @@ export async function runUpdate(jobPath: string) {
     return false;
   };
   let phase = 'failed';
-  try { if (await install(next.sha256) === 0) { const pid = await launch(next.version, job.nonce); if (await healthy(next.version, job.nonce, pid)) phase = 'installed'; } } catch {}
-  if (phase !== 'installed') { try { if (await install(previous.sha256) === 0) { const nonce = job.nonce + '-rollback'; const pid = await launch(previous.version, nonce); phase = await healthy(previous.version, nonce, pid) ? 'rolled_back' : 'failed'; } } catch {} }
-  writeFileSync(join(cache, 'result.json'), JSON.stringify({ phase, version: next.version, at: Date.now() }), { mode: 0o600 });
+  try {
+    try { if (await install(next.sha256) === 0) { const pid = await launch(next.version, job.nonce); if (await healthy(next.version, job.nonce, pid)) phase = 'installed'; } } catch (error) { if (error instanceof InstallerStillRunning) throw error; }
+    if (phase !== 'installed') { try { if (await install(previous.sha256) === 0) { const nonce = job.nonce + '-rollback'; const pid = await launch(previous.version, nonce); phase = await healthy(previous.version, nonce, pid) ? 'rolled_back' : 'failed'; } } catch (error) { if (error instanceof InstallerStillRunning) throw error; } }
+  } catch (error) { result('failed', true); throw error; }
+  result(phase);
   // Installation failures can leave the helper stopped; launch the verified existing program.
   if (phase === 'failed' && existsSync(join(job.root, 'RemoteCompanion.exe'))) await execute(join(job.root, 'RemoteCompanion.exe'), [], false);
 }

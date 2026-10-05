@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -16,7 +16,29 @@ describe('durable completion watches', () => {
     dir = mkdtempSync(join(tmpdir(), 'completion-watch-')); store = new AgentStore(dir);
     writeFileSync(join(dir, 'archived.jsonl'), ''); monitor = new CompletionMonitor(store, sources);
   });
-  afterEach(() => { monitor.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+  afterEach(() => { vi.useRealTimers(); monitor.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  it('captures a new desktop completion before the first scan without notifying historical turns', async () => {
+    const path = join(dir, 'archived.jsonl'); const now = Date.now();
+    writeFileSync(path, completion('historical', now - 10000)); utimesSync(path, new Date(now - 10000), new Date(now - 10000));
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    monitor.close(); monitor = new CompletionMonitor(store, () => [{ id: taskId, path }]);
+    vi.setSystemTime(now + 1000); appendFileSync(path, completion('after-start', now + 1000)); utimesSync(path, new Date(now + 1000), new Date(now + 1000));
+    await monitor.poll(); await monitor.poll();
+    expect(store.notificationOutbox().map(event => event.turnId)).toEqual(['after-start']);
+  });
+
+  it.each([-300000, 300000])('normalizes a %i ms computer clock skew and pins the timestamp through retries and restarts', async skew => {
+    const serverTime = Date.now(), localTime = serverTime + skew, origin = 'https://fixture.invalid';
+    monitor.watch(taskId, localTime); appendFileSync(join(dir, 'archived.jsonl'), completion('skewed', localTime + 1000)); await monitor.poll();
+    const event = store.notificationOutbox()[0];
+    expect(store.notificationTime(event.eventId, origin)).toBeUndefined();
+    store.syncNotificationClock(origin, serverTime, localTime);
+    expect(store.notificationTime(event.eventId, origin)).toBe(serverTime + 1000);
+    monitor.close(); store.close(); store = new AgentStore(dir); monitor = new CompletionMonitor(store, sources);
+    store.syncNotificationClock(origin, serverTime + 100000, localTime);
+    expect(store.notificationTime(event.eventId, origin)).toBe(serverTime + 1000);
+  });
 
   it('renews an old watch and captures an archived task after monitor and store restart', async () => {
     const now = Date.now(), startedAt = now - 31 * 86400000;

@@ -35,7 +35,7 @@ async function activate() {
 onMounted(load);
 </script>
 <template>
-  <div v-show="!ordersOpen" class="modal-backdrop subscription-backdrop" @click.self="!busy && emit('close')" @keydown.esc="!busy && emit('close')">
+  <div v-show="!ordersOpen" class="modal-backdrop subscription-backdrop">
     <section class="modal subscription-modal" role="dialog" aria-modal="true" aria-labelledby="subscription-title">
       <div class="modal-title"><h2 id="subscription-title">订阅与权益</h2><button class="icon-button" title="关闭订阅" :disabled="busy" @click="emit('close')"><X :size="20"/></button></div>
       <div v-if="subscription" class="subscription-current"><strong :class="subscription.access ? 'good' : 'warning'">{{ subscriptionLabel(subscription) }}</strong><span v-if="expiry">有效至 {{ expiry }}</span></div>

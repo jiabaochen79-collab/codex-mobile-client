@@ -61,7 +61,7 @@ export class CompletionMonitor {
     if (!previous) {
       const watch = this.store.notificationWatch(source.id);
       const baselineAt = watch?.startedAt ?? this.startedAt;
-      if (!watch && stat.birthtimeMs < this.startedAt) {
+      if (!watch && stat.mtimeMs < this.startedAt) {
         this.store.saveNotificationCursor({ path: source.path, offset: stat.size, mtime: stat.mtimeMs, size: stat.size, fileId: fileIdentity(stat), baselineAt, remainder: '' });
         return;
       }

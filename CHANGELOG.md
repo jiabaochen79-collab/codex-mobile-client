@@ -15,6 +15,29 @@ Dates describe development baselines, not a guarantee that a public binary relea
 - Set root-page scroll restoration before the app bundle and remembered authentication load; remove the redundant fixed-position body layer.
 - Verified after migration by public HTTPS health checks, certificate inspection, WSS handshake, Origin isolation, database integrity and migration-digest comparison; the full local suite passes 297/297 tests. Real iPhone suspension and cellular-network acceptance remain separate checks.
 
+## Unreleased
+
+### Fixed
+
+- Recover safely from updater preflight failures and bound installer execution before rollback.
+- Retry remembered-computer restoration without replacing deliberate login input.
+- Capture new completions before the first scan and normalize notification timestamps against server time.
+- Preserve read state across late notification pages and prevent order polls from overwriting newer results.
+- Keep valid concurrent image completion idempotent when another request finalizes the file.
+
+## 0.4.27 - 2026-10-05
+
+### Fixed
+
+- Recover failed initial connections when the network returns, with bounded automatic retries.
+- Preserve new task drafts when an earlier send finishes refreshing in the background.
+- Verify system push bindings for the selected computer instead of relying on a browser-wide subscription.
+- Paginate notification history and preserve the full unread count.
+- Serialize feedback detail selection and prevent accidental subscription and order dialog dismissal.
+- Clear recovered payment polling errors without hiding rejected payment operations.
+- Reject corrupt image attachments using actual decoding, while retaining valid image bytes.
+- Allow upgrades from withdrawn builds with an approved, signed older recovery package.
+
 ## 0.4.26 - 2026-10-05
 
 ### Fixed

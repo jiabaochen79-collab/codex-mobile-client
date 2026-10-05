@@ -11,6 +11,8 @@ const emit = defineEmits<{ close: []; unread: [count: number] }>();
 const headers = () => ({ 'X-Remote-Device': props.deviceId });
 const items = ref<NotificationItem[]>([]);
 const unread = ref(0);
+const nextCursor = ref<string | null>(null);
+const loadingMore = ref(false);
 const settings = ref<NotificationSettings>({ enabled: false, completed: true, failed: true });
 const pushConfigured = ref(false);
 const vapidPublicKey = ref<string | null>(null);
@@ -20,6 +22,7 @@ const busy = ref(false);
 const error = ref('');
 const info = ref('');
 const standalone = ref(false);
+let listRevision = 0;
 
 const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
 const isIos = /iPhone|iPad|iPod/i.test(userAgent) || typeof navigator !== 'undefined' && navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
@@ -57,6 +60,7 @@ async function load() {
     pushConfigured.value = settingResult.pushConfigured === true;
     vapidPublicKey.value = settingResult.vapidPublicKey ?? null;
     items.value = listResult.items ?? [];
+    nextCursor.value = listResult.nextCursor ?? null;
     updateUnread(Number(listResult.unread) || 0);
     void props.resolveTasks(items.value.map(item => item.taskId));
     await refreshSystemPushState();
@@ -68,7 +72,11 @@ async function refreshSystemPushState() {
   if (!settings.value.enabled || !pushConfigured.value || !pushAvailable.value) return;
   try {
     const registration = await pushRegistration();
-    systemPushState.value = await registration.pushManager.getSubscription() ? 'enabled' : 'needed';
+    const subscription = await registration.pushManager.getSubscription();
+    if (!subscription || Notification.permission !== 'granted') { systemPushState.value = 'needed'; return; }
+    const result = await api('/api/push/subscriptions/status', { endpoint: subscription.endpoint }, headers());
+    systemPushState.value = result.active === true ? 'enabled' : 'needed';
+    saveLocalSubscription(result.active === true ? result.id : undefined);
   } catch { systemPushState.value = 'needed'; }
 }
 async function save(next: NotificationSettings) {
@@ -131,15 +139,18 @@ async function changeKind(kind: 'completed' | 'failed', value: boolean) {
 }
 async function readOne(item: NotificationItem) {
   if (busy.value) return; busy.value = true; error.value = '';
+  listRevision++;
   try {
     if (!await props.openTask(item.taskId)) return;
-    await api(`/api/notifications/${encodeURIComponent(item.id)}/read`, undefined, headers(), 'POST');
-    item.readAt ??= Date.now(); updateUnread(items.value.filter(row => !row.readAt).length); emit('close');
+    const result = await api(`/api/notifications/${encodeURIComponent(item.id)}/read`, undefined, headers(), 'POST');
+    const wasUnread = item.readAt === null;
+    item.readAt ??= Date.now(); updateUnread(typeof result.unread === 'number' ? result.unread : unread.value - Number(wasUnread)); emit('close');
   } catch (e: any) { error.value = e.message; }
   finally { busy.value = false; }
 }
 async function readAll() {
   if (busy.value || !unread.value) return; busy.value = true; error.value = '';
+  listRevision++;
   try { await api('/api/notifications/read-all', {}, headers()); for (const item of items.value) item.readAt ??= Date.now(); updateUnread(0); }
   catch (e: any) { error.value = e.message; }
   finally { busy.value = false; }
@@ -147,10 +158,27 @@ async function readAll() {
 function onIncoming(event: Event) {
   const item = (event as CustomEvent<NotificationItem>).detail;
   if (!item || item.deviceId !== props.deviceId) return;
+  listRevision++;
   const index = items.value.findIndex(row => row.id === item.id);
-  if (index >= 0) items.value[index] = item; else items.value.unshift(item);
-  updateUnread(items.value.filter(row => !row.readAt).length);
+  if (index >= 0) { if (items.value[index].readAt) item.readAt ??= items.value[index].readAt; items.value[index] = item; }
+  else { items.value.unshift(item); if (!item.readAt) updateUnread(unread.value + 1); }
   void props.resolveTasks([item.taskId]);
+}
+async function loadMore() {
+  if (loadingMore.value || busy.value || !nextCursor.value) return;
+  loadingMore.value = true; error.value = '';
+  const revision = listRevision;
+  try {
+    const result = await api(`/api/notifications?cursor=${encodeURIComponent(nextCursor.value)}`, undefined, headers());
+    if (revision !== listRevision) return;
+    const page = (result.items ?? []) as NotificationItem[];
+    const ids = new Set(items.value.map(item => item.id));
+    items.value.push(...page.filter(item => !ids.has(item.id)));
+    nextCursor.value = result.nextCursor ?? null;
+    updateUnread(Number(result.unread) || 0);
+    void props.resolveTasks(page.map(item => item.taskId));
+  } catch (e: any) { if (revision === listRevision) error.value = e.message; }
+  finally { loadingMore.value = false; }
 }
 onMounted(() => { window.addEventListener('remote-notification', onIncoming); void load(); });
 onUnmounted(() => window.removeEventListener('remote-notification', onIncoming));
@@ -170,6 +198,7 @@ onUnmounted(() => window.removeEventListener('remote-notification', onIncoming))
         <div class="notification-list-heading"><strong>最近提醒</strong><button v-if="unread" class="text-button" :disabled="busy" @click="readAll">全部标为已读</button></div>
         <div v-if="!items.length" class="notification-empty">暂无任务完成提醒</div>
         <div v-else class="notification-list"><button v-for="item in items" :key="item.id" class="notification-item" :class="{ unread: !item.readAt }" :disabled="busy" @click="readOne(item)"><span class="notification-status" :class="item.status"><Check v-if="item.status === 'completed'" :size="15"/><ShieldAlert v-else :size="15"/></span><span class="notification-item-text"><strong :title="taskLabels[item.taskId]?.title || item.taskId">{{ taskLabels[item.taskId]?.title || `任务 ${item.taskId.slice(0, 8)}` }}</strong><small v-if="taskLabels[item.taskId]?.project" class="notification-project">{{ taskLabels[item.taskId].project }}</small><small>{{ statusLabel(item.status) }} · {{ formatTime(item.occurredAt) }}</small></span><ExternalLink :size="15"/></button></div>
+        <button v-if="nextCursor" class="button" :disabled="busy || loadingMore" @click="loadMore"><RefreshCw v-if="loadingMore" class="spin" :size="16"/>{{ loadingMore ? '正在读取' : '加载更多提醒' }}</button>
       </template>
       <p v-if="error" class="alert" role="alert">{{ error }}</p>
       <p class="notification-footnote">系统通知只显示状态和时间；登录后的提醒列表显示任务及项目名称，无法读取名称时显示任务编号。站内记录保留 30 天。</p>

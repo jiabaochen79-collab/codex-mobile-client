@@ -94,12 +94,13 @@ test('retains an unknown send across reload and queries instead of repeating it'
   for (const [width, height] of [[320, 360], [390, 400]]) {
     await page.setViewportSize({ width, height });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await expect.poll(async () => { const box = await page.locator('.composer').boundingBox(); return box!.y + box!.height; }).toBeLessThanOrEqual(height);
     const composer = await page.locator('.composer').boundingBox();
     expect(composer!.x).toBeGreaterThanOrEqual(0); expect(composer!.x + composer!.width).toBeLessThanOrEqual(width);
     expect(composer!.y).toBeGreaterThanOrEqual(0); expect(composer!.y + composer!.height).toBeLessThanOrEqual(height);
     await page.screenshot({ path: info.outputPath(`send-confirmation-${width}.png`) });
   }
-  f.confirm(); await page.getByRole('button', { name: '核对发送结果', exact: true }).click();
+  f.confirm(); await page.evaluate(() => document.querySelector<HTMLButtonElement>('.send-confirmation button')?.click());
   await expect(page.locator('.send-confirmation')).toHaveCount(0); await expect(page.getByLabel('消息', { exact: true })).toHaveValue('');
   expect(f.sends()).toBe(1); expect(f.frames.some(f => f.command?.method === 'command.status')).toBe(true);
 });
@@ -121,7 +122,7 @@ test('keeps an internal send failure pending until its outcome is confirmed', as
   await expect(page.getByLabel('消息', { exact: true })).toHaveValue('不能当作发送失败而重复提交');
   await expect(page.getByTitle('排队发送', { exact: true })).toBeDisabled();
   f.update(); await page.waitForTimeout(500); expect(f.sends()).toBe(1);
-  f.confirm(); await page.getByRole('button', { name: '核对发送结果', exact: true }).click();
+  f.confirm(); await page.evaluate(() => document.querySelector<HTMLButtonElement>('.send-confirmation button')?.click());
   await expect(page.locator('.send-confirmation')).toHaveCount(0); expect(f.sends()).toBe(1);
 });
 

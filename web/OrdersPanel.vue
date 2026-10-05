@@ -11,7 +11,7 @@ const emit = defineEmits<{ close: []; changed: [] }>();
 const base = props.mode === 'desktop' ? '/local/orders' : '/api/orders';
 const view = ref(props.initialPlan ? 'buy' : 'orders'); const data = ref<any>(); const catalog = ref<Catalog>(); const selected = ref(props.initialPlan ?? 'month'); const channel = ref('wechat'); const accepted = ref(false);
 const channels = computed(() => data.value?.readiness?.channels ?? []);
-const loading = ref(false); const error = ref(''); const active = ref<PaymentOrder>(); const payUrl = ref(''); const qr = ref(''); const copied = ref(false); const key = ref(crypto.randomUUID());
+const loading = ref(false); const error = ref(''); const readError = ref(''); const active = ref<PaymentOrder>(); const payUrl = ref(''); const qr = ref(''); const copied = ref(false); const key = ref(crypto.randomUUID());
 const refundTarget = ref<any>(); const refundReason = ref('first_purchase'); const explanation = ref('');
 const plan = computed(() => catalog.value?.plans.find(p => p.id === selected.value));
 const plans = computed(() => catalog.value?.plans.filter(p => p.id !== 'trial') ?? []);
@@ -19,28 +19,35 @@ const canBuy = computed(() => data.value?.readiness.ready && plan.value?.availab
 function changedChoice() { accepted.value = false; key.value = crypto.randomUUID(); }
 const date = (value: number | null) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-';
 let polling: ReturnType<typeof setInterval> | undefined;
-async function load() {
-  try { data.value = await api(base); const info = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription'); catalog.value = info.catalog;
+let readRevision = 0, reading = false;
+async function load(force = false) {
+  if (reading && !force) return;
+  const revision = ++readRevision; reading = true;
+  try { const orders = await api(base); const info = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription');
+    if (revision !== readRevision) return;
+    data.value = orders; catalog.value = info.catalog;
     if (!channels.value.includes(channel.value)) channel.value = channels.value[0] ?? '';
     if (active.value) { const next = data.value.orders.find((o: PaymentOrder) => o.id === active.value!.id); if (next) { const previous = active.value.status; active.value = next; if (next.status === 'paid' && previous !== 'paid') emit('changed'); } }
-  } catch (e: any) { error.value = e.message; }
+    readError.value = '';
+  } catch (e: any) { if (revision === readRevision) readError.value = e.message; }
+  finally { if (revision === readRevision) reading = false; }
 }
 async function showPayment(result: any) { active.value = result.order; payUrl.value = result.payUrl; qr.value = await QRCode.toDataURL(result.payUrl, { width: 260, margin: 2, errorCorrectionLevel: 'M' }); copied.value = false; }
 async function create() {
-  if (!canBuy.value) return; loading.value = true; error.value = '';
-  try { await showPayment(await api(base, { planId: selected.value, planRevision: plan.value!.revision, channel: channel.value, termsVersion: PAYMENT_TERMS_VERSION, idempotencyKey: key.value })); key.value = crypto.randomUUID(); accepted.value = false; await load(); }
-  catch (e: any) { error.value = e.message; if (e.code === 'STALE') { accepted.value = false; key.value = crypto.randomUUID(); await load(); } }
+  if (!canBuy.value) return; loading.value = true; error.value = ''; readRevision++; reading = false;
+  try { await showPayment(await api(base, { planId: selected.value, planRevision: plan.value!.revision, channel: channel.value, termsVersion: PAYMENT_TERMS_VERSION, idempotencyKey: key.value })); key.value = crypto.randomUUID(); accepted.value = false; await load(true); }
+  catch (e: any) { error.value = e.message; if (e.code === 'STALE') { accepted.value = false; key.value = crypto.randomUUID(); await load(true); } }
   finally { loading.value = false; }
 }
-async function open(order: PaymentOrder) { loading.value = true; error.value = ''; try { await showPayment(await api(`${base}/${order.id}/open`, {})); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
-async function closeOrder(order: PaymentOrder) { loading.value = true; error.value = ''; try { await api(`${base}/${order.id}/close`, {}); await load(); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
+async function open(order: PaymentOrder) { loading.value = true; error.value = ''; readRevision++; reading = false; try { await showPayment(await api(`${base}/${order.id}/open`, {})); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
+async function closeOrder(order: PaymentOrder) { loading.value = true; error.value = ''; readRevision++; reading = false; try { await api(`${base}/${order.id}/close`, {}); await load(true); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
 async function copyLink() { try { await navigator.clipboard.writeText(payUrl.value); copied.value = true; } catch { error.value = '无法复制链接。'; } }
-async function refund() { loading.value = true; error.value = ''; try { await api(`${base}/${refundTarget.value.id}/refund`, { reason: refundReason.value, explanation: explanation.value }); refundTarget.value = undefined; explanation.value = ''; await load(); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
+async function refund() { loading.value = true; error.value = ''; readRevision++; reading = false; try { await api(`${base}/${refundTarget.value.id}/refund`, { reason: refundReason.value, explanation: explanation.value }); refundTarget.value = undefined; explanation.value = ''; await load(true); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
 onMounted(async () => { loading.value = true; await load(); loading.value = false; polling = setInterval(() => { if (!loading.value && document.visibilityState === 'visible') void load(); }, 5000); });
-onUnmounted(() => clearInterval(polling));
+onUnmounted(() => { readRevision++; clearInterval(polling); });
 </script>
 <template>
-  <div class="modal-backdrop purchase-backdrop" @click.self="!loading && emit('close')">
+  <div class="modal-backdrop purchase-backdrop">
     <section class="modal purchase-panel" role="dialog" aria-modal="true" aria-label="订单与续费">
       <div class="modal-title"><h2>订单与续费</h2><button class="icon-button" title="关闭订单" :disabled="loading" @click="emit('close')"><X :size="20"/></button></div>
       <div v-if="active" class="purchase-payment">
@@ -73,7 +80,7 @@ onUnmounted(() => clearInterval(polling));
           <p v-if="data && !data.orders.length && !data.licenses.length" class="empty-state">暂无订单</p>
         </div>
       </template>
-      <div v-if="error" class="alert" role="alert">{{ error }}</div>
+      <div v-if="error || readError" class="alert" role="alert">{{ error || readError }}</div>
     </section>
   </div>
 </template>

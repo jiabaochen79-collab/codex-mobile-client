@@ -2,6 +2,7 @@ import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpa
 import { createHash } from 'node:crypto';
 import { extname, join, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import sharp from 'sharp';
 import { MAX_ATTACHMENT_TOTAL, MAX_FILE_SIZE, MAX_UPLOAD_CHUNK, RemoteError, type Attachment, type LocalAttachment } from '../shared/protocol.js';
 
 type Upload = { id: string; owner: string; conversation: string; name: string; size: number; sha256: string; mediaType: string; offset: number; ready: number; committed: number; created: number };
@@ -68,7 +69,8 @@ export class UploadStore {
     } finally { closeSync(fd); }
     return this.info(row);
   }
-  complete(id: string, owner: string) {
+  async complete(id: string, owner: string, authorize = () => {}) {
+    authorize();
     const row = this.get(id, owner); if (row.ready) return this.info(row);
     if (row.offset !== row.size) throw new RemoteError('UPLOAD_INCOMPLETE', '文件尚未上传完成。');
     const folder = this.folder(id); const part = join(folder, 'upload.part');
@@ -85,6 +87,18 @@ export class UploadStore {
       '.gif': ['image/gif', /^GIF8[79]a$/.test(header.toString('ascii',0,6))]
     };
     if (types[extension] && !types[extension][1]) throw new RemoteError('INVALID', '图片内容与格式不匹配。');
+    if (types[extension]) {
+      try { await sharp(part, { limitInputPixels: 40000000, failOn: 'warning' }).resize(1, 1).raw().toBuffer(); }
+      catch {
+        authorize();
+        // A concurrent verified completion can rename the file before this decoder opens it.
+        const current = this.get(id, owner); if (current.ready) return this.info(current);
+        throw new RemoteError('INVALID', '图片损坏或尺寸过大，请重新选择。');
+      }
+      authorize();
+      const current = this.get(id, owner);
+      if (current.ready) return this.info(current);
+    }
     row.mediaType = types[extension]?.[0] ?? 'application/octet-stream';
     // Keep the original filename for native attachment rendering, within a generated directory.
     renameSync(part, join(folder, row.name)); row.ready = 1;

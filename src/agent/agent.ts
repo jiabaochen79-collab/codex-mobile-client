@@ -157,7 +157,7 @@ export class Agent {
     let m: any; try { m = JSON.parse(text); } catch { return; }
     if (m.type === 'queue-authorization') { const parsed = z.object({ id: uid, allowed: z.boolean(), validForMs: z.number().int().min(0).max(10000) }).safeParse(m); if (parsed.success) { const pending = this.queueAuthorizations.get(parsed.data.id); if (pending) { clearTimeout(pending.timer); this.queueAuthorizations.delete(parsed.data.id); pending.resolve(parsed.data); } } return; }
     if (m.type === 'notification-ack') { const parsed = z.object({ type: z.literal('notification-ack'), eventId: z.string().regex(/^[a-f0-9]{64}$/), accepted: z.boolean() }).safeParse(m); if (parsed.success && parsed.data.accepted) this.store.ackNotification(parsed.data.eventId); return; }
-    if (m.type === 'subscription') { const parsed = subscriptionSchema.safeParse(m.subscription); if (parsed.success) this.subscription = parsed.data; return; }
+    if (m.type === 'subscription') { const parsed = subscriptionSchema.safeParse(m.subscription); if (parsed.success) { this.subscription = parsed.data; this.store.syncNotificationClock(this.origin, parsed.data.serverTime); void this.flushNotifications(); } return; }
     if (m.type === 'control') {
       const lease = z.object({ sessionId: uid, clientId: uid, epoch: uid, expires: z.number().int() }).nullable().safeParse(m.lease);
       if (!lease.success || lease.data && (this.grants.get(lease.data.sessionId) ?? 0) <= Date.now()) { this.send({ type: 'control-result', id: m.id, ok: false }); return; }
@@ -210,7 +210,7 @@ export class Agent {
           if (!available.activities?.length) throw new RemoteError('NOT_FOUND', '目标任务不存在。');
           authorize(); result = this.uploads.begin(frame.id, sessionId, command.params);
         } else if (command.method === 'upload.status') result = this.uploads.status(command.params.attachmentId, sessionId);
-        else if (command.method === 'upload.complete') result = this.uploads.complete(command.params.attachmentId, sessionId);
+        else if (command.method === 'upload.complete') result = await this.uploads.complete(command.params.attachmentId, sessionId, authorize);
         else if (command.method === 'upload.remove') result = this.uploads.remove(command.params.attachmentId, sessionId);
         else if (command.method === 'queue.list') result = { queued: this.sends.list(command.params.id) };
         else if (command.method === 'command.status') result = this.store.commandStatus(command.params.requestId, sessionId, command.params.id);
@@ -256,10 +256,11 @@ export class Agent {
     }
   }
   private async flushNotifications() {
-    if (this.closing || !this.credentials || !this.enabled || this.socket?.readyState !== WebSocket.OPEN) return;
+    if (this.closing || !this.credentials || !this.enabled || !this.subscription || this.socket?.readyState !== WebSocket.OPEN) return;
     for (const event of this.store.notificationOutbox()) {
+      const occurredAt = this.store.notificationTime(event.eventId, this.origin); if (occurredAt === undefined) continue;
       this.store.markNotificationAttempt(event.eventId);
-      this.send({ type: 'notification.event', eventId: event.eventId, deviceId: this.credentials.id, taskId: event.taskId, turnId: event.turnId, status: event.status, occurredAt: event.occurredAt, protocolVersion: 1 });
+      this.send({ type: 'notification.event', eventId: event.eventId, deviceId: this.credentials.id, taskId: event.taskId, turnId: event.turnId, status: event.status, occurredAt, protocolVersion: 1 });
     }
   }
   private notifyQueue(id: string) {

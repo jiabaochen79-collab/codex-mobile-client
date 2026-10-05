@@ -34,6 +34,8 @@ const deviceIdHint = computed(() => deviceId.value && deviceIdDigits.value.lengt
 function normalizeDeviceId() { deviceId.value = deviceIdDigits.value.slice(0, 9); }
 const deviceState = (device: PairedDevice) => device.disabled ? '已被管理员封禁' : !device.authorized ? '需要重新验证' : !device.online ? '电脑离线' : !device.enabled ? '远控已关闭' : '在线';
 let directoryRevision = 0; let polling: ReturnType<typeof setInterval> | undefined; let disposed = false;
+let restorePending = false, restoreInFlight = false, restoreAttempts = 0, restoreError = '';
+let restoreRetry: ReturnType<typeof setTimeout> | undefined;
 const webUpdateAvailable = ref(false); let latestWebEntry = ''; let checkingWebVersion = false;
 const pageEntry = document.querySelector<HTMLScriptElement>('script[type="module"][src]')?.src;
 let openingNotificationDevice = false;
@@ -120,7 +122,30 @@ async function checkWebVersion() {
   catch {} finally { checkingWebVersion = false; }
 }
 function refreshWeb() { const url = new URL(location.href); url.searchParams.set('v', latestWebEntry); location.replace(url.href); }
-function foreground() { if (document.visibilityState !== 'visible') return; void refreshDirectory().catch(() => {}); void checkWebVersion(); }
+async function restoreConnection() {
+  if (disposed || restoreInFlight || connecting.value || working.value) return;
+  restoreInFlight = true; clearTimeout(restoreRetry);
+  try {
+    await refreshDirectory(true); if (disposed) return; restorePending = false; restoreAttempts = 0;
+    if (error.value === restoreError) error.value = ''; restoreError = '';
+    if (!activeId.value && (code.value || deviceId.value !== rememberedDeviceId.value)) adding.value = true;
+    if (!activeId.value && !adding.value && !code.value && deviceId.value === rememberedDeviceId.value) {
+      let last = ''; try { last = sessionStorage.getItem('remote-active-device') ?? ''; } catch {}
+      const notificationDevice = new URL(location.href).searchParams.get('notificationDevice');
+      const linkedDevice = notificationDevice && /^[1-9][0-9]{8}$/.test(notificationDevice) ? notificationDevice : '';
+      const target = linkedDevice ? devices.value.find(d => d.deviceId === linkedDevice) : devices.value.find(d => d.deviceId === last) ?? [...devices.value].sort((a, b) => b.lastUsed - a.lastUsed)[0];
+      if (target?.authorized) { activeId.value = target.deviceId; rememberSelection(target.deviceId); }
+      else if (target || linkedDevice) { deviceId.value = target?.deviceId ?? linkedDevice; adding.value = true; }
+    }
+  } catch (e: any) {
+    restorePending = ['NETWORK', 'OUTCOME_UNKNOWN'].includes(e.code) || [502, 503, 504].includes(e.status);
+    if (!error.value || error.value === restoreError) error.value = restoreError = e.message;
+    if (restorePending && restoreAttempts < 3) restoreRetry = setTimeout(() => { if (document.visibilityState === 'visible') void restoreConnection(); }, [1000, 3000, 10000][restoreAttempts++]);
+  } finally { restoreInFlight = false; restoring.value = false; }
+  if (new URL(location.href).searchParams.has('notification')) void openNotificationDevice();
+}
+function online() { if (restorePending) { restoreAttempts = 0; void restoreConnection(); } }
+function foreground() { if (document.visibilityState !== 'visible') return; if (restorePending) online(); else void refreshDirectory().catch(() => {}); void checkWebVersion(); }
 async function openNotificationDevice() {
   const url = new URL(location.href);
   const id = url.searchParams.get('notification'); const targetId = url.searchParams.get('notificationDevice');
@@ -155,24 +180,14 @@ watch([working, connecting, () => panel.value?.leaveState().busy], () => { void 
 function closeOverlay(event: KeyboardEvent) { if (event.key !== 'Escape' || working.value || connecting.value) return; if (pendingSwitch.value) pendingSwitch.value = undefined; else if (removeTarget.value) removeTarget.value = undefined; else if (confirmLogout.value) confirmLogout.value = false; else if (editingId.value) editingId.value = ''; else if (adding.value && devices.value.length) closePairing(); else directoryOpen.value = false; }
 onMounted(async () => {
   navigator.serviceWorker?.addEventListener('message', notificationMessage);
-  try {
-    await refreshDirectory(true);
-    let last = ''; try { last = sessionStorage.getItem('remote-active-device') ?? ''; } catch {}
-    const notificationDevice = new URL(location.href).searchParams.get('notificationDevice');
-    const linkedDevice = notificationDevice && /^[1-9][0-9]{8}$/.test(notificationDevice) ? notificationDevice : '';
-    const target = linkedDevice ? devices.value.find(d => d.deviceId === linkedDevice) : devices.value.find(d => d.deviceId === last) ?? [...devices.value].sort((a, b) => b.lastUsed - a.lastUsed)[0];
-    if (target?.authorized) { activeId.value = target.deviceId; rememberSelection(target.deviceId); }
-    else if (target) { deviceId.value = target.deviceId; adding.value = true; }
-    else if (linkedDevice) { deviceId.value = linkedDevice; adding.value = true; }
-  } catch (e: any) { if (!error.value) error.value = e.message; }
-  finally { restoring.value = false; }
+  await restoreConnection();
   if (new URL(location.href).searchParams.has('notification')) void openNotificationDevice();
   resumeReload.ready();
-  document.addEventListener('visibilitychange', foreground); window.addEventListener('pageshow', foreground); window.addEventListener('keydown', closeOverlay);
+  document.addEventListener('visibilitychange', foreground); window.addEventListener('pageshow', foreground); window.addEventListener('online', online); window.addEventListener('keydown', closeOverlay);
   polling = setInterval(() => { if (document.visibilityState === 'visible') { if (directoryVisible.value || activeId.value) void refreshDirectory().catch(() => {}); else void checkWebVersion(); } }, 15000);
   void checkWebVersion();
 });
-onUnmounted(() => { disposed = true; navigator.serviceWorker?.removeEventListener('message', notificationMessage); resumeReload.dispose(); clearInterval(polling); document.removeEventListener('visibilitychange', foreground); window.removeEventListener('pageshow', foreground); window.removeEventListener('keydown', closeOverlay); });
+onUnmounted(() => { disposed = true; clearTimeout(restoreRetry); navigator.serviceWorker?.removeEventListener('message', notificationMessage); resumeReload.dispose(); clearInterval(polling); document.removeEventListener('visibilitychange', foreground); window.removeEventListener('pageshow', foreground); window.removeEventListener('online', online); window.removeEventListener('keydown', closeOverlay); });
 </script>
 
 <template>
