@@ -196,3 +196,112 @@ test('an empty failed turn still displays its failure reason without a fake comm
   await expect(page.locator('.turn-outcome')).toContainText('Fixture service unavailable');
   await expect(page.locator('.tool-step')).toHaveCount(0);
 });
+
+const readRejected = { code: 'CLIENT_REJECTED', message: '原客户端未接受此操作，请检查目标会话。' };
+const taskSnapshot = (task: typeof tasks[number], text = 'Recovered task content') => ({
+  ...task, epoch: 'fixture', busy: false, turnId: null, requests: [], hasMore: false,
+  messages: [{ id: 'fixture-result', role: 'assistant', text }],
+  settings: { mode: 'default', permission: 'ask', revision: 'fixture' }
+});
+
+test('task-read recovers a transient rejection without presenting an operation failure', async ({ page }, info) => {
+  await page.clock.install(); let reads = 0;
+  const f = await fixture(page, (m, reply) => {
+    if (m.command.method !== 'read') return false;
+    reads++; if (reads < 3) reply(undefined, readRejected); else reply(taskSnapshot(tasks[0])); return true;
+  });
+  await expect(page.getByRole('status')).toContainText('正在同步会话');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.clock.runFor(1000); await expect.poll(() => reads).toBe(2);
+  await page.clock.runFor(2000); await expect(page.getByText('Recovered task content', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(f.commands.some(m => ['send', 'stop', 'respond', 'create'].includes(m.command.method))).toBe(false);
+  await page.screenshot({ path: info.outputPath('task-read-recovered.png') });
+});
+
+test('task-read bounds rapid retries and permits an explicit fresh retry', async ({ page }) => {
+  await page.clock.install(); let reads = 0;
+  await fixture(page, (m, reply) => { if (m.command.method !== 'read') return false; reads++; reply(undefined, readRejected); return true; });
+  await expect(page.getByRole('status')).toContainText('正在同步会话');
+  for (const [delay, count] of [[1000, 2], [2000, 3], [4000, 4]]) {
+    await page.clock.runFor(delay); await expect.poll(() => reads).toBe(count);
+  }
+  await expect(page.getByRole('alert')).toContainText('会话暂时读取失败');
+  await expect(page.getByText(readRejected.message, { exact: true })).toHaveCount(0);
+  await page.clock.runFor(1000); expect(reads).toBe(4);
+  await page.getByRole('button', { name: '重新读取', exact: true }).click();
+  await expect.poll(() => reads).toBe(5);
+  await expect(page.getByRole('status')).toContainText('正在同步会话');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('task-read retains existing content and drafts during recovery', async ({ page }) => {
+  await page.clock.install(); let fail = false;
+  const f = await fixture(page, (m, reply) => {
+    if (m.command.method !== 'read') return false;
+    if (fail) reply(undefined, readRejected); else reply(taskSnapshot(tasks[0])); return true;
+  });
+  await expect(page.getByText('Recovered task content', { exact: true })).toBeVisible();
+  await page.getByLabel('消息', { exact: true }).fill('Keep this draft');
+  fail = true; f.send({ type: 'changed', conversationId: tasks[0].id }); await page.clock.runFor(250);
+  await expect(page.getByRole('status')).toContainText('正在同步会话');
+  await expect(page.getByText('Recovered task content', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('Keep this draft');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  fail = false; await page.clock.runFor(1000);
+  await expect(page.locator('.chat-status')).toHaveCount(0);
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('Keep this draft');
+});
+
+test('task-read cancels a pending recovery when another task is selected', async ({ page }) => {
+  await page.clock.install();
+  const f = await fixture(page, (m, reply) => {
+    if (m.command.method !== 'read') return false;
+    if (m.command.params.id === tasks[0].id) reply(undefined, readRejected); else reply(taskSnapshot(tasks[1], 'Task B content')); return true;
+  });
+  await expect(page.getByRole('status')).toContainText('正在同步会话');
+  await chooseB(page); await expect(page.getByText('Task B content', { exact: true })).toBeVisible();
+  const before = f.commands.filter(m => m.command.method === 'read').length;
+  await page.clock.runFor(8000);
+  expect(f.commands.filter(m => m.command.method === 'read')).toHaveLength(before);
+  await expect(page.locator('.chat-heading h1')).toHaveText(tasks[1].title);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('task-read shows an unsupported interface immediately without rapid retries', async ({ page }) => {
+  await page.clock.install(); let reads = 0;
+  await fixture(page, (m, reply) => {
+    if (m.command.method !== 'read') return false;
+    reads++; reply(undefined, { code: 'UNSUPPORTED', message: '请更新电脑助手以读取此会话。' }); return true;
+  });
+  await expect(page.getByRole('alert')).toContainText('请更新电脑助手');
+  await page.clock.runFor(8000); expect(reads).toBe(1);
+});
+
+test('task-read backoff cannot be bypassed by a burst of task changes', async ({ page }) => {
+  await page.clock.install(); let reads = 0;
+  const f = await fixture(page, (m, reply) => {
+    if (m.command.method !== 'read') return false;
+    reads++; if (reads === 1) reply(undefined, readRejected); else reply(taskSnapshot(tasks[0])); return true;
+  });
+  await expect(page.getByRole('status')).toContainText('正在同步会话');
+  for (let i = 0; i < 25; i++) f.send({ type: 'changed', conversationId: tasks[0].id });
+  await page.clock.runFor(250); expect(reads).toBe(1);
+  await page.clock.runFor(750); await expect(page.getByText('Recovered task content', { exact: true })).toBeVisible();
+  expect(reads).toBe(2);
+});
+
+test('task-read recovery never clears or repeats a rejected send', async ({ page }) => {
+  await page.clock.install();
+  const f = await fixture(page, (m, reply) => {
+    if (m.command.method === 'read') { reply(taskSnapshot(tasks[0])); return true; }
+    if (m.command.method === 'send') { reply(undefined, readRejected); return true; }
+    return false;
+  });
+  await expect(page.getByText('Recovered task content', { exact: true })).toBeVisible();
+  await page.getByLabel('消息', { exact: true }).fill('A rejected send'); await page.locator('.send-button').click();
+  await expect(page.getByRole('alert')).toContainText(readRejected.message);
+  f.send({ type: 'changed', conversationId: tasks[0].id }); await page.clock.runFor(250);
+  await expect(page.getByRole('alert')).toContainText(readRejected.message);
+  expect(f.commands.filter(m => m.command.method === 'send')).toHaveLength(1);
+});

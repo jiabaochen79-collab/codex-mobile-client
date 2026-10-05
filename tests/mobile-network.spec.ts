@@ -3,7 +3,7 @@ import { mockPairedBrowser } from './paired-browser-fixture';
 
 const webkit = process.env.TEST_BROWSER === 'webkit';
 test.use({ browserName: webkit ? 'webkit' : 'chromium', viewport: { width: 390, height: 844 }, launchOptions: webkit ? {} : { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
-const origin = 'http://127.0.0.1:18890';
+const origin = process.env.PLAN_WEB_ORIGIN ?? 'http://127.0.0.1:18890';
 async function fixture(page: Page, sendError?: string) {
   const task = { id: '12345678-1234-4234-8234-123456789abc', title: '弱网测试任务', cwd: 'C:/fixture', updatedAt: 1 };
   const snapshot = { ...task, epoch: 'fixture', busy: true, turnId: 'running', hasMore: false, queued: [], requests: [], messages: [{ id: 'old', role: 'assistant', text: '已有结果' }], settings: { mode: 'default', revision: 'settings', permission: 'ask' } };
@@ -31,7 +31,7 @@ async function fixture(page: Page, sendError?: string) {
     });
   });
   await page.goto(origin); await page.getByRole('button', { name: task.title, exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('任务连接正在恢复'); update();
+  await expect(page.getByRole('status')).toContainText('正在同步会话'); update();
   await expect(page.getByText('已有结果', { exact: true })).toBeVisible();
   return { task, frames, update: () => update(), disconnect: () => disconnect(), sends: () => sends, connects: () => connects,
     confirm: () => { state = 'succeeded'; }, silent: () => { silent = true; }, rejectReads: (value: boolean) => { readFailure = value; },
@@ -69,15 +69,15 @@ for (const source of ['list', 'projects', 'search'] as const) test(`does not sho
   await page.screenshot({ path: info.outputPath(`reconnected-${source}.png`) });
 });
 
-test('dismisses only the visible navigation error without erasing an unresolved task read error', async ({ page }) => {
+test('dismisses only the visible navigation error without erasing task synchronization', async ({ page }) => {
   const f = await fixture(page); f.rejectReads(true); f.update();
-  await expect(page.getByRole('alert')).toContainText('任务连接正在恢复');
+  await expect(page.locator('.chat-status')).toContainText('正在同步会话');
   f.rejectNavigation('projects', true);
   await page.getByTitle('项目与会话', { exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('列表读取暂时失败');
   await page.getByTitle('关闭提示', { exact: true }).click(); await expect(page.getByRole('alert')).toHaveCount(0);
   await page.getByTitle('关闭项目列表', { exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('任务连接正在恢复');
+  await expect(page.locator('.chat-status')).toContainText('正在同步会话');
   f.rejectNavigation('projects', false); f.rejectReads(false); f.update(); await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
@@ -111,7 +111,7 @@ test('coalesces a burst of changed events and clears only the recovered read err
   await expect.poll(() => f.frames.filter(f => f.command?.method === 'read').length).toBeGreaterThan(before);
   await page.waitForTimeout(700);
   expect(f.frames.filter(f => f.command?.method === 'read').length - before).toBeLessThanOrEqual(2);
-  f.rejectReads(true); f.update(); await expect(page.getByRole('alert')).toContainText('任务连接正在恢复');
+  f.rejectReads(true); f.update(); await expect(page.locator('.chat-status')).toContainText('正在同步会话');
   f.rejectReads(false); f.update(); await expect(page.getByRole('alert')).toHaveCount(0);
 });
 

@@ -65,7 +65,7 @@ test('clears a recovered read error without losing the draft or allowing stale s
   const f = await fixture(page, { mode: 'default' });
   await page.getByLabel('消息', { exact: true }).fill('弱网草稿');
   f.failReads('请先在电脑端打开此任务。'); f.update();
-  await expect(page.getByRole('alert')).toContainText('请先在电脑端打开此任务');
+  await expect(page.locator('.chat-status')).toContainText('正在同步会话');
   await expect(page.getByTitle('发送消息', { exact: true })).toBeDisabled();
   f.failReads(''); f.update();
   await expect(page.getByRole('alert')).toHaveCount(0);
@@ -157,7 +157,7 @@ test('automatically clears a recovered snapshot timeout without a changed event 
   await page.clock.install(); const f = await fixture(page, { mode: 'default' });
   await page.getByLabel('消息', { exact: true }).fill('Recovered connection draft');
   f.failReads('会话暂时不可读取，请稍后重试。'); f.update();
-  await expect(page.getByRole('alert')).toContainText('会话暂时不可读取');
+  await expect(page.locator('.chat-status')).toContainText('正在同步会话');
   f.failReads(''); await page.clock.runFor(11000);
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(page.getByTitle('发送消息', { exact: true })).toBeEnabled();

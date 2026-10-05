@@ -33,6 +33,10 @@ const session = ref({ deviceId: props.deviceId }); const active = ref(false);
 const status = ref<any>({ online: false }); const connected = ref(false); const error = ref(''); const busy = ref(false);
 const selected = ref<Conversation | null>(null); const snapshot = ref<Snapshot | null>(null); const draft = ref(''); const limit = ref(100);
 const readError = ref(''); const navigationError = ref(''); const searchError = ref('');
+const readRecovering = ref(false);
+const readRetryDelays = [1000, 2000, 4000];
+const retryableReadErrors = new Set(['CLIENT_REJECTED', 'CLIENT_UNAVAILABLE', 'READ_TIMEOUT', 'READ_DISCONNECTED', 'OUTCOME_UNKNOWN', 'OFFLINE', 'UNAVAILABLE', 'BUSY']);
+let readFailures = 0; let readRetry: ReturnType<typeof setTimeout> | undefined;
 const taskSynced = ref(false);
 type PendingSend = { requestId: string; text: string; message: string; attachments: Attachment[] };
 const pendingSends = reactive<Record<string, PendingSend>>({});
@@ -400,6 +404,7 @@ function cancelNotificationNavigation() {
   history.replaceState(null, '', url.pathname + url.search + url.hash);
 }
 function showConversation(conversation: Conversation, activate = false) {
+  resetReadRecovery();
   activateSelected = activate; pendingActivations.clear();
   attachmentPicker.value = false;
   for (const key of Object.keys(answers.value)) delete answers.value[key]; for (const key of Object.keys(answerModes)) delete answerModes[key];
@@ -409,6 +414,8 @@ function showConversation(conversation: Conversation, activate = false) {
   selected.value = conversation; drawer.value = false; moreMenu.value = false; snapshot.value = null; readError.value = ''; error.value = ''; limit.value = 100; draft.value = drafts.get(conversation.id)??''; chatScroll.reset();
   if (pendingSends[conversation.id]) attachments.restore(conversation.id, pendingSends[conversation.id].attachments);
 }
+function resetReadRecovery() { clearTimeout(readRetry); readRetry = undefined; readFailures = 0; readRecovering.value = false; }
+function retryRead(activate = false) { resetReadRecovery(); readError.value = ''; void read(activate); }
 async function read(activate = false) {
   if (!selected.value) return;
   if (activate && canControl.value) pendingActivations.add(selected.value.id);
@@ -421,18 +428,32 @@ async function read(activate = false) {
     finally { reading = false; }
     return;
   }
+  if (readRetry) return;
   if (reading) { dirty = true; return; } reading = true;
   const id = selected.value.id; const initial = !snapshot.value; const cycle = modeSyncCycle;
   const activateTask=pendingActivations.has(id) && canControl.value;
-  try { const next = await request({ method: 'read', params: { id, limit: limit.value, ...(hasCapability('multi-terminal') ? {activate:activateTask} : {}), ...(hasCapability('conditional-read') && modeSynced.value && snapshot.value?.revision ? { ifRevision: snapshot.value.revision } : {}) } }); if (next.id !== id) throw new Error('会话状态不匹配，已保留当前会话，请稍后重试。'); if (selected.value?.id === id && cycle === modeSyncCycle) { pendingActivations.delete(id); readError.value = ''; if (!next.notModified) await chatScroll.change(() => { snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } void markSeen(); void reconcileSends(); } }
+  try { const next = await request({ method: 'read', params: { id, limit: limit.value, ...(hasCapability('multi-terminal') ? {activate:activateTask} : {}), ...(hasCapability('conditional-read') && modeSynced.value && snapshot.value?.revision ? { ifRevision: snapshot.value.revision } : {}) } }); if (next.id !== id) throw new Error('会话状态不匹配，已保留当前会话，请稍后重试。'); if (selected.value?.id === id && cycle === modeSyncCycle) { pendingActivations.delete(id); resetReadRecovery(); readError.value = ''; if (!next.notModified) await chatScroll.change(() => { snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } void markSeen(); void reconcileSends(); } }
   catch (e: any) {
     if (selected.value?.id !== id || cycle !== modeSyncCycle) return;
     if (e.code === 'NOT_FOUND') {
+      resetReadRecovery();
       for (const state of Object.values(groups)) state.rows = state.rows.filter(c => c.id !== id);
       searchRows.value = searchRows.value.filter(c => c.id !== id);
       selected.value = null; snapshot.value = null; drawer.value = false; moreMenu.value = false;
       error.value = '会话已归档或删除，已从列表移除。'; void loadNavigation();
-    } else { readError.value = e.message; modeSynced.value = false; taskSynced.value = false; if (e.code === 'CLIENT_UNAVAILABLE' && activateSelected && canControl.value) pendingActivations.add(id); }
+    } else {
+      modeSynced.value = false; taskSynced.value = false;
+      if (e.code === 'CLIENT_UNAVAILABLE' && activateSelected && canControl.value) pendingActivations.add(id);
+      const delay = retryableReadErrors.has(e.code) ? readRetryDelays[readFailures++] : undefined;
+      readRecovering.value = delay !== undefined;
+      if (delay !== undefined) {
+        readError.value = '';
+        readRetry = setTimeout(() => {
+          readRetry = undefined;
+          if (active.value && selected.value?.id === id && canRead.value && document.visibilityState === 'visible') void read();
+        }, delay);
+      } else readError.value = e.code === 'CLIENT_REJECTED' ? '会话暂时读取失败，稍后会自动重试。' : e.message;
+    }
   } finally { reading = false; if (dirty) { dirty = false; void read(); } }
 }
 async function readQueue() {
@@ -563,6 +584,7 @@ async function respondPlan(r: Interaction, action: 'implement'|'revise', feedbac
 }
 function subscriptionChanged(subscription: Subscription) { status.value.subscription = subscription; void loadNavigation(); void read(); }
 function clearNavigation(preserveDrafts = false) {
+  resetReadRecovery();
   if (preserveDrafts && selected.value) { drafts.set(selected.value.id, draft.value); try { savePendingSends(); } catch {} }
   notificationTaskIds.clear(); for (const id of Object.keys(notificationTasks)) delete notificationTasks[id];
   navigationEpoch++; focusedNavigationEpoch = -1; projectInteraction++; automaticProjects.clear();
@@ -734,6 +756,7 @@ onActivated(async () => {
   navigationPoll = setInterval(() => { if (document.visibilityState === 'visible' && listVisible.value) void loadNavigation(); }, 15000);
 });
 function suspend() {
+  resetReadRecovery();
   active.value = false; chatScroll.pause(); connected.value = false; invalidateMode();
   navigationEpoch++; searchRevision++; searchLoading.value = false;
   inputObserver?.disconnect();
@@ -770,11 +793,12 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
         <button v-if="hasCapability('model-settings')" class="model-trigger" :title="`模型与思考深度：${snapshot?.settings?.model ?? ''}`" :disabled="!canRead || !snapshot" @click="openModels()"><Brain :size="16"/><span>{{ snapshot?.settings?.model ?? '模型' }}</span></button>
         <button type="button" class="icon-button permission-status" :class="{ full: snapshot?.settings?.permission === 'full', approve: snapshot?.settings?.permission === 'approve' }" :aria-label="`任务权限：${permissionReason || permissionLabel}`" title="更改任务权限" aria-haspopup="dialog" :aria-expanded="permissionPicker" @click="openPermissionMenu"><ShieldAlert v-if="snapshot?.settings?.permission === 'full'" :size="18"/><ShieldCheck v-else-if="snapshot?.settings?.permission === 'approve'" :size="18"/><Shield v-else :size="18"/></button>
         <div class="chat-menu-anchor"><button class="icon-button" title="更多操作" :aria-expanded="moreMenu" @click="moreMenu = !moreMenu"><Ellipsis :size="21"/></button>
-          <div v-if="moreMenu" class="chat-menu"><div class="menu-device"><span :title="status.client?.reason">{{ formattedId }}</span><span :class="canControl ? 'good' : 'warning'">{{ connectionLabel }}</span></div><div class="connection-versions"><span>助手 {{ status.helperVersion ? `v${status.helperVersion}` : '版本未知' }}</span><span>Codex {{ status.client?.version || '版本未知' }}</span></div><button type="button" class="notification-menu-item" @click="openNotifications"><Bell :size="17"/><span>任务完成提醒</span><span v-if="notificationUnread" class="notification-unread-dot" aria-label="有未读提醒"></span></button><button type="button" class="permission-menu-item" :class="{ full: snapshot?.settings?.permission === 'full' }" @click="openPermissionMenu"><ShieldAlert v-if="snapshot?.settings?.permission === 'full'" :size="17"/><ShieldCheck v-else-if="snapshot?.settings?.permission === 'approve'" :size="17"/><Shield v-else :size="17"/><span><strong>任务权限</strong><small>{{ permissionReason || permissionLabel }}</small></span><ChevronRight :size="16"/></button><FeedbackButton mode="mobile" :device-id="deviceId" :status="status"/><button :disabled="!canRead" @click="moreMenu = false; read()"><RefreshCw :size="16"/>刷新会话</button><button v-if="hasCapability('multi-terminal')" :disabled="!canRead" @click="openTakeover"><MonitorSmartphone :size="17"/>在线终端 {{ status.control?.terminals.length ?? 1 }}</button><button :disabled="!canCreate" @click="newConversation()"><Plus :size="17"/>新建任务</button><button @click="logout"><LogOut :size="16"/>退出登录</button></div>
+          <div v-if="moreMenu" class="chat-menu"><div class="menu-device"><span :title="status.client?.reason">{{ formattedId }}</span><span :class="canControl ? 'good' : 'warning'">{{ connectionLabel }}</span></div><div class="connection-versions"><span>助手 {{ status.helperVersion ? `v${status.helperVersion}` : '版本未知' }}</span><span>Codex {{ status.client?.version || '版本未知' }}</span></div><button type="button" class="notification-menu-item" @click="openNotifications"><Bell :size="17"/><span>任务完成提醒</span><span v-if="notificationUnread" class="notification-unread-dot" aria-label="有未读提醒"></span></button><button type="button" class="permission-menu-item" :class="{ full: snapshot?.settings?.permission === 'full' }" @click="openPermissionMenu"><ShieldAlert v-if="snapshot?.settings?.permission === 'full'" :size="17"/><ShieldCheck v-else-if="snapshot?.settings?.permission === 'approve'" :size="17"/><Shield v-else :size="17"/><span><strong>任务权限</strong><small>{{ permissionReason || permissionLabel }}</small></span><ChevronRight :size="16"/></button><FeedbackButton mode="mobile" :device-id="deviceId" :status="status"/><button :disabled="!canRead" @click="moreMenu = false; retryRead()"><RefreshCw :size="16"/>刷新会话</button><button v-if="hasCapability('multi-terminal')" :disabled="!canRead" @click="openTakeover"><MonitorSmartphone :size="17"/>在线终端 {{ status.control?.terminals.length ?? 1 }}</button><button :disabled="!canCreate" @click="newConversation()"><Plus :size="17"/>新建任务</button><button @click="logout"><LogOut :size="16"/>退出登录</button></div>
         </div>
       </header>
       <button v-if="moreMenu" class="chat-menu-scrim" aria-label="关闭菜单" @click="moreMenu = false"></button>
       <div v-if="selected && !canReach" class="chat-status" role="status">{{ connectionLabel }}</div>
+      <div v-else-if="selected && snapshot && canRead && readRecovering" class="chat-status" role="status">正在同步会话</div>
       <button v-if="session && !serviceActive" class="subscription-required" @click="subscriptionOpen = true"><Ticket :size="16"/>订阅未开通或已到期<ChevronRight :size="16"/></button>
       <div v-if="visibleError && !drawer" class="alert app-alert" role="alert"><span>{{ visibleError }}</span><button class="icon-button" title="关闭提示" @click="dismissError"><X :size="16"/></button></div>
       <div v-if="listVisible" :class="['navigation-surface', { 'navigation-overlay': selected }]">
@@ -799,8 +823,8 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
       <template v-if="selected">
         <div class="transcript-area"><div ref="scroll" class="messages" @scroll.passive="chatScroll.onScroll"><div ref="content" class="messages-content">
           <button v-if="snapshot?.hasMore && limit < 500" class="text-button history-button" @click="limit += 100; read()">较早的消息</button>
-          <div v-if="!snapshot && readError" class="empty-state" role="alert"><p>{{ readError }}</p><button class="text-button" @click="readError = ''; read(true)">重新读取</button></div>
-          <div v-else-if="!snapshot" class="empty-state"><RefreshCw :size="22" class="spin"/><p>正在读取原会话</p></div>
+          <div v-if="!snapshot && readError" class="empty-state" role="alert"><p>{{ readError }}</p><button class="text-button" @click="retryRead(true)">重新读取</button></div>
+          <div v-else-if="!snapshot" class="empty-state" role="status"><RefreshCw :size="22" class="spin"/><p>{{ readRecovering ? '正在同步会话' : '正在读取原会话' }}</p></div>
           <section v-for="turn in turns" :key="`${selected.id}:${turn.id}`" class="conversation-turn">
             <MessageContent v-for="m in turn.users" :key="m.id" :message="m" :conversation-id="selected.id" :device-id="deviceId"/>
             <TurnProcess v-if="turn.process.length" :turn="turn" :conversation-id="selected.id" :device-id="deviceId" :waiting="turn.status === 'inProgress' && !!snapshot?.requests.length" @change="update => chatScroll.change(update, 'preserve')"/>
