@@ -35,7 +35,8 @@ const selected = ref<Conversation | null>(null); const snapshot = ref<Snapshot |
 const readError = ref(''); const navigationError = ref(''); const searchError = ref(''); const connectionError = ref('');
 const readRecovering = ref(false);
 const historyLoading = ref(false); const historyError = ref('');
-let historyCursor: string | undefined; let historyMore = false; let historyLoaded = false;
+let historyCursor: string | undefined; let historyMore = false;
+let historyGaps: string[] = [];
 const readRetryDelays = [1000, 2000, 4000];
 const retryableReadErrors = new Set(['CLIENT_REJECTED', 'CLIENT_UNAVAILABLE', 'READ_TIMEOUT', 'READ_DISCONNECTED', 'OUTCOME_UNKNOWN', 'OFFLINE', 'UNAVAILABLE', 'BUSY']);
 let readFailures = 0; let readRetry: ReturnType<typeof setTimeout> | undefined;
@@ -172,12 +173,15 @@ function request(command: Command, id: string = crypto.randomUUID()): Promise<an
 }
 const notificationHeaders = () => ({ 'X-Remote-Device': props.deviceId });
 let refreshingNotifications = false;
+let notificationReadRevision = 0;
 const incomingDuringBadge = new Map<string, any>();
 const notificationReads = new Set<Map<string, any>>();
 async function refreshNotificationBadge() {
   if (refreshingNotifications) return; refreshingNotifications = true; incomingDuringBadge.clear();
+  const revision = notificationReadRevision;
   try {
     const result = await api('/api/notifications', undefined, notificationHeaders());
+    if (revision !== notificationReadRevision) return;
     const ids = new Set((result.items ?? []).map((item: any) => item.id));
     notificationUnread.value = (Number(result.unread) || 0) + [...incomingDuringBadge.values()].filter(item => !item.readAt && (typeof result.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence > result.throughSequence : !ids.has(item.id))).length;
   } catch {} finally { refreshingNotifications = false; incomingDuringBadge.clear(); }
@@ -248,7 +252,7 @@ async function openNotificationTask(taskId: string, stillRequested = () => true)
   if (next.id !== taskId) throw new Error('会话状态不匹配，已保留当前会话，请稍后重试。');
   const known = knownNotificationTask(taskId);
   showConversation({ ...known, id: taskId, title: next.title, cwd: known?.cwd ?? '', updatedAt: known?.updatedAt ?? Date.now() });
-  await chatScroll.change(() => { snapshot.value = next; queuedMessages.value = next.queued ?? []; }, 'bottom');
+  await chatScroll.change(() => { historyCursor = next.historyCursor; historyMore = next.hasMore; snapshot.value = next; queuedMessages.value = next.queued ?? []; }, 'bottom');
   if (!active.value || selected.value?.id !== taskId || !stillRequested()) return false;
   modeSynced.value = !!next.settings?.mode;
   taskSynced.value = true;
@@ -316,6 +320,10 @@ function openSocket() {
     } else if (m.type === 'result') {
       const p = pending.get(m.id); if (!p) { const attempt = Object.entries(pendingSends).find(([, value]) => value.requestId === m.id); if (attempt && !['OUTCOME_UNKNOWN', 'INTERNAL'].includes(m.error?.code)) settleSend(attempt[0], attempt[1], m.error); return; } pending.delete(m.id); clearTimeout(p.timer);
       if (m.error) p.reject(Object.assign(new Error(m.error.message), { code: m.error.code })); else p.resolve(m.result);
+    } else if (m.type === 'notification-read' && m.deviceId === props.deviceId) {
+      notificationReadRevision++;
+      notificationUnread.value = Math.max(0, Number(m.unread) || 0);
+      window.dispatchEvent(new CustomEvent('remote-notification-read', { detail: m }));
     } else if (m.type === 'notification') {
       const item = m.notification;
       if (item?.deviceId === props.deviceId) {
@@ -360,12 +368,14 @@ async function loadGroup(id: string | null, append = false) {
     } while (hasMore && rows.length < target);
     if (groups[id ?? 'recent'] !== state || epoch !== navigationEpoch) return;
     state.rows = append ? [...state.rows, ...rows] : rows; state.cursor = cursor; state.offset = offset; state.hasMore = hasMore; state.loaded = true; state.error = '';
+    for (const row of rows) if (activities[row.id]) activities[row.id] = { ...activities[row.id], running: row.running === true, unread: row.unread === true };
   } catch (e: any) { if (groups[id ?? 'recent'] === state && epoch === navigationEpoch) state.error = e.message; } finally { state.loading = false; }
 }
 async function loadNavigation() {
   if (!canRead.value || navigationLoading.value) return; navigationLoading.value = true;
   const epoch = navigationEpoch; const interaction = projectInteraction;
   try {
+    await loadGroup(null); if (epoch !== navigationEpoch) return;
     if (projectNavigation.value) {
       const r = await request({ method: 'projects', params: {} }); if (epoch !== navigationEpoch) return; projects.value = r.projects;
       if (focusedNavigationEpoch !== epoch) {
@@ -379,7 +389,6 @@ async function loadNavigation() {
       }
       for (const id of expandedProjects) if (projects.value.some(p => p.id === id)) await loadGroup(id);
     }
-    await loadGroup(null);
     if (search.value.trim()) await runSearch();
     if (epoch === navigationEpoch) navigationError.value = '';
   } catch (e: any) { if (epoch === navigationEpoch) navigationError.value = e.message; }
@@ -439,7 +448,7 @@ function cancelNotificationNavigation() {
 }
 function showConversation(conversation: Conversation, activate = false) {
   resetReadRecovery();
-  historyCursor = undefined; historyMore = false; historyLoaded = false; historyError.value = '';
+  historyCursor = undefined; historyMore = false; historyGaps = []; historyError.value = '';
   modelModal.value = false; editingTask = undefined; permissionPicker.value = false; fullAccessConfirm.value = false;
   activateSelected = activate; pendingActivations.clear();
   attachmentPicker.value = false;
@@ -468,7 +477,12 @@ async function read(activate = false) {
   if (reading) { dirty = true; return; } reading = true;
   const id = selected.value.id; const initial = !snapshot.value; const cycle = modeSyncCycle;
   const activateTask=pendingActivations.has(id) && canControl.value;
-  try { const next = await request({ method: 'read', params: { id, limit: limit.value, ...(hasCapability('multi-terminal') ? {activate:activateTask} : {}), ...(hasCapability('conditional-read') && modeSynced.value && snapshot.value?.revision ? { ifRevision: snapshot.value.revision } : {}) } }); if (next.id !== id) throw new Error('会话状态不匹配，已保留当前会话，请稍后重试。'); if (selected.value?.id === id && cycle === modeSyncCycle) { pendingActivations.delete(id); resetReadRecovery(); readError.value = ''; if (!next.notModified) await chatScroll.change(() => { if (hasCapability('history-pages')) { if (!historyLoaded) { historyCursor = next.historyCursor; historyMore = next.hasMore; } next.messages = mergeMessages(snapshot.value?.messages ?? [], next.messages); next.hasMore = historyMore; } snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } void markSeen(); void reconcileSends(); } }
+  try { const next = await request({ method: 'read', params: { id, limit: limit.value, ...(hasCapability('multi-terminal') ? {activate:activateTask} : {}), ...(hasCapability('conditional-read') && modeSynced.value && snapshot.value?.revision ? { ifRevision: snapshot.value.revision } : {}) } }); if (next.id !== id) throw new Error('会话状态不匹配，已保留当前会话，请稍后重试。'); if (selected.value?.id === id && cycle === modeSyncCycle) { pendingActivations.delete(id); resetReadRecovery(); readError.value = ''; if (!next.notModified) await chatScroll.change(() => { if (hasCapability('history-pages')) {
+      const previous = snapshot.value?.messages ?? [];
+      if (!previous.length) { historyCursor = next.historyCursor; historyMore = next.hasMore; }
+      else if (next.hasMore && next.historyCursor && next.messages.length && !next.messages.some((message: Message) => previous.some(old => old.id === message.id)) && !historyGaps.includes(next.historyCursor)) historyGaps.push(next.historyCursor);
+      next.messages = mergeMessages(previous, next.messages); next.hasMore = historyMore || historyGaps.length > 0;
+    } snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } if (historyGaps.length && !historyError.value) void loadHistory(); void markSeen(); void reconcileSends(); } }
   catch (e: any) {
     if (selected.value?.id !== id || cycle !== modeSyncCycle) return;
     if (e.code === 'NOT_FOUND') {
@@ -503,15 +517,27 @@ async function loadHistory() {
     if (limit.value >= 500) { historyError.value = '请升级电脑助手以继续加载历史消息。'; return; }
     limit.value += 100; await read(); return;
   }
-  const before = historyCursor; if (!before) return;
+  const gap = historyGaps[0]; const before = gap ?? historyCursor; if (!before) return;
   const cycle = modeSyncCycle; historyLoading.value = true; historyError.value = '';
   try {
     const page = await request({ method: 'read', params: { id, limit: 100, before } });
-    if (!active.value || cycle !== modeSyncCycle || snapshot.value?.id !== id || historyCursor !== before) return;
-    if (page.id !== id || page.hasMore && (!page.messages.length || page.historyCursor === before)) throw new Error('历史消息未能继续加载，请重试。');
-    await chatScroll.change(() => { snapshot.value!.messages = mergeMessages(page.messages, snapshot.value!.messages); snapshot.value!.hasMore = page.hasMore; historyCursor = page.historyCursor; historyMore = page.hasMore; historyLoaded = true; }, 'preserve');
+    if (!active.value || cycle !== modeSyncCycle || snapshot.value?.id !== id || (gap ? historyGaps[0] !== gap : historyCursor !== before)) return;
+    if (page.id !== id || page.hasMore && (!page.messages.length || !page.historyCursor || page.historyCursor === before)) throw new Error('历史消息未能继续加载，请重试。');
+    await chatScroll.change(() => {
+      if (gap) {
+        const previous = snapshot.value!.messages; const ids = new Set(previous.map(message => message.id));
+        const index = previous.findIndex(message => message.id === gap);
+        if (index < 0) throw new Error('历史位置已变化，请重新读取会话。');
+        const updates = new Map<string, Message>(page.messages.map((message: Message) => [message.id, message]));
+        const retained = previous.map(message => updates.get(message.id) ?? message);
+        snapshot.value!.messages = [...retained.slice(0, index), ...page.messages.filter((message: Message) => !ids.has(message.id)), ...retained.slice(index)];
+        if (!page.hasMore || page.messages.some((message: Message) => ids.has(message.id))) historyGaps.shift();
+        else historyGaps[0] = page.historyCursor;
+      } else { snapshot.value!.messages = mergeMessages(page.messages, snapshot.value!.messages); historyCursor = page.historyCursor; historyMore = page.hasMore; }
+      snapshot.value!.hasMore = historyMore || historyGaps.length > 0;
+    }, 'preserve');
   } catch (e: any) { if (cycle === modeSyncCycle && selected.value?.id === id) historyError.value = e.message; }
-  finally { historyLoading.value = false; }
+  finally { historyLoading.value = false; if (cycle === modeSyncCycle && historyGaps.length && !historyError.value && canRead.value) void loadHistory(); }
 }
 async function readQueue() {
   const id = selected.value?.id; if (!id || readingQueue || !hasCapability('queued-send') || !connected.value || !status.value.online || !status.value.enabled || !serviceActive.value) return;
@@ -709,12 +735,12 @@ function releasePendingCreate() {
   pendingCreate.value = undefined; try { sessionStorage.removeItem('pending-create:' + props.deviceId); } catch {}
 }
 function taskState(c:Conversation){const state=activities[c.id]??c;return{...state,running:hasCapability('live-activity')&&state.running};}
-let activityLoading=false;let seenKey='';
+let activityLoading=false;let seenKey='';let activityOffset=0;
 const resultObscured = computed(() => drawer.value || moreMenu.value || subscriptionOpen.value || notificationOpen.value || projectModal.value || modelModal.value || takeoverModal.value || permissionPicker.value || fullAccessConfirm.value || attachmentPicker.value);
 async function refreshActivity(){
   if(!canRead.value||!hasCapability('activity')||activityLoading)return;activityLoading=true;
   const cycle = modeSyncCycle, navigation = navigationEpoch;
-  try{const ids=[...new Set([...Object.values(groups).flatMap(g=>g.rows.map(c=>c.id)),...searchRows.value.map(c=>c.id),...(selected.value?[selected.value.id]:[])])].slice(0,150);if(ids.length){const r=await request({method:'activity',params:{ids}});if(active.value && cycle === modeSyncCycle && navigation === navigationEpoch)for(const a of r.activities)activities[a.id]=a;}}
+  try{const candidates=[...new Set([...Object.values(groups).flatMap(g=>g.rows.map(c=>c.id)),...searchRows.value.map(c=>c.id)])].filter(id=>id!==selected.value?.id);if(activityOffset>=candidates.length)activityOffset=0;const page=candidates.slice(activityOffset,activityOffset+149);activityOffset+=page.length;const ids=[...(selected.value?[selected.value.id]:[]),...page];if(ids.length){const r=await request({method:'activity',params:{ids}});if(active.value && cycle === modeSyncCycle && navigation === navigationEpoch)for(const a of r.activities)activities[a.id]=a;}}
   catch{}finally{activityLoading=false;}
 }
 async function markSeen() {

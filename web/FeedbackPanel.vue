@@ -23,6 +23,8 @@ const diagnostics = computed(() => {
   const source = props.mode; const userAgent = navigator.userAgent; const state = props.status;
   const base: any = { source, system: props.mode === 'desktop' ? 'Windows' : /iPhone|iPad/.test(userAgent) ? 'iOS' : /Android/.test(userAgent) ? 'Android' : /Windows/.test(userAgent) ? 'Windows' : 'other', browser: /Edg/.test(userAgent) ? 'Edge' : /Chrome|CriOS/.test(userAgent) ? 'Chrome' : /Firefox/.test(userAgent) ? 'Firefox' : /Safari/.test(userAgent) ? 'Safari' : 'other', connection: props.mode === 'desktop' ? state?.connection ?? 'unknown' : state?.online ? 'online' : 'offline' };
   if (/^[\d.]{1,30}$/.test(state?.helperVersion ?? '')) base.helperVersion = state.helperVersion;
+  if (/^[\d.]{1,40}$/.test(state?.client?.version ?? '')) base.clientVersion = state.client.version;
+  if (/^[A-Z0-9_]{1,60}$/.test(state?.connectionError?.code ?? '')) base.errorCode = state.connectionError.code;
   if (extra.value) { base.viewport = { width: innerWidth, height: innerHeight, visualHeight: visualViewport?.height ?? innerHeight, offsetTop: visualViewport?.offsetTop ?? 0 }; base.online = navigator.onLine; }
   return [base];
 });
@@ -41,7 +43,7 @@ async function send() {
     const uploaded = await uploadFeedbackPictures(base, pending.value.images, headers, saveDraft);
     const result = await request(id ? '/' + id + '/messages' : '', { ...pending.value, images: uploaded }); const oldKey = draftKey.value; loaded.value = false; text.value = ''; images.value = []; pending.value = undefined; await feedbackDraft(oldKey, null); detail.value = result; writing.value = false; await restore(); emit('changed');
   } catch (e: any) {
-    if (['INVALID', 'CAPACITY'].includes(e.code)) { pending.value = undefined; requestId.value = crypto.randomUUID(); error.value = e.message + ' 请修改反馈内容后重新提交。'; await saveDraft(); }
+    if (['INVALID', 'CAPACITY', 'UPLOAD_CORRUPT', 'UPLOAD_CONSUMED', 'NOT_FOUND'].includes(e.code)) { images.value = images.value.map(image => ({ data: image.data })); pending.value = undefined; requestId.value = crypto.randomUUID(); error.value = e.message + ' 请修改反馈内容或移除截图后重新提交。'; await saveDraft(); }
     else error.value = e.message + ' 草稿已保留，可重试原提交。';
   } finally { busy.value = false; }
 }

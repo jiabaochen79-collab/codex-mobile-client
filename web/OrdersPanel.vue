@@ -34,7 +34,9 @@ function returnToOrders() { paymentRevision++; active.value = undefined; payUrl.
 async function load(force = false) {
   if (disposed || reading && !force) return;
   const revision = ++readRevision; reading = true;
-  try { const orders = await api(base); if (disposed || revision !== readRevision) return; const info = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription');
+  try { const orders = await api(base); if (disposed || revision !== readRevision) return;
+    for (let page = 2; page <= historyPage.value; page++) { const next = await api(`${base}?page=${page}`); if (disposed || revision !== readRevision) return; for (const key of ['orders', 'licenses', 'refunds']) orders[key].push(...next[key]); }
+    const info = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription');
     if (revision !== readRevision) return;
     const previous = new Map<string, string>((data.value?.orders ?? (active.value ? [active.value] : [])).map((order: PaymentOrder) => [order.id, order.status]));
     const entitlementChanged = orders.orders.some((order: PaymentOrder) => ['paid','refunded'].includes(order.status) && previous.get(order.id) !== order.status);
@@ -80,7 +82,7 @@ async function copyLink() {
   } catch { error.value = '无法复制付款链接，请重试或返回订单重新打开。'; }
   finally { await link.catch(() => {}); loading.value = false; }
 }
-async function refund() { loading.value = true; error.value = ''; readRevision++; reading = false; try { await api(`${base}/${refundTarget.value.id}/refund`, { reason: refundReason.value, explanation: explanation.value }); refundTarget.value = undefined; explanation.value = ''; await load(true); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
+async function refund() { if (loading.value || !refundTarget.value) return; const target = refundTarget.value; loading.value = true; error.value = ''; readRevision++; reading = false; try { await api(`${base}/${target.id}/refund`, { reason: refundReason.value, explanation: explanation.value }); if (refundTarget.value === target) { refundTarget.value = undefined; explanation.value = ''; } await load(true); } catch (e: any) { if (refundTarget.value === target) error.value = e.message; } finally { loading.value = false; } }
 onMounted(async () => { loading.value = true; await load(); if (disposed) return; loading.value = false; polling = setInterval(() => { if (!loading.value && document.visibilityState === 'visible') void load(); }, 5000); });
 onUnmounted(() => { disposed = true; readRevision++; paymentRevision++; clearInterval(polling); });
 </script>

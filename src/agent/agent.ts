@@ -57,6 +57,7 @@ export class Agent {
   private mediaQueue = Promise.resolve();
   private mediaQueued = 0;
   private subscription?: Subscription;
+  private subscriptionRevision = 0;
   private feedbackUnread = 0;
   private feedbackReading = false;
   private feedbackCheckedAt = 0;
@@ -123,7 +124,7 @@ export class Agent {
       socket.on('message', (data, binary) => { if (this.socket === socket) { if (binary) this.uploadChunk(Buffer.from(data as Buffer)); else void this.message(data.toString()); } });
       socket.on('unexpected-response', (_req, response) => { socketError = connectionFailure('connect', new ConnectionHttpError(response.statusCode ?? 502)); response.resume(); socket.terminate(); });
       socket.on('error', error => { if (this.socket === socket) { this.connection = 'offline'; this.connectionError = socketError ??= connectionFailure('connect', error); } });
-      socket.on('close', code => { if (this.socket === socket) { this.connectionError = socketError ?? connectionFailure('connect', code === 4001 ? new ConnectionHttpError(401) : new Error('Disconnected')); this.socket = undefined; this.control = undefined; this.subscription = undefined; this.computerIdentitySent = false; this.retry(); } });
+      socket.on('close', code => { if (this.socket === socket) { this.subscriptionRevision++; this.connectionError = socketError ?? connectionFailure('connect', code === 4001 ? new ConnectionHttpError(401) : new Error('Disconnected')); this.socket = undefined; this.control = undefined; this.subscription = undefined; this.computerIdentitySent = false; this.retry(); } });
     } catch (e) { this.connectionError = connectionFailure(stage, e); this.retry(); }
   }
   private retry() {
@@ -170,7 +171,7 @@ export class Agent {
       }
       return;
     }
-    if (m.type === 'subscription') { const parsed = subscriptionSchema.safeParse(m.subscription); if (parsed.success) { this.subscription = parsed.data; this.store.syncNotificationClock(this.origin, parsed.data.serverTime); void this.flushNotifications(); } return; }
+    if (m.type === 'subscription') { const parsed = subscriptionSchema.safeParse(m.subscription); if (parsed.success) { this.subscriptionRevision++; this.subscription = parsed.data; this.store.syncNotificationClock(this.origin, parsed.data.serverTime); void this.flushNotifications(); } return; }
     if (m.type === 'control') {
       const lease = z.object({ sessionId: uid, clientId: uid, epoch: uid, expires: z.number().int() }).nullable().safeParse(m.lease);
       if (!lease.success || lease.data && (this.grants.get(lease.data.sessionId) ?? 0) <= Date.now()) { this.send({ type: 'control-result', id: m.id, ok: false }); return; }
@@ -377,7 +378,9 @@ export class Agent {
     if (!this.credentials) throw new RemoteError('OFFLINE', '设备尚未连接服务器。');
     const headers = new Headers(init.headers); headers.set('Authorization', `Bearer ${this.credentials.secret}`); headers.set('X-Device-Id', this.credentials.id);
     const timeout = AbortSignal.timeout(path.startsWith('/api/updates/download/') ? 30 * 60000 : 15000);
-    const response = await fetch(this.origin + path, { ...init, headers, signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout, redirect: 'error' });
+    let response: Response;
+    try { response = await fetch(this.origin + path, { ...init, headers, signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout, redirect: 'error' }); }
+    catch { throw new RemoteError(init.method && init.method !== 'GET' ? 'OUTCOME_UNKNOWN' : 'UNAVAILABLE', '与服务器的网络连接中断，请恢复网络后重试，无需重启助手。'); }
     if (!response.ok) { const body = await response.json().catch(() => ({})) as any; throw new RemoteError(body.error?.code ?? 'UNAVAILABLE', body.error?.message ?? '服务器暂不可用。'); } return response;
   }
   private async readComputerFingerprint() {
@@ -400,7 +403,7 @@ export class Agent {
     if (!fingerprint) return;
     try { await this.serviceRequest('/api/subscription/device/computer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fingerprint }) }); } catch {}
   }
-  async trial(value: unknown) { await this.registerComputer(); const input = z.object({ termsVersion: z.string(), requestId: uid }).strict().parse(value); const result = await (await this.serviceRequest('/api/subscription/device/trial', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) })).json() as any; this.subscription = subscriptionSchema.parse(result.subscription); return result; }
+  async trial(value: unknown) { await this.registerComputer(); const revision = ++this.subscriptionRevision; const input = z.object({ termsVersion: z.string(), requestId: uid }).strict().parse(value); const result = await (await this.serviceRequest('/api/subscription/device/trial', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) })).json() as any; const subscription = subscriptionSchema.parse(result.subscription); if (!this.closing && revision === this.subscriptionRevision) this.subscription = subscription; return { ...result, subscription: this.subscription ?? subscription }; }
   diagnostics() { return { source: 'desktop', helperVersion: packageInfo.version, ...(this.client.version && /^[\d.]+$/.test(this.client.version) ? { clientVersion: this.client.version } : {}), system: 'Windows', connection: this.connection, ...(this.connectionError?.code ? { errorCode: this.connectionError.code } : {}) }; }
   async update(action: string, value?: unknown) {
     if (action === 'state') return this.updater?.state ?? { phase: 'error', progress: 0, autoDownload: false, message: '请安装包含在线更新器的新版本 Windows 助手。', notes: '' };
@@ -425,13 +428,16 @@ export class Agent {
     if (!this.credentials) throw new RemoteError('OFFLINE', '设备尚未连接服务器。');
     // Register before reading trial eligibility so the first desktop visit can claim the trial.
     await this.registerComputer();
+    const revision = ++this.subscriptionRevision;
     const response = await fetch(`${this.origin}${input ? '/api/subscription/device/redeem' : '/api/subscription/device'}`, {
       method: input ? 'POST' : 'GET', headers: { Authorization: `Bearer ${this.credentials.secret}`, 'X-Device-Id': this.credentials.id, ...(input ? { 'Content-Type': 'application/json' } : {}) },
       ...(input ? { body: JSON.stringify(redeemSchema.parse(input)) } : {}), signal: AbortSignal.timeout(15000), redirect: 'error'
     });
     const result = await response.json() as any;
     if (!response.ok) throw new RemoteError(result.error?.code ?? 'UNAVAILABLE', result.error?.message ?? '订阅服务暂不可用。');
-    this.subscription = subscriptionSchema.parse(result.subscription); return result;
+    const subscription = subscriptionSchema.parse(result.subscription);
+    if (!this.closing && revision === this.subscriptionRevision) this.subscription = subscription;
+    return { ...result, subscription: this.subscription ?? subscription };
   }
   async orders(action: 'list' | 'create' | 'open' | 'close' | 'refund', input?: unknown, orderId?: string) {
     if (!this.credentials) throw new RemoteError('OFFLINE', '设备尚未连接服务器。');

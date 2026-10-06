@@ -119,6 +119,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
   private lastContextId?: string;
   private current?: Followed;
   private followed = new Map<string, Followed>();
+  private pendingApprovals = new Set<string>();
   private activity: DesktopActivity;
   private runtimeActivity = new DesktopRuntimeActivity((name, args, contextId) => this.appTool(name, args, contextId));
   private images = new ConversationImages();
@@ -128,6 +129,12 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (existsSync(join(this.codexHome, '.codex-global-state.json'))) {
       if (this.nativeQueuedCount('') === null) return ['无法核对电脑端队列，请稍后安装'];
       if ([...this.queueCounts!.counts.values()].some(count => count > 0)) return ['电脑端有尚未发送的队列消息'];
+    }
+    for (const id of this.pendingApprovals) {
+      if (!this.followed.get(id)?.state) {
+        try { await this.ready({ method: 'read', params: { id, limit: 1 } }); await this.follow(id); }
+        catch { return ['待审批任务状态尚未同步，请稍后安装']; }
+      }
     }
     for (const followed of this.followed.values()) {
       if (!followed.state) return ['任务状态尚未同步，请稍后安装'];
@@ -141,7 +148,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     super();
     this.activity = new DesktopActivity(codexHome);
     if (!isAbsolute(codexHome) || /%[^%]+%/.test(codexHome)) throw new Error('CODEX_HOME must resolve to an absolute directory.');
-    this.ipc.on('disconnected', () => { this.current = undefined; this.followed.clear(); this.images.clear(); this.runtimeActivity.clear(); this.tools?.close(); this.tools = undefined; this.discovery = undefined; this.checkedAt = 0; this.checkedStatus = undefined; });
+    this.ipc.on('disconnected', () => { for (const entry of this.followed.values()) if (entry.state?.requests?.length) this.pendingApprovals.add(entry.id); this.current = undefined; this.followed.clear(); this.runtimeActivity.clear(); this.tools?.close(); this.tools = undefined; this.discovery = undefined; this.checkedAt = 0; this.checkedStatus = undefined; });
     this.ipc.on('broadcast', e => this.onBroadcast(e));
   }
   private onBroadcast(event: any) {
@@ -159,6 +166,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
         current.state = applyPatches(current.state, change.patches);
       } else { current.state = undefined; this.requestSnapshot(current); return; }
       if (current.state?.id !== current.id) throw new Error('Mismatched conversation snapshot');
+      if (current.state.requests?.length) this.pendingApprovals.add(current.id); else this.pendingApprovals.delete(current.id);
       current.revision = change.revision;
       this.wake.emit(current.id); this.onChange?.(current.id);
     } catch { current.state = undefined; this.requestSnapshot(current); }
@@ -377,7 +385,10 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     const followed: Followed = existing && existing.owner === owner.handledByClientId ? existing : { id, owner: owner.handledByClientId, state: undefined, revision: 0 };
     followed.ownerCheckedAt = Date.now(); this.current = followed;
     this.followed.set(id, followed);
-    if (this.followed.size > 6) this.unfollow(this.followed.keys().next().value!);
+    if (this.followed.size > 6) {
+      const candidate = [...this.followed.values()].find(entry => entry.id !== id && !entry.state?.requests?.length && !this.pendingApprovals.has(entry.id));
+      if (candidate) this.unfollow(candidate.id);
+    }
     const waiting = new Promise<void>((resolve, reject) => {
       const cleanup = () => { clearTimeout(timer); clearInterval(renew); this.wake.off(id, done); };
       const done = () => { cleanup(); resolve(); };
@@ -427,7 +438,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       const image = await this.images.read(command.params.id, command.params.imageId, command.params.variant);
       this.known(command.params.id); authorize?.(); return image;
     }
-    if (command.method === 'models') return { models: desktopModels(this.discovery?.cliExecutablePath) };
+    if (command.method === 'models') return { models: await desktopModels(this.discovery?.cliExecutablePath) };
     if (command.method === 'activity' || command.method === 'seen') {
       const db = this.index();
       try {
@@ -461,7 +472,8 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       if (command.method === 'projects') return { projects: projects.map(({ nativeIds, roots, ...project }) => project) };
       if (!projects.some((p: any) => p.id === command.params.projectId)) throw new RemoteError('NOT_FOUND', '项目不在原客户端的本机项目列表中。');
       authorize?.();
-      if (command.params.model) validateModel(desktopModels(this.discovery?.cliExecutablePath), command.params.model, command.params.effort);
+      if (command.params.model) validateModel(await desktopModels(this.discovery?.cliExecutablePath), command.params.model, command.params.effort);
+      authorize?.();
       const result = await this.appTool('create_thread', { prompt: command.params.text, ...(command.params.model ? { model: command.params.model, thinking: command.params.effort } : {}), target: { type: 'project', projectId: command.params.projectId, environment: { type: 'local' } } }, anchor);
       if (!uid.safeParse(result?.threadId).success) throw new RemoteError('OUTCOME_UNKNOWN', '客户端新建任务的返回格式已变化，请先在电脑核对结果，勿重复创建。');
       return result;
@@ -495,12 +507,13 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       // One native turn submission changes mode and clears the old plan on turn/started.
       // Do not remove the desktop request or change its settings before dispatch succeeds.
       const params = { conversationId: snap.id, turnStart: { request: { threadId: snap.id, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: commandId, collaborationMode: collaborationMode(snap.settings, mode) }, context: { inheritThreadSettings: true, attachments: [], commentAttachments: [] } } };
-      authorize?.(); await this.ipc.request('thread-follower-start-turn', params, 2, this.current!.owner);
+      authorize?.(); const response = await this.ipc.request('thread-follower-start-turn', params, 2, this.current!.owner);
+      if (response.resultType === 'error') throw new RemoteError('CLIENT_REJECTED', '电脑客户端未接受此计划操作，请核对后重试。');
       return { accepted: true };
     }
     if (command.method === 'settings.update') {
       if (snap.settings?.revision !== command.params.revision) throw new RemoteError('STALE', '电脑上的模型设置已改变，请刷新后重试。');
-      validateModel(desktopModels(this.discovery?.cliExecutablePath), command.params.model, command.params.effort); authorize?.();
+      validateModel(await desktopModels(this.discovery?.cliExecutablePath), command.params.model, command.params.effort); authorize?.();
       await this.updateSettings(snap.id, { model: command.params.model, effort: command.params.effort });
       this.current!.state = undefined; await this.follow(snap.id); return { settings: this.snapshot().settings };
     }
@@ -546,9 +559,10 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     return { accepted: true };
   }
   close() {
-    for (const id of this.followed.keys()) this.unfollow(id);
+    for (const id of this.followed.keys()) this.unfollow(id, true);
     this.ipc.close(); this.tools?.close(); this.current = undefined; this.images.clear();
+    this.pendingApprovals.clear();
   }
-  private unfollow(id: string) { const entry = this.followed.get(id); if (entry) { try { this.ipc.broadcast('thread-stream-following-changed', { hostId: 'local', conversationId: id, following: false }, [entry.owner]); } catch {} this.followed.delete(id); this.images.clear(id); } }
+  private unfollow(id: string, force = false) { const entry = this.followed.get(id); if (entry) { if (!force && (entry.state?.requests?.length || !entry.state && this.pendingApprovals.has(id))) { this.pendingApprovals.add(id); return; } this.pendingApprovals.delete(id); try { this.ipc.broadcast('thread-stream-following-changed', { hostId: 'local', conversationId: id, following: false }, [entry.owner]); } catch {} this.followed.delete(id); this.images.clear(id); } }
   setSubscriptions(ids: string[]) { for (const id of this.followed.keys()) if (!ids.includes(id)) this.unfollow(id); }
 }

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { win32 } from 'node:path';
 import { z } from 'zod';
 import { RemoteError, type ModelOption, type ThreadSettings } from '../shared/protocol.js';
@@ -23,18 +24,26 @@ export function catalogModels(catalog: Catalog): ModelOption[] {
     .map(model => ({ id: model.slug, name: modelName(model.display_name), efforts: model.supported_reasoning_levels.map(e => e.effort), defaultEffort: model.default_reasoning_level, images: model.input_modalities?.includes('image') ?? false }));
 }
 
-export function desktopModels(codexExecutable?: string | null): ModelOption[] {
+const run = promisify(execFile);
+let modelRead: { executable: string; expires: number; result: Promise<ModelOption[]> } | undefined;
+export async function desktopModels(codexExecutable?: string | null): Promise<ModelOption[]> {
   if (!codexExecutable || !win32.isAbsolute(codexExecutable) || win32.basename(codexExecutable).toLowerCase() !== 'codex.exe') {
     throw new RemoteError('UNSUPPORTED', '未发现电脑客户端的模型接口，请更新助手并确认 Codex 已启动。');
   }
-  try {
-    const output = execFileSync(codexExecutable, ['debug', 'models'], { encoding: 'utf8', timeout: 8000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
-    const models = catalogModels(catalogSchema.parse(JSON.parse(String(output))));
-    if (models.length === 0) throw new Error('Empty model catalog');
-    return models;
-  } catch {
-    throw new RemoteError('UNSUPPORTED', '无法获取电脑当前可选模型，请在电脑端检查 Codex 后重试。');
-  }
+  if (modelRead?.executable === codexExecutable && Date.now() < modelRead.expires) return modelRead.result;
+  const result = (async () => {
+    try {
+      const { stdout } = await run(codexExecutable, ['debug', 'models'], { encoding: 'utf8', timeout: 8000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
+      const models = catalogModels(catalogSchema.parse(JSON.parse(stdout)));
+      if (models.length === 0) throw new Error('Empty model catalog');
+      return models;
+    } catch {
+      throw new RemoteError('UNSUPPORTED', '无法获取电脑当前可选模型，请在电脑端检查 Codex 后重试。');
+    }
+  })();
+  modelRead = { executable: codexExecutable, expires: Infinity, result };
+  try { const models = await result; if (modelRead?.result === result) modelRead.expires = Date.now() + 5000; return models; }
+  catch (error) { if (modelRead?.result === result) modelRead = undefined; throw error; }
 }
 export function threadSettings(state: any): ThreadSettings {
   const settings = state.latestThreadSettings;

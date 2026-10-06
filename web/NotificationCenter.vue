@@ -14,6 +14,7 @@ const unread = ref(0);
 const nextCursor = ref<string | null>(null);
 const loadingMore = ref(false);
 const settings = ref<NotificationSettings>({ enabled: false, completed: true, failed: true });
+const settingsReady = ref(false); let settingsRevision: string | undefined;
 const pushConfigured = ref(false);
 const vapidPublicKey = ref<string | null>(null);
 const systemPushState = ref<'unknown' | 'enabled' | 'needed'>('unknown');
@@ -27,7 +28,18 @@ const incomingDuringLoad = new Map<string, NotificationItem>();
 let markingAll = false;
 const incomingDuringReadAll = new Map<string, NotificationItem>();
 let readingOne = false;
+let loadRevision = 0; let disposed = false;
 const incomingDuringReadOne = new Map<string, NotificationItem>();
+const readReceipts = new Map<string, number>();
+let allReadReceipt: { through: number; at: number } | undefined;
+let latestReceipt: { through: number; unread: number } | undefined;
+function applyReceipt(item: NotificationItem) {
+  const readAt = readReceipts.get(item.id) ?? (allReadReceipt && typeof item.sequence === 'number' && item.sequence <= allReadReceipt.through ? allReadReceipt.at : undefined);
+  return readAt && !item.readAt ? { ...item, readAt } : item;
+}
+function snapshotUnread(value: number, rows: NotificationItem[], priorReceipt: typeof latestReceipt) {
+  return latestReceipt && latestReceipt !== priorReceipt ? latestReceipt.unread + rows.filter(item => !item.readAt && typeof item.sequence === 'number' && item.sequence > latestReceipt!.through).length : value;
+}
 
 const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
 const isIos = /iPhone|iPad|iPod/i.test(userAgent) || typeof navigator !== 'undefined' && navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
@@ -54,6 +66,10 @@ function localSubscriptionId() {
   try { return localStorage.getItem(`notification-subscription:${props.deviceId}`) ?? ''; } catch { return ''; }
 }
 async function load() {
+  if (disposed || busy.value) return;
+  const revision = ++loadRevision;
+  const priorReceipt = latestReceipt;
+  listRevision++;
   loading.value = true; error.value = '';
   standalone.value = window.matchMedia?.('(display-mode: standalone)').matches || (navigator as any).standalone === true;
   try {
@@ -61,22 +77,24 @@ async function load() {
       api('/api/notifications/settings', undefined, headers()),
       api('/api/notifications', undefined, headers())
     ]);
+    if (disposed || revision !== loadRevision) return;
     settings.value = settingResult.settings;
+    settingsRevision = settingResult.revision; settingsReady.value = true;
     pushConfigured.value = settingResult.pushConfigured === true;
     vapidPublicKey.value = settingResult.vapidPublicKey ?? null;
-    const snapshot = (listResult.items ?? []) as NotificationItem[];
+    const snapshot = ((listResult.items ?? []) as NotificationItem[]).map(applyReceipt);
     const snapshotIds = new Set(snapshot.map(item => item.id));
     items.value = [...incomingDuringLoad.values()].filter(item => !snapshotIds.has(item.id)).concat(snapshot.map(item => {
       const incoming = incomingDuringLoad.get(item.id);
       return incoming ? { ...incoming, readAt: incoming.readAt ?? item.readAt } : item;
     })).sort((a, b) => b.createdAt - a.createdAt);
     nextCursor.value = listResult.nextCursor ?? null;
-    updateUnread((Number(listResult.unread) || 0) + [...incomingDuringLoad.values()].filter(item => !item.readAt && (typeof listResult.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence > listResult.throughSequence : !snapshotIds.has(item.id))).length);
+    updateUnread(snapshotUnread((Number(listResult.unread) || 0) + [...incomingDuringLoad.values()].filter(item => !item.readAt && (typeof listResult.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence > listResult.throughSequence : !snapshotIds.has(item.id))).length, items.value, priorReceipt));
     incomingDuringLoad.clear();
     void props.resolveTasks(items.value.map(item => item.taskId));
     await refreshSystemPushState();
-  } catch (e: any) { error.value = e.message; }
-  finally { loading.value = false; }
+  } catch (e: any) { if (!disposed && revision === loadRevision) { settingsReady.value = false; error.value = e.message; } }
+  finally { if (revision === loadRevision) loading.value = false; }
 }
 async function refreshSystemPushState() {
   systemPushState.value = 'unknown';
@@ -91,8 +109,12 @@ async function refreshSystemPushState() {
   } catch { systemPushState.value = 'needed'; }
 }
 async function save(next: NotificationSettings) {
-  const result = await api('/api/notifications/settings', next, headers(), 'PUT');
+  if (!settingsReady.value) throw new Error('提醒设置尚未读取成功，请先重试读取。');
+  let result: any;
+  try { result = await api('/api/notifications/settings', { ...next, ...(settingsRevision ? { revision: settingsRevision } : {}) }, headers(), 'PUT'); }
+  catch (error: any) { if (error.code === 'CONFLICT') { const current = await api('/api/notifications/settings', undefined, headers()); settings.value = current.settings; settingsRevision = current.revision; } throw error; }
   settings.value = result.settings;
+  settingsRevision = result.revision;
   return result;
 }
 function decodeKey(value: string) {
@@ -129,7 +151,7 @@ async function registerPush() {
   return '系统推送已开启。';
 }
 async function enable() {
-  if (busy.value) return;
+  if (busy.value || loading.value || !settingsReady.value) return;
   if (!canEnableReminders.value) { error.value = ''; info.value = browserMessage.value; return; }
   busy.value = true; error.value = ''; info.value = '';
   try { await save({ ...settings.value, enabled: true }); info.value = await registerPush(); }
@@ -143,7 +165,7 @@ async function enableBrowserPush() {
   finally { busy.value = false; }
 }
 async function disable() {
-  if (busy.value) return; busy.value = true; error.value = ''; info.value = '';
+  if (busy.value || loading.value || !settingsReady.value) return; busy.value = true; error.value = ''; info.value = '';
   try {
    await save({ ...settings.value, enabled: false });
    const id = localSubscriptionId(); if (id) await api(`/api/push/subscriptions/${encodeURIComponent(id)}`, undefined, headers(), 'DELETE');
@@ -153,7 +175,7 @@ async function disable() {
   finally { busy.value = false; }
 }
 async function changeKind(kind: 'completed' | 'failed', value: boolean, input?: HTMLInputElement) {
-  if (busy.value || !settings.value.enabled) { if (input) input.checked = settings.value[kind]; return; }
+  if (busy.value || loading.value || !settingsReady.value || !settings.value.enabled) { if (input) input.checked = settings.value[kind]; return; }
   busy.value = true; error.value = '';
   try { await save({ ...settings.value, [kind]: value }); }
   catch (e: any) { error.value = e.message; }
@@ -187,8 +209,9 @@ async function readAll() {
   finally { markingAll = false; incomingDuringReadAll.clear(); busy.value = false; }
 }
 function onIncoming(event: Event) {
-  const item = (event as CustomEvent<NotificationItem>).detail;
+  let item = (event as CustomEvent<NotificationItem>).detail;
   if (!item || item.deviceId !== props.deviceId) return;
+  item = applyReceipt(item);
   if (markingAll) incomingDuringReadAll.set(item.id, item);
   if (readingOne) incomingDuringReadOne.set(item.id, item);
   if (loading.value) incomingDuringLoad.set(item.id, item);
@@ -197,24 +220,37 @@ function onIncoming(event: Event) {
   else { items.value.unshift(item); if (!item.readAt) updateUnread(unread.value + 1); }
   void props.resolveTasks([item.taskId]);
 }
+function onRead(event: Event) {
+  const receipt = (event as CustomEvent).detail;
+  if (!receipt || receipt.deviceId !== props.deviceId || !Number.isFinite(receipt.readAt) || !Number.isFinite(receipt.throughSequence)) return;
+  listRevision++;
+  if (typeof receipt.id === 'string') readReceipts.set(receipt.id, receipt.readAt);
+  if (receipt.all === true && (!allReadReceipt || receipt.throughSequence >= allReadReceipt.through)) allReadReceipt = { through: receipt.throughSequence, at: receipt.readAt };
+  latestReceipt = { through: receipt.throughSequence, unread: Math.max(0, Number(receipt.unread) || 0) };
+  const covered = (item: NotificationItem) => item.id === receipt.id || receipt.all === true && typeof item.sequence === 'number' && item.sequence <= receipt.throughSequence;
+  for (const item of [...items.value, ...incomingDuringLoad.values()]) if (covered(item)) item.readAt ??= receipt.readAt;
+  updateUnread((Number(receipt.unread) || 0) + items.value.filter(item => !item.readAt && typeof item.sequence === 'number' && item.sequence > receipt.throughSequence).length);
+}
 async function loadMore() {
   if (loadingMore.value || busy.value || !nextCursor.value) return;
   loadingMore.value = true; error.value = '';
   const revision = listRevision; const cursor = nextCursor.value;
+  const priorReceipt = latestReceipt;
   try {
     const result = await api(`/api/notifications?cursor=${encodeURIComponent(cursor)}`, undefined, headers());
     if (revision !== listRevision || cursor !== nextCursor.value) return;
-    const page = (result.items ?? []) as NotificationItem[];
+    const page = ((result.items ?? []) as NotificationItem[]).map(applyReceipt);
     const ids = new Set(items.value.map(item => item.id));
     items.value.push(...page.filter(item => !ids.has(item.id)));
     nextCursor.value = result.nextCursor ?? null;
-    if (revision === listRevision) updateUnread(Math.max(unread.value, Number(result.unread) || 0));
+    if (revision === listRevision) updateUnread(snapshotUnread(Math.max(unread.value, Number(result.unread) || 0), items.value, priorReceipt));
     void props.resolveTasks(page.map(item => item.taskId));
   } catch (e: any) { if (revision === listRevision) error.value = e.message; }
   finally { loadingMore.value = false; }
 }
-onMounted(() => { window.addEventListener('remote-notification', onIncoming); void load(); });
-onUnmounted(() => window.removeEventListener('remote-notification', onIncoming));
+function resume() { if (!disposed && !busy.value && document.visibilityState === 'visible') void load(); }
+onMounted(() => { window.addEventListener('remote-notification', onIncoming); window.addEventListener('remote-notification-read', onRead); window.addEventListener('online', resume); document.addEventListener('visibilitychange', resume); void load(); });
+onUnmounted(() => { disposed = true; loadRevision++; window.removeEventListener('remote-notification', onIncoming); window.removeEventListener('remote-notification-read', onRead); window.removeEventListener('online', resume); document.removeEventListener('visibilitychange', resume); });
 </script>
 
 <template>
@@ -222,7 +258,7 @@ onUnmounted(() => window.removeEventListener('remote-notification', onIncoming))
     <section class="modal notification-modal" role="dialog" aria-modal="true" aria-labelledby="notification-title">
       <div class="modal-title"><h2 id="notification-title"><Bell :size="18"/>任务完成提醒</h2><button class="icon-button" title="关闭提醒设置" :disabled="busy" @click="emit('close')"><X :size="20"/></button></div>
       <div v-if="loading" class="notification-loading" role="status"><RefreshCw class="spin" :size="18"/>正在读取提醒设置</div>
-      <template v-else>
+      <template v-else-if="settingsReady">
         <div class="notification-toggle-row"><div><strong>{{ settings.enabled ? '提醒已开启' : '提醒未开启' }}</strong><small>每台电脑分别保存提醒设置</small></div><button v-if="!settings.enabled && canEnableReminders" class="button primary" :disabled="busy" @click="enable"><Bell :size="16"/>开启提醒</button><button v-else-if="!settings.enabled" class="button" disabled>请先添加到主屏幕</button><button v-else class="button" :disabled="busy" @click="disable">关闭提醒</button></div>
         <div class="notification-kinds"><label><input type="checkbox" :checked="settings.completed" :disabled="busy || !settings.enabled" @change="changeKind('completed', ($event.target as HTMLInputElement).checked, $event.target as HTMLInputElement)"><span>任务完成</span></label><label><input type="checkbox" :checked="settings.failed" :disabled="busy || !settings.enabled" @change="changeKind('failed', ($event.target as HTMLInputElement).checked, $event.target as HTMLInputElement)"><span>失败或异常中断</span></label></div>
         <button v-if="settings.enabled && pushConfigured && pushAvailable && systemPushState === 'needed'" class="button notification-browser-push" :disabled="busy" @click="enableBrowserPush"><Bell :size="16"/>开启系统通知</button>
@@ -233,7 +269,7 @@ onUnmounted(() => window.removeEventListener('remote-notification', onIncoming))
         <div v-else class="notification-list"><button v-for="item in items" :key="item.id" class="notification-item" :class="{ unread: !item.readAt }" :disabled="busy" @click="readOne(item)"><span class="notification-status" :class="item.status"><Check v-if="item.status === 'completed'" :size="15"/><ShieldAlert v-else :size="15"/></span><span class="notification-item-text"><strong :title="taskLabels[item.taskId]?.title || item.taskId">{{ taskLabels[item.taskId]?.title || `任务 ${item.taskId.slice(0, 8)}` }}</strong><small v-if="taskLabels[item.taskId]?.project" class="notification-project">{{ taskLabels[item.taskId].project }}</small><small>{{ statusLabel(item.status) }} · {{ formatTime(item.occurredAt) }}</small></span><ExternalLink :size="15"/></button></div>
         <button v-if="nextCursor" class="button" :disabled="busy || loadingMore" @click="loadMore"><RefreshCw v-if="loadingMore" class="spin" :size="16"/>{{ loadingMore ? '正在读取' : '加载更多提醒' }}</button>
       </template>
-      <p v-if="error" class="alert" role="alert">{{ error }}</p>
+      <p v-if="error" class="alert" role="alert">{{ error }}<button v-if="!settingsReady" class="text-button" :disabled="busy || loading" @click="load">重试读取</button></p>
       <p class="notification-footnote">系统通知只显示状态和时间；登录后的提醒列表显示任务及项目名称，无法读取名称时显示任务编号。站内记录保留 30 天。</p>
     </section>
   </div>

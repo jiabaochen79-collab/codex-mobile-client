@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,10 +7,11 @@ import { CodexDesktop } from '../src/agent/desktop.js';
 import { NativeIpc } from '../src/agent/ipc.js';
 import { commandSchema, supportsDesktopCommand, type Command, type Snapshot } from '../src/shared/protocol.js';
 
-vi.mock('node:child_process', async importOriginal => ({
-  ...await importOriginal<typeof import('node:child_process')>(),
-  execFileSync: vi.fn()
-}));
+const child = vi.hoisted(() => ({ call: vi.fn() }));
+vi.mock('node:child_process', async importOriginal => {
+  const { promisify } = await import('node:util');
+  return { ...await importOriginal<typeof import('node:child_process')>(), execFile: Object.assign(vi.fn(), { [promisify.custom]: child.call }) };
+});
 
 afterEach(() => { vi.restoreAllMocks(); vi.resetAllMocks(); });
 describe('desktop settings versions', () => {
@@ -19,7 +19,7 @@ describe('desktop settings versions', () => {
     const home = mkdtempSync(join(tmpdir(), 'settings-version-'));
     const adapter = new CodexDesktop('unused', home);
     Reflect.set(adapter, 'discovery', { cliExecutablePath: 'C:/Codex/bin/codex.exe' });
-    vi.mocked(execFileSync).mockReturnValue(JSON.stringify({ models: [{ slug: 'model', display_name: 'Model', default_reasoning_level: 'high', supported_reasoning_levels: [{ effort: 'high' }] }] }));
+    child.call.mockResolvedValue({ stdout: JSON.stringify({ models: [{ slug: 'model', display_name: 'Model', default_reasoning_level: 'high', supported_reasoning_levels: [{ effort: 'high' }] }] }) });
     const snap: Snapshot = { id: randomUUID(), title: 'Fixture', epoch: 'epoch', turnId: 'active-turn', busy: true, messages: [], requests: [], hasMore: false, settings: { model: 'model', effort: 'high', mode: 'default', revision: 'revision' } };
     Reflect.set(adapter, 'contract', { protocols: { 'thread-follower-update-thread-settings': version } });
     Reflect.set(adapter, 'current', { id: snap.id, owner: 'owner', state: {}, revision: 1 });

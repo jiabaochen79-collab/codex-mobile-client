@@ -140,7 +140,7 @@ export class AgentStore {
       this.db.prepare('UPDATE commands SET result=? WHERE id=?').run(JSON.stringify({ result }), id);
       return result;
     } catch (e) {
-      if (command.method === 'plan.respond' && e instanceof RemoteError && ['STALE', 'BUSY', 'QUEUE_PENDING', 'INVALID', 'AUTH', 'SUBSCRIPTION_REQUIRED', 'UNSUPPORTED', 'NOT_FOUND', 'CONTROL_LOST'].includes(e.code)) this.db.prepare('DELETE FROM commands WHERE id=?').run(id);
+      if (command.method === 'plan.respond' && e instanceof RemoteError && ['STALE', 'BUSY', 'QUEUE_PENDING', 'INVALID', 'AUTH', 'SUBSCRIPTION_REQUIRED', 'UNSUPPORTED', 'NOT_FOUND', 'CONTROL_LOST', 'CLIENT_REJECTED'].includes(e.code)) this.db.prepare('DELETE FROM commands WHERE id=?').run(id);
       else if (e instanceof RemoteError && !['OUTCOME_UNKNOWN', 'INTERNAL'].includes(e.code)) this.db.prepare('UPDATE commands SET result=? WHERE id=?').run(JSON.stringify({ error: { code: e.code, message: e.message } }), id);
       throw e;
     } finally { this.runningCommands.delete(id); }

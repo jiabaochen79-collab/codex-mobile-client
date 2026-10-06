@@ -1,14 +1,14 @@
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { CodexDesktop } from '../src/agent/desktop.js';
 
-vi.mock('node:child_process', async importOriginal => ({
-  ...await importOriginal<typeof import('node:child_process')>(),
-  execFileSync: vi.fn()
-}));
+const child = vi.hoisted(() => ({ call: vi.fn() }));
+vi.mock('node:child_process', async importOriginal => {
+  const { promisify } = await import('node:util');
+  return { ...await importOriginal<typeof import('node:child_process')>(), execFile: Object.assign(vi.fn(), { [promisify.custom]: child.call }) };
+});
 
 const cli = 'C:/Codex/bin/codex.exe';
 const app = 'C:/WindowsApps/Codex/app/ChatGPT.exe';
@@ -32,17 +32,18 @@ function adapter() {
 
 it('queries the CLI belonging to the discovered desktop, not the desktop executable or stale cache', async () => {
   const desktop = adapter();
-  vi.mocked(execFileSync).mockReturnValue(catalog);
+  child.call.mockResolvedValue({ stdout: catalog });
   try {
     const result = await desktop.execute({ method: 'models', params: {} }, 'models');
     expect(result).toEqual({ models: [{ id: 'gpt-6-astra', name: '6 Astra', efforts: ['medium'], defaultEffort: 'medium', images: false }] });
-    expect(execFileSync).toHaveBeenCalledWith(cli, ['debug', 'models'], expect.any(Object));
+    expect(child.call).toHaveBeenCalledWith(cli, ['debug', 'models'], expect.any(Object));
   } finally { desktop.close(); }
 });
 
 it('reports model discovery failure instead of presenting stale cache entries', async () => {
   const desktop = adapter();
-  vi.mocked(execFileSync).mockImplementation(() => { throw new Error('CLI unavailable'); });
+  Reflect.set(desktop, 'discovery', { cliExecutablePath: 'C:/Unavailable/bin/codex.exe' });
+  child.call.mockRejectedValue(new Error('CLI unavailable'));
   try {
     await expect(desktop.execute({ method: 'models', params: {} }, 'models')).rejects.toMatchObject({ code: 'UNSUPPORTED' });
   } finally { desktop.close(); }

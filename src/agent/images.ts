@@ -68,7 +68,6 @@ export class ConversationImages {
     }
     const id = createHmac('sha256', this.secret).update(JSON.stringify([threadId, source])).digest('hex');
     entries.delete(id); entries.set(id, source);
-    if (entries.size > 500) entries.delete(entries.keys().next().value!);
     return { id, alt: (alt || '照片').slice(0, 180) };
   }
   async read(threadId: string, imageId: string, variant: 'thumbnail' | 'full') {
