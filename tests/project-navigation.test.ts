@@ -13,6 +13,22 @@ const projects: IndexedProject[] = [
 let directory: string | undefined;
 afterEach(() => { if (directory) rmSync(directory, { recursive: true, force: true }); directory = undefined; });
 describe('project navigation', () => {
+  it('paginates a frozen task order even when older tasks move to the top', () => {
+    directory = mkdtempSync(join(tmpdir(), 'remote-page-test-'));
+    const db = new DatabaseSync(join(directory, 'state_5.sqlite'));
+    db.exec('CREATE TABLE threads(id TEXT,name TEXT,title TEXT,cwd TEXT,updated_at_ms INTEGER,updated_at INTEGER,archived INTEGER,source TEXT,project_id TEXT,rollout_path TEXT)');
+    const path = join(directory, 'task.jsonl'); writeFileSync(path, '');
+    for (let i = 0; i < 60; i++) db.prepare("INSERT INTO threads VALUES(?,NULL,?,'C:/fixture',?,0,0,'vscode',NULL,?)").run('task-' + i, i === 0 ? 'CAFÉ' : 'Task ' + i, i, path);
+    const adapter = new CodexDesktop('unused', directory);
+    try {
+      const first = adapter.list(0, { cursor: 'new' }); db.prepare('UPDATE threads SET updated_at_ms=100 WHERE id=?').run('task-0');
+      const second = adapter.list(30, { cursor: first.cursor });
+      expect(new Set([...first.conversations, ...second.conversations].map(row => row.id)).size).toBe(60);
+      expect(second.conversations.some(row => row.id === 'task-0')).toBe(true);
+      expect(adapter.list(0, { query: 'café' }).conversations.map(row => row.id)).toEqual(['task-0']);
+      expect(() => adapter.list(30, { cursor: first.cursor, query: 'changed' })).toThrow();
+    } finally { adapter.close(); db.close(); }
+  });
   it('matches Windows case, separators and extended paths without sibling-prefix collisions', () => {
     expect(normalizeProjectPath('\\\\?\\E:\\work\\APP\\')).toBe('e:/work/app');
     expect(projectForConversation(projects, null, 'e:\\WORK\\app\\src')).toBe('parent');

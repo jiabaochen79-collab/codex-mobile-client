@@ -63,7 +63,7 @@ const drawer = ref(false); const moreMenu = ref(false); const search = ref(''); 
 const projects = ref<Project[]>([]); const navigationLoading = ref(false); const expandedProjects = reactive(new Set<string>());
 const automaticProjects = new Set<string>();
 let navigationEpoch = 0; let focusedNavigationEpoch = -1; let projectInteraction = 0;
-type Group = { rows: Conversation[]; loading: boolean; loaded: boolean; hasMore: boolean; error?: string };
+type Group = { rows: Conversation[]; loading: boolean; loaded: boolean; hasMore: boolean; error?: string; cursor?: string; offset?: number };
 const groups = reactive<Record<string, Group>>({});
 const visibleErrorGroup = computed(() => [groups.recent, ...projects.value.filter(p => expandedProjects.has(p.id)).map(p => groups[p.id])].find(g => g?.error));
 const visibleError = computed(() => error.value || connectionError.value || (listVisible.value ? search.value.trim() ? searchError.value : navigationError.value || visibleErrorGroup.value?.error : snapshot.value ? readError.value : ''));
@@ -95,7 +95,7 @@ let reconnect: ReturnType<typeof setTimeout> | undefined; let poll: ReturnType<t
 let viewportFrame = 0; let viewportTimers: ReturnType<typeof setTimeout>[] = [];
 let viewportPass = 0;
 let previousViewportBounds: DOMRect | undefined;
-let reading = false; let dirty = false; let searchRevision = 0;
+let reading = false; let dirty = false; let searchRevision = 0; let searchCursor: string | undefined; let searchOffset = 0;
 let activateSelected = false;
 let reconnectFailures = 0; let lastFrameAt = 0;
 let socketHeartbeat: ReturnType<typeof setInterval> | undefined;
@@ -200,15 +200,16 @@ async function resolveNotificationTasks(ids: string[]) {
   if (!active.value || !canRead.value || resolvingNotificationTasks || ids.every(id => notificationTasks[id])) return resolvingNotificationTasks;
   const epoch = navigationEpoch;
   resolvingNotificationTasks = (async () => {
-    let offset = 0;
+    let offset = 0; let cursor = hasCapability('task-list-cursor') ? 'new' : undefined;
     try {
       // The "recent" group excludes project tasks, so resolve names from the unfiltered list.
       for (;;) {
-        const result = await request({ method: 'list', params: { offset } });
+        const result = await request({ method: 'list', params: { offset, ...(cursor ? { cursor } : {}) } }); cursor = result.cursor;
         if (!active.value || !canRead.value || epoch !== navigationEpoch) return;
         for (const task of result.conversations as Conversation[]) if (notificationTaskIds.has(task.id)) notificationTasks[task.id] = task;
-        if (!result.hasMore || !result.conversations.length || [...notificationTaskIds].every(id => notificationTasks[id])) return;
-        offset += result.conversations.length;
+        const next = result.nextOffset ?? offset + result.conversations.length;
+        if (!result.hasMore || next <= offset || [...notificationTaskIds].every(id => notificationTasks[id])) return;
+        offset = next;
       }
     } catch { /* Offline and deleted tasks retain their task-number fallback. */ }
   })();
@@ -327,14 +328,15 @@ async function loadGroup(id: string | null, append = false) {
   const state = group(id ?? 'recent'); if (state.loading) return; state.loading = true;
   const epoch = navigationEpoch;
   try {
-    const target = append ? 30 : Math.max(30, state.rows.length); const rows: Conversation[] = []; let hasMore = false;
+    const target = append ? 30 : Math.max(30, state.rows.length); const rows: Conversation[] = []; let hasMore = false; let cursor = hasCapability('task-list-cursor') ? append ? state.cursor ?? 'new' : 'new' : undefined;
+    let offset = append ? state.offset ?? state.rows.length : 0;
     do {
-      const params = { offset: (append ? state.rows.length : 0) + rows.length, ...(projectNavigation.value ? { projectId: id } : {}) };
-      const r = await request({ method: 'list', params }); rows.push(...r.conversations); hasMore = r.hasMore;
-      if (!r.conversations.length) break;
+      const params = { offset, ...(cursor ? { cursor } : {}), ...(projectNavigation.value ? { projectId: id } : {}) };
+      const r = await request({ method: 'list', params }); if (r.reset) { append = false; rows.length = 0; } cursor = r.cursor; rows.push(...r.conversations); hasMore = r.hasMore;
+      const next = r.nextOffset ?? offset + r.conversations.length; if (!r.reset && next <= offset) break; offset = next;
     } while (hasMore && rows.length < target);
     if (groups[id ?? 'recent'] !== state || epoch !== navigationEpoch) return;
-    state.rows = append ? [...state.rows, ...rows] : rows; state.hasMore = hasMore; state.loaded = true; state.error = '';
+    state.rows = append ? [...state.rows, ...rows] : rows; state.cursor = cursor; state.offset = offset; state.hasMore = hasMore; state.loaded = true; state.error = '';
   } catch (e: any) { if (groups[id ?? 'recent'] === state && epoch === navigationEpoch) state.error = e.message; } finally { state.loading = false; }
 }
 async function loadNavigation() {
@@ -367,14 +369,15 @@ function refreshPage() {
   location.reload();
 }
 async function runningProjectIds(epoch: number) {
-  const running = new Set<string>(); let offset = 0; if (!projects.value.length) return running;
+  const running = new Set<string>(); let offset = 0; let cursor = hasCapability('task-list-cursor') ? 'new' : undefined; if (!projects.value.length) return running;
   // Scan task summaries once per entry, including projects outside the first page.
   for (;;) {
-    const result = await request({ method: 'list', params: { offset } });
+    const result = await request({ method: 'list', params: { offset, ...(cursor ? { cursor } : {}) } }); cursor = result.cursor;
     if (epoch !== navigationEpoch || disposed.value || !canRead.value) return null;
     for (const task of result.conversations as Conversation[]) if (task.running && task.projectId) running.add(task.projectId);
-    if (!result.hasMore || !result.conversations.length) return running;
-    offset += result.conversations.length;
+    const next = result.nextOffset ?? offset + result.conversations.length;
+    if (!result.hasMore || next <= offset) return running;
+    offset = next;
   }
 }
 async function toggleProject(id: string) { projectInteraction++; automaticProjects.delete(id); if (expandedProjects.has(id)) expandedProjects.delete(id); else { expandedProjects.add(id); await loadGroup(id); } }
@@ -385,14 +388,15 @@ async function runSearch(append = false) {
   if (!projectNavigation.value) { searchRows.value = group('recent').rows.filter(c => c.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())); searchLoading.value = false; searchMore.value = false; searchError.value = ''; return; }
   searchLoading.value = true;
   try {
-    const rows: Conversation[] = []; const target = append ? 30 : Math.max(30, searchRows.value.length); let hasMore = false;
+    const rows: Conversation[] = []; const target = append ? 30 : Math.max(30, searchRows.value.length); let hasMore = false; let cursor = hasCapability('task-list-cursor') ? append ? searchCursor ?? 'new' : 'new' : undefined;
+    let offset = append ? searchOffset : 0;
     do {
-      const result = await request({ method: 'list', params: { offset: (append ? searchRows.value.length : 0) + rows.length, query } });
+      const result = await request({ method: 'list', params: { offset, query, ...(cursor ? { cursor } : {}) } });
       if (revision !== searchRevision || search.value.trim() !== query) return;
-      rows.push(...result.conversations); hasMore = result.hasMore;
-      if (!result.conversations.length) break;
+      if (result.reset) { append = false; rows.length = 0; } cursor = result.cursor; rows.push(...result.conversations); hasMore = result.hasMore;
+      const next = result.nextOffset ?? offset + result.conversations.length; if (!result.reset && next <= offset) break; offset = next;
     } while (hasMore && rows.length < target);
-    searchRows.value = append ? [...searchRows.value, ...rows] : rows; searchMore.value = hasMore; searchError.value = '';
+    searchRows.value = append ? [...searchRows.value, ...rows] : rows; searchCursor = cursor; searchOffset = offset; searchMore.value = hasMore; searchError.value = '';
   } catch (e: any) { if (revision === searchRevision) searchError.value = e.message; }
   finally { if (revision === searchRevision) searchLoading.value = false; }
 }

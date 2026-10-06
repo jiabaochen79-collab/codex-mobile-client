@@ -26,6 +26,8 @@ let listRevision = 0;
 const incomingDuringLoad = new Map<string, NotificationItem>();
 let markingAll = false;
 const incomingDuringReadAll = new Map<string, NotificationItem>();
+let readingOne = false;
+const incomingDuringReadOne = new Map<string, NotificationItem>();
 
 const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
 const isIos = /iPhone|iPad|iPod/i.test(userAgent) || typeof navigator !== 'undefined' && navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
@@ -149,13 +151,15 @@ async function changeKind(kind: 'completed' | 'failed', value: boolean) {
 async function readOne(item: NotificationItem) {
   if (busy.value) return; busy.value = true; error.value = '';
   listRevision++;
+  readingOne = true; incomingDuringReadOne.clear();
   try {
     if (!await props.openTask(item.taskId)) return;
     const result = await api(`/api/notifications/${encodeURIComponent(item.id)}/read`, undefined, headers(), 'POST');
     const wasUnread = item.readAt === null;
-    item.readAt ??= Date.now(); updateUnread(typeof result.unread === 'number' ? result.unread : unread.value - Number(wasUnread)); emit('close');
+    item.readAt ??= Date.now();
+    updateUnread(typeof result.throughSequence === 'number' ? (Number(result.unread) || 0) + [...incomingDuringReadOne.values()].filter(row => row.id !== item.id && !row.readAt && typeof row.sequence === 'number' && row.sequence > result.throughSequence).length : unread.value - Number(wasUnread)); emit('close');
   } catch (e: any) { error.value = e.message; }
-  finally { busy.value = false; }
+  finally { readingOne = false; incomingDuringReadOne.clear(); busy.value = false; }
 }
 async function readAll() {
   if (busy.value || !unread.value) return; busy.value = true; error.value = '';
@@ -175,6 +179,7 @@ function onIncoming(event: Event) {
   const item = (event as CustomEvent<NotificationItem>).detail;
   if (!item || item.deviceId !== props.deviceId) return;
   if (markingAll) incomingDuringReadAll.set(item.id, item);
+  if (readingOne) incomingDuringReadOne.set(item.id, item);
   if (loading.value) incomingDuringLoad.set(item.id, item);
   listRevision++;
   const index = items.value.findIndex(row => row.id === item.id);

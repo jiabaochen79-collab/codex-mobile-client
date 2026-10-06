@@ -40,7 +40,7 @@ export function protocolRegistries(source: string) {
 export function assessProtocols(protocols: Record<string, number>) {
   const changed = Object.entries(core).filter(([method, version]) => protocols[method] !== version);
   if (changed.length) throw new RemoteError('UNSUPPORTED', `会话通讯接口已变化（${changed[0][0]}），请更新助手。`);
-  const capabilities = ['compatibility-checked', 'project-navigation', 'turn-details', 'activity', 'live-activity', 'multi-terminal', 'message-images', 'conditional-read', 'safety-status'];
+  const capabilities = ['compatibility-checked', 'project-navigation', 'task-list-cursor', 'turn-details', 'activity', 'live-activity', 'multi-terminal', 'message-images', 'conditional-read', 'safety-status'];
   const limited: string[] = [];
   for (const feature of features) {
     if (Object.entries(feature.methods).every(([method, version]) => Array.isArray(version) ? version.includes(protocols[method]) : protocols[method] === version)) capabilities.push(feature.capability);

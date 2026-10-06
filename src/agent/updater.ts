@@ -23,6 +23,8 @@ export class HelperUpdater {
   private resultTimer?: NodeJS.Timeout;
   private reporting = false;
   private reportedResult?: string;
+  private readyReportAt = 0;
+  private readyReporting = false;
   private retry?: NodeJS.Timeout;
   private failures = 0;
   private closed = false;
@@ -34,7 +36,15 @@ export class HelperUpdater {
   start() { const initial = setTimeout(() => { void this.check(); }, 15000); initial.unref(); this.timer = setInterval(() => { void this.check(); }, 6 * 3600000); this.timer.unref(); this.resultTimer = setInterval(() => { void this.reportPrevious(); }, 2000); this.resultTimer.unref(); }
   setting(enabled: boolean) { this.state.autoDownload = enabled; this.options.store.set('update:auto', String(enabled)); if (enabled && this.state.phase === 'available') void this.download(); return this.state; }
   cancel() { if (this.preparingInstall || this.state.phase === 'installing') return; this.abort?.abort(); clearTimeout(this.retry); this.state.phase = this.candidate ? 'available' : 'idle'; this.state.message = '下载已暂停'; }
-  connected() { return this.state.phase === 'error' ? this.check() : Promise.resolve(); }
+  async connected() { this.readyReportAt = 0; await this.reportReady(); if (this.state.phase === 'error') await this.check(); }
+  private async reportReady() {
+    const version = this.options.store.get('update:ready-report');
+    if (!version || this.closed || this.readyReporting || Date.now() - this.readyReportAt < 30000) return;
+    this.readyReportAt = Date.now();
+    this.readyReporting = true;
+    try { if (await this.report('ready', version) && this.options.store.get('update:ready-report') === version) this.options.store.set('update:ready-report', ''); }
+    finally { this.readyReporting = false; }
+  }
   private succeeded() { clearTimeout(this.retry); this.retry = undefined; this.failures = 0; }
   private failed(error: unknown, downloading: boolean) {
     this.state.phase = 'error';
@@ -68,8 +78,10 @@ export class HelperUpdater {
       this.options.store.set('update:sequence', String(manifest.sequence)); this.candidate = envelope;
       this.pruneCache();
       Object.assign(this.state, { phase: 'available', version: manifest.version, notes: manifest.notes });
-      if (this.state.autoDownload) { downloading = true; await this.fetchPackages(controller); }
-      else this.succeeded();
+      const cached = this.previous && await this.cached(this.previous) && await this.cached(envelope);
+      if (controller.signal.aborted) return;
+      if (cached || this.state.autoDownload) { downloading = true; await this.fetchPackages(controller); }
+      else { this.state.progress = 0; this.succeeded(); }
     })().catch(error => { if (!this.abort?.signal.aborted) this.failed(error, downloading); }).finally(() => { this.operation = undefined; });
     return this.operation;
   }
@@ -91,7 +103,12 @@ export class HelperUpdater {
     }
     if (this.abort.signal.aborted) return;
     this.succeeded(); this.state.phase = 'ready'; this.state.progress = 100;
-    await this.report('ready', this.state.version!);
+    this.options.store.set('update:ready-report', this.state.version!); this.readyReportAt = 0;
+    await this.reportReady();
+  }
+  private async cached(envelope: SignedRelease) {
+    const { manifest } = verifyRelease(envelope, this.options.publicKey); const file = join(this.dir, manifest.sha256 + '.exe');
+    return existsSync(file) && statSync(file).size === manifest.size && await fileDigest(file) === manifest.sha256;
   }
   private pruneCache() {
     const keep = new Set<string>();
@@ -163,6 +180,7 @@ export class HelperUpdater {
     if (this.closed || this.reporting) return;
     this.reporting = true;
     try {
+      await this.reportReady();
       const file = join(this.dir, 'result.json'); if (!existsSync(file)) return;
       const contents = readFileSync(file, 'utf8'); if (contents === this.reportedResult) return;
       const result = JSON.parse(contents);

@@ -4,7 +4,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { ConversationImages } from '../src/agent/images.js';
 describe('desktop snapshot projection', () => {
+  it('reserves image capacity for the newest visible messages', () => {
+    const items = Array.from({ length: 501 }, (_, i) => ({ id: 'image-' + i, type: 'imageView', path: 'C:/fixture/' + i + '.png' }));
+    const snapshot = normalizeSnapshot({ id: 'task', turns: [{ turnId: 'turn', status: 'completed', items }] }, 'epoch', 100, new ConversationImages());
+    expect(snapshot.messages).toHaveLength(100); expect(snapshot.messages.at(-1)).toMatchObject({ id: 'image-500', images: [expect.anything()] });
+  });
   it('blocks updates for queues on unfollowed tasks and unreadable queue state', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'remote-update-queue-')); const adapter = new CodexDesktop('unused', dir);
     const path = join(dir, '.codex-global-state.json');

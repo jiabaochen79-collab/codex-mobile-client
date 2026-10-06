@@ -26,6 +26,14 @@ describe('attachment uploads',()=>{
     const bytes=begin();store.write(id,owner,0,bytes);await store.complete(id,owner);
     expect(()=>store.status(id,randomUUID())).toThrow();expect(()=>store.resolve([id],owner,randomUUID())).toThrow();expect(()=>store.resolve([id,id],owner,thread)).toThrow();
   });
+  it('recovers a finalized file after the database write fails', async () => {
+    const bytes = begin(); store.write(id, owner, 0, bytes);
+    db.exec("CREATE TRIGGER fail_finalize BEFORE UPDATE OF ready ON uploads BEGIN SELECT RAISE(ABORT,'injected failure'); END;");
+    await expect(store.complete(id, owner)).rejects.toThrow('injected failure');
+    db.exec('DROP TRIGGER fail_finalize'); expect(store.status(id, owner).ready).toBe(false);
+    expect((await store.complete(id, owner)).ready).toBe(true);
+    expect(readFileSync(store.resolve([id], owner, thread)[0].path)).toEqual(bytes);
+  });
   it('does not delete committed files when cleaning unsubmitted uploads',async()=>{
     const bytes=begin();store.write(id,owner,0,bytes);await store.complete(id,owner);store.commit([id]);
     expect(()=>store.remove(id,owner)).toThrow();db.prepare('UPDATE uploads SET created=0').run();store=new UploadStore(dir,db);expect(store.resolve([id],owner,thread)).toHaveLength(1);

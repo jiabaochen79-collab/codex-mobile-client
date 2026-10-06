@@ -19,7 +19,7 @@ const taskModeSchema = z.enum(['plan', 'default']);
 export const permissionModeSchema = z.enum(['ask', 'approve', 'full']);
 export type PermissionMode = z.infer<typeof permissionModeSchema>;
 export const commandSchema = z.discriminatedUnion('method', [
-  z.object({ method: z.literal('list'), params: z.object({ offset: z.number().int().min(0).max(10000).default(0), projectId: z.string().min(1).max(200).nullable().optional(), query: z.string().trim().max(200).optional() }).strict() }).strict(),
+  z.object({ method: z.literal('list'), params: z.object({ cursor: z.union([z.literal('new'), uid]).optional(), offset: z.number().int().min(0).max(10000).default(0), projectId: z.string().min(1).max(200).nullable().optional(), query: z.string().trim().max(200).optional() }).strict() }).strict(),
   z.object({ method: z.literal('read'), params: z.object({ id: uid, limit: z.number().int().min(20).max(500).default(100), activate: z.boolean().optional(), ifRevision: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict() }).strict(),
   z.object({ method: z.literal('safety.status'), params: z.object({ id: uid }).strict() }).strict(),
   z.object({ method: z.literal('image.read'), params: z.object({ id: uid, imageId: z.string().regex(/^[a-f0-9]{64}$/), variant: z.enum(['thumbnail', 'full']) }).strict() }).strict(),

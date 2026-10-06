@@ -73,9 +73,10 @@ export class UploadStore {
     authorize();
     const row = this.get(id, owner); if (row.ready) return this.info(row);
     if (row.offset !== row.size) throw new RemoteError('UPLOAD_INCOMPLETE', '文件尚未上传完成。');
-    const folder = this.folder(id); const part = join(folder, 'upload.part');
-    if (lstatSync(part).isSymbolicLink()) throw new RemoteError('INVALID', '附件路径无效。');
-    const bytes = hashFile(part, row.size);
+    const folder = this.folder(id); const part = join(folder, 'upload.part'); const finalized = join(folder, row.name);
+    const source = existsSync(part) ? part : finalized;
+    if (lstatSync(source).isSymbolicLink()) throw new RemoteError('INVALID', '附件路径无效。');
+    const bytes = hashFile(source, row.size);
     if (bytes.size !== row.size || bytes.sha256 !== row.sha256) throw new RemoteError('UPLOAD_CORRUPT', '文件校验失败，请重新上传。');
     const extension = extname(row.name).toLowerCase();
     const header = bytes.header;
@@ -89,7 +90,7 @@ export class UploadStore {
     if (types[extension] && !types[extension][1]) throw new RemoteError('INVALID', '图片内容与格式不匹配。');
     if (types[extension]) {
       // Decode a bounded snapshot so concurrent validators cannot lock the file during finalization on Windows.
-      try { await sharp(readFileSync(part), { limitInputPixels: 40000000, failOn: 'warning' }).resize(1, 1).raw().toBuffer(); }
+      try { await sharp(readFileSync(source), { limitInputPixels: 40000000, failOn: 'warning' }).resize(1, 1).raw().toBuffer(); }
       catch {
         authorize();
         // Another verified completion may have finalized the upload during decoding.
@@ -102,7 +103,7 @@ export class UploadStore {
     }
     row.mediaType = types[extension]?.[0] ?? 'application/octet-stream';
     // Keep the original filename for native attachment rendering, within a generated directory.
-    renameSync(part, join(folder, row.name)); row.ready = 1;
+    if (source === part) renameSync(part, finalized); row.ready = 1;
     this.db.prepare('UPDATE uploads SET ready=1,mediaType=? WHERE id=?').run(row.mediaType, id); return this.info(row);
   }
   resolve(ids: string[], owner: string, conversation: string): LocalAttachment[] {

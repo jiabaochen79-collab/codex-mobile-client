@@ -20,6 +20,8 @@ function changedChoice() { accepted.value = false; key.value = crypto.randomUUID
 const date = (value: number | null) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-';
 let polling: ReturnType<typeof setInterval> | undefined;
 let readRevision = 0, reading = false;
+let paymentRevision = 0;
+function returnToOrders() { paymentRevision++; active.value = undefined; payUrl.value = ''; qr.value = ''; view.value = 'orders'; }
 async function load(force = false) {
   if (reading && !force) return;
   const revision = ++readRevision; reading = true;
@@ -32,27 +34,30 @@ async function load(force = false) {
   } catch (e: any) { if (revision === readRevision) readError.value = e.message; }
   finally { if (revision === readRevision) reading = false; }
 }
-async function showPayment(result: any) { active.value = result.order; payUrl.value = result.payUrl; qr.value = await QRCode.toDataURL(result.payUrl, { width: 260, margin: 2, errorCorrectionLevel: 'M' }); copied.value = false; }
+async function showPayment(result: any, revision: number) { const image = await QRCode.toDataURL(result.payUrl, { width: 260, margin: 2, errorCorrectionLevel: 'M' }); if (revision !== paymentRevision) return false; active.value = result.order; payUrl.value = result.payUrl; qr.value = image; copied.value = false; return true; }
 async function openPayment(event: MouseEvent) {
   if (loading.value || !active.value) { event.preventDefault(); return; }
   event.preventDefault();
   const popup = window.open('about:blank', '_blank'); if (popup) popup.opener = null;
   loading.value = true; error.value = '';
-  try { await showPayment(await api(`${base}/${active.value.id}/open`, {})); if (popup) popup.location.replace(payUrl.value); else location.assign(payUrl.value); }
+  const revision = ++paymentRevision;
+  try { if (!await showPayment(await api(`${base}/${active.value.id}/open`, {}), revision)) { popup?.close(); return; } if (popup) popup.location.replace(payUrl.value); else location.assign(payUrl.value); }
   catch (e: any) { popup?.close(); error.value = e.message; }
   finally { loading.value = false; }
 }
 async function create() {
   if (!canBuy.value) return; loading.value = true; error.value = ''; readRevision++; reading = false;
-  try { await showPayment(await api(base, { planId: selected.value, planRevision: plan.value!.revision, channel: channel.value, termsVersion: PAYMENT_TERMS_VERSION, idempotencyKey: key.value })); key.value = crypto.randomUUID(); accepted.value = false; await load(true); }
+  const revision = ++paymentRevision;
+  try { await showPayment(await api(base, { planId: selected.value, planRevision: plan.value!.revision, channel: channel.value, termsVersion: PAYMENT_TERMS_VERSION, idempotencyKey: key.value }), revision); key.value = crypto.randomUUID(); accepted.value = false; await load(true); }
   catch (e: any) { error.value = e.message; if (e.code === 'STALE') { accepted.value = false; key.value = crypto.randomUUID(); await load(true); } }
   finally { loading.value = false; }
 }
-async function open(order: PaymentOrder) { loading.value = true; error.value = ''; readRevision++; reading = false; try { await showPayment(await api(`${base}/${order.id}/open`, {})); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
+async function open(order: PaymentOrder) { loading.value = true; error.value = ''; readRevision++; reading = false; const revision = ++paymentRevision; try { await showPayment(await api(`${base}/${order.id}/open`, {}), revision); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
 async function closeOrder(order: PaymentOrder) { loading.value = true; error.value = ''; readRevision++; reading = false; try { await api(`${base}/${order.id}/close`, {}); await load(true); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
 async function copyLink() {
   if (loading.value || !active.value) return; loading.value = true; error.value = ''; copied.value = false;
-  const link = api(`${base}/${active.value.id}/open`, {}).then(async result => { await showPayment(result); return result.payUrl as string; });
+  const revision = ++paymentRevision;
+  const link = api(`${base}/${active.value.id}/open`, {}).then(async result => { if (!await showPayment(result, revision)) throw new Error('已返回订单，付款链接操作已取消。'); return result.payUrl as string; });
   try {
     // Start the clipboard operation in the click gesture; Safari can resolve its data later.
     if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) await navigator.clipboard.write([new ClipboardItem({ 'text/plain': link.then(value => new Blob([value], { type: 'text/plain' })) })]);
@@ -63,14 +68,14 @@ async function copyLink() {
 }
 async function refund() { loading.value = true; error.value = ''; readRevision++; reading = false; try { await api(`${base}/${refundTarget.value.id}/refund`, { reason: refundReason.value, explanation: explanation.value }); refundTarget.value = undefined; explanation.value = ''; await load(true); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
 onMounted(async () => { loading.value = true; await load(); loading.value = false; polling = setInterval(() => { if (!loading.value && document.visibilityState === 'visible') void load(); }, 5000); });
-onUnmounted(() => { readRevision++; clearInterval(polling); });
+onUnmounted(() => { readRevision++; paymentRevision++; clearInterval(polling); });
 </script>
 <template>
   <div class="modal-backdrop purchase-backdrop">
     <section class="modal purchase-panel" role="dialog" aria-modal="true" aria-label="订单与续费">
       <div class="modal-title"><h2>订单与续费</h2><button class="icon-button" title="关闭订单" :disabled="loading" @click="emit('close')"><X :size="20"/></button></div>
       <div v-if="active" class="purchase-payment">
-        <button class="text-button" @click="active = undefined; view = 'orders'"><ArrowLeft :size="16"/>返回订单</button>
+        <button class="text-button" @click="returnToOrders"><ArrowLeft :size="16"/>返回订单</button>
         <p class="purchase-device">设备 {{ active.deviceId }}</p><h3>{{ active.planName }} · {{ active.days }} 天</h3><strong class="purchase-price">¥{{ money(active.priceFen) }}</strong>
         <p class="purchase-state" :class="{ good: active.status === 'paid' }"><Check v-if="active.status === 'paid'" :size="18"/>{{ paymentStatusNames[active.status] }} · {{ active.serviceStatus }}</p>
         <template v-if="['pending','confirming'].includes(active.status)"><div class="purchase-payment-actions"><a class="button primary" :href="payUrl" target="_blank" rel="noopener noreferrer" @click="openPayment"><ArrowUpRight :size="17"/>{{ active.channel === 'alipay' ? '去支付宝支付' : '打开付款页面' }}</a><button class="text-button" :disabled="loading" @click="copyLink"><Check v-if="copied" :size="16"/><Copy v-else :size="16"/>{{ copied ? '已复制' : '复制付款链接' }}</button></div><p class="muted small">有效至 {{ date(active.expires) }}</p><img v-if="qr" :src="qr" class="purchase-qr" alt="本订单付款二维码" width="260" height="260"></template>

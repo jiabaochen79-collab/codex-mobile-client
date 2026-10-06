@@ -22,7 +22,8 @@ describe('helper updater', () => {
   };
   const fixture = (request: (path: string, init?: RequestInit) => Promise<Response>, options: Partial<Pick<ConstructorParameters<typeof HelperUpdater>[0], 'blockers' | 'freeze'>> = {}) => {
     const dir = mkdtempSync(join(process.cwd(), '.runtime-updater-test-')); directories.push(dir);
-    const updater = new HelperUpdater({ dir, root: dir, version: '0.4.16', store: { get: () => null, set: () => {} } as any, request, blockers: async () => [], freeze: () => {}, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), ...options });
+    const stored = new Map<string, string>();
+    const updater = new HelperUpdater({ dir, root: dir, version: '0.4.16', store: { get: (key: string) => stored.get(key) ?? null, set: (key: string, value: string) => stored.set(key, value) } as any, request, blockers: async () => [], freeze: () => {}, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), ...options });
     updaters.push(updater); return updater;
   };
   const latest = () => Response.json({ current: null, release: null });
@@ -98,6 +99,18 @@ describe('helper updater', () => {
     });
     return { updater, dir, request, freeze };
   };
+  it('keeps a verified cached update installable when automatic download is off', async () => {
+    const { updater } = await readyFixture(async () => []); updater.setting(false);
+    await updater.check(); expect(updater.state).toMatchObject({ phase: 'ready', progress: 100, autoDownload: false });
+  });
+  it('retries an offline ready report after reconnect and persists the pending result', async () => {
+    const { updater, request } = await readyFixture(async () => []);
+    request.mockImplementation(async path => { if (path.endsWith('/result')) throw new Error('offline'); return Response.json({ current: release('0.4.16', 16), release: release('0.4.17', 17) }); });
+    await updater.check(); expect(updater.state.phase).toBe('ready');
+    request.mockClear(); request.mockResolvedValue(Response.json({})); await updater.connected();
+    expect(request).toHaveBeenCalledExactlyOnceWith('/api/updates/device/result', expect.objectContaining({ body: JSON.stringify({ phase: 'ready', version: '0.4.17' }) }));
+    request.mockClear(); await updater.connected(); expect(request).not.toHaveBeenCalled();
+  });
 
   it('accepts only one installation while the first preflight is pending', async () => {
     let resume!: (blocks: string[]) => void;

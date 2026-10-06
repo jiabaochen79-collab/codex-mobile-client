@@ -44,10 +44,11 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
   turns.sort((a, b) => (a.turnStartedAtMs ?? 0) - (b.turnStartedAtMs ?? 0));
   const messages: Message[] = [];
   const seen = new Set<string>();
-  for (const [index, turn] of turns.entries()) {
+  for (let index = turns.length - 1; index >= 0; index--) {
+    const turn = turns[index];
     const turnReason = failureReason(turn);
     const turnMeta = { turnId: turn.turnId ?? `pending:${turn.turnStartedAtMs ?? index}`, turnStatus: turnStatus(turn) ?? 'completed', ...(turnReason ? { turnReason } : {}) };
-    for (const item of turn.items ?? []) {
+    for (const item of [...(turn.items ?? [])].reverse()) {
       if (!item.id || seen.has(item.id)) continue;
       seen.add(item.id);
       if (item.type === 'userMessage' || item.type === 'steeringUserMessage') {
@@ -72,6 +73,7 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
       }
     }
   }
+  messages.reverse();
   const requests: Interaction[] = (state.requests ?? []).map((r: any) => {
     const method = r.method ?? r.request?.method;
     const p = r.params ?? r.request?.params ?? {};
@@ -98,6 +100,7 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
 }
 
 export class CodexDesktop extends EventEmitter implements DesktopAdapter {
+  private listPages = new Map<string, { filter: string; ids: string[]; expires: number }>();
   private ipc = new NativeIpc();
   private tools?: NativeIpc;
   private discovery?: Discovery;
@@ -223,17 +226,31 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (!status.available) throw new RemoteError('CLIENT_UNAVAILABLE', status.reason!);
     if (!supportsDesktopCommand(status.capabilities, command)) throw new RemoteError('UNSUPPORTED', '当前客户端的此项接口尚未适配，操作未执行。');
   }
-  list(offset: number, filter: { projectId?: string | null; query?: string } = {}, projects: IndexedProject[] = []): { conversations: Conversation[]; hasMore: boolean } {
+  list(offset: number, filter: { projectId?: string | null; query?: string; cursor?: string } = {}, projects: IndexedProject[] = []): { conversations: Conversation[]; hasMore: boolean; cursor?: string; reset?: boolean; nextOffset?: number } {
     const db = this.index();
     try {
       db.function('remote_project', (id, cwd) => projectForConversation(projects, id as string | null, String(cwd ?? '')));
+      db.function('remote_fold', value => String(value ?? '').normalize('NFKC').toLowerCase());
+      const identity = JSON.stringify([filter.projectId, filter.query ?? '', projects.map(p => [p.id, p.roots, p.nativeIds])]);
+      for (const [key, page] of this.listPages) if (page.expires <= Date.now()) this.listPages.delete(key);
+      let page = filter.cursor && filter.cursor !== 'new' ? this.listPages.get(filter.cursor) : undefined;
+      if (page && page.filter !== identity) throw new RemoteError('INVALID', '任务列表游标与筛选条件不匹配。');
       const title = "COALESCE(NULLIF(name,''), NULLIF(title,''), '未命名会话')";
       const conditions = [ACTIVE_THREADS];
       const values: (string | number | null)[] = [];
       if (filter.projectId !== undefined) { conditions.push('remote_project(project_id,cwd) IS ?'); values.push(filter.projectId); }
-      if (filter.query) { conditions.push(`instr(lower(${title}),lower(?)) > 0`); values.push(filter.query); }
-      const rows = db.prepare(`SELECT id, ${title} AS title, cwd, COALESCE(updated_at_ms, updated_at * 1000) AS updatedAt, remote_project(project_id,cwd) AS projectId FROM threads WHERE ${conditions.join(' AND ')} ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC,id DESC LIMIT 31 OFFSET ?`).all(...values, offset) as unknown as Conversation[];
-      return { conversations: rows.slice(0,30).map(row => ({ ...row, ...this.taskActivity(row.id, db) })), hasMore: rows.length > 30 };
+      if (filter.query) { conditions.push(`instr(remote_fold(${title}),remote_fold(?)) > 0`); values.push(filter.query); }
+      const fields = `id, ${title} AS title, cwd, COALESCE(updated_at_ms, updated_at * 1000) AS updatedAt, remote_project(project_id,cwd) AS projectId`;
+      const selection = `FROM threads WHERE ${conditions.join(' AND ')} ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC,id DESC`;
+      let cursor = filter.cursor; const reset = !!cursor && cursor !== 'new' && !page;
+      if (cursor && !page) {
+        while (this.listPages.size >= 32) this.listPages.delete(this.listPages.keys().next().value!);
+        cursor = randomUUID(); page = { filter: identity, ids: db.prepare('SELECT id ' + selection + ' LIMIT 10000').all(...values).map(row => String(row.id)), expires: Date.now() + 15 * 60000 }; this.listPages.set(cursor, page);
+        offset = 0;
+      }
+      const lookup = db.prepare(`SELECT ${fields} FROM threads WHERE id=? AND ${ACTIVE_THREADS}`);
+      const rows = page ? page.ids.slice(offset, offset + 30).flatMap(id => { const row = lookup.get(id); return row ? [row as unknown as Conversation] : []; }) : db.prepare('SELECT ' + fields + ' ' + selection + ' LIMIT 31 OFFSET ?').all(...values, offset) as unknown as Conversation[];
+      return { conversations: rows.slice(0,30).map(row => ({ ...row, ...this.taskActivity(row.id, db) })), hasMore: page ? offset + 30 < page.ids.length : rows.length > 30, ...(cursor ? { cursor, reset, nextOffset: offset + 30 } : {}) };
     } finally { db.close(); }
   }
   async notificationSources(taskIds: string[] = []) {

@@ -55,6 +55,9 @@ export class Agent {
   private mediaQueue = Promise.resolve();
   private mediaQueued = 0;
   private subscription?: Subscription;
+  private feedbackUnread = 0;
+  private feedbackReading = false;
+  private feedbackCheckedAt = 0;
   private client: ClientStatus = { available: false, version: null, reason: '正在连接客户端。' };
   private connection = 'connecting';
   private connectionError: ReturnType<typeof connectionFailure> | null = null;
@@ -323,11 +326,18 @@ export class Agent {
     try { const parsed = parseUploadFrame(frame); header = parsed.header; this.authorizeControl(header.sessionId, header.clientId, header.controlEpoch); if (this.subscription && !this.subscription.access) throw new RemoteError('SUBSCRIPTION_REQUIRED', '订阅未开通或已到期。'); this.send({ type: 'upload-result', id: header.id, result: this.uploads.write(header.attachmentId, header.sessionId, header.offset, parsed.bytes) }); }
     catch (e) { if (header) this.send({ type: 'upload-result', id: header.id, error: publicError(e) }); }
   }
-  state() { return { helperVersion: packageInfo.version, deviceId: this.credentials?.id ?? null, code: this.code, passwordMode: this.passwordMode, codeExpires: this.codeExpires, enabled: this.enabled, connection: this.connection, connectionError: this.connectionError, client: this.client, authorizedCount: this.grants.size, url: this.origin, subscription: this.subscription, update: this.updater?.state }; }
+  state() { return { helperVersion: packageInfo.version, deviceId: this.credentials?.id ?? null, code: this.code, passwordMode: this.passwordMode, codeExpires: this.codeExpires, enabled: this.enabled, connection: this.connection, connectionError: this.connectionError, client: this.client, authorizedCount: this.grants.size, url: this.origin, subscription: this.subscription, update: this.updater?.state, feedbackUnread: this.feedbackUnread }; }
+  async refreshFeedbackUnread(force = false) {
+    if (this.closing || this.feedbackReading || !this.credentials || this.subscription?.disabled || !force && Date.now() - this.feedbackCheckedAt < 30000) return;
+    this.feedbackReading = true; this.feedbackCheckedAt = Date.now();
+    try { const result = z.object({ count: z.number().int().nonnegative() }).parse(await (await this.serviceRequest('/api/feedback/device/unread')).json()); if (!this.closing) this.feedbackUnread = result.count; }
+    catch {} finally { this.feedbackReading = false; }
+  }
   async serviceRequest(path: string, init: RequestInit = {}) {
     if (!this.credentials) throw new RemoteError('OFFLINE', '设备尚未连接服务器。');
     const headers = new Headers(init.headers); headers.set('Authorization', `Bearer ${this.credentials.secret}`); headers.set('X-Device-Id', this.credentials.id);
-    const response = await fetch(this.origin + path, { ...init, headers, signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(30 * 60000)]) : AbortSignal.timeout(15000), redirect: 'error' });
+    const timeout = AbortSignal.timeout(path.startsWith('/api/updates/download/') ? 30 * 60000 : 15000);
+    const response = await fetch(this.origin + path, { ...init, headers, signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout, redirect: 'error' });
     if (!response.ok) { const body = await response.json().catch(() => ({})) as any; throw new RemoteError(body.error?.code ?? 'UNAVAILABLE', body.error?.message ?? '服务器暂不可用。'); } return response;
   }
   private async readComputerFingerprint() {
@@ -436,7 +446,7 @@ export async function createLocalServer(agent: Agent, options: { port: number; w
   });
   app.get('/api/bootstrap', async () => ({ mode: 'desktop' }));
   app.post('/local/session', async (_req, reply) => { reply.setCookie('local_session', agent.localToken, { httpOnly: true, sameSite: 'strict', path: '/' }); return { ok: true }; });
-  app.get('/local/state', async () => agent.state());
+  app.get('/local/state', async () => { void agent.refreshFeedbackUnread(); return agent.state(); });
   app.get('/local/subscription', async () => agent.subscriptionInfo());
   app.post('/local/license', async req => agent.subscriptionInfo(redeemSchema.parse(req.body)));
   app.post('/local/trial', async req => agent.trial(req.body));
@@ -450,6 +460,7 @@ export async function createLocalServer(agent: Agent, options: { port: number; w
     const upstreamSuffix = suffix + requestUrl.search;
     const response = await agent.serviceRequest('/api/feedback/device' + upstreamSuffix, { method: req.method, ...(req.method === 'POST' ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body) } : {}) });
     const bytes = Buffer.from(await response.arrayBuffer());
+    if (suffix.endsWith('/read') || req.method === 'POST') void agent.refreshFeedbackUnread(true);
     return reply.type(response.headers.get('content-type')?.startsWith('image/') ? 'image/jpeg' : 'application/json; charset=utf-8').send(bytes);
   } });
   app.get('/local/orders', async () => agent.orders('list'));
