@@ -8,7 +8,7 @@ test('restores a rejected remote-enable switch to the confirmed state', async ({
   await page.route('**/api/**', route => route.fulfill({ json: {} }));
   await page.route('**/local/**', route => route.request().url().endsWith('/enabled') ? route.fulfill({ status: 500, json: { error: { code: 'LOCAL_SERVICE_ERROR', message: 'fixture failure' } } }) : route.fulfill({ json: state }));
   await page.goto(mount('desktop')); const toggle = page.locator('input.switch'); await expect(toggle).not.toBeChecked();
-  await toggle.check(); await expect(page.getByRole('alert').filter({ hasText: 'fixture failure' })).toBeVisible();
+  await toggle.click(); await expect(page.getByRole('alert').filter({ hasText: 'fixture failure' })).toBeVisible();
   await expect(toggle).not.toBeChecked(); await page.waitForTimeout(3400); await expect(toggle).not.toBeChecked();
 });
 test('strips application classes and IDs from assistant HTML', async ({ page }) => {
