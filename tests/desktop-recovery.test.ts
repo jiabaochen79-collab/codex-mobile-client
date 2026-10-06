@@ -49,7 +49,7 @@ describe('desktop task connection recovery', () => {
     vi.spyOn(desktop as any, 'requestSnapshot').mockImplementation(() => { (desktop as any).current.state = { id: 'task' }; (desktop as any).wake.emit('task'); });
     try {
       await (desktop as any).follow('task', true);
-      expect(navigate).toHaveBeenCalledExactlyOnceWith('navigate_to_codex_page', { threadId: 'task' }, 'task');
+      expect(navigate).toHaveBeenCalledExactlyOnceWith('navigate_to_codex_page', { threadId: 'task' }, 'task', undefined);
     } finally { desktop.close(); }
   });
   it('rediscovers the task owner after an explicit recovery activation', async () => {

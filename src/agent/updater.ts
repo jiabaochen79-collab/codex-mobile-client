@@ -23,6 +23,7 @@ export class HelperUpdater {
   private resultTimer?: NodeJS.Timeout;
   private reporting = false;
   private reportedResult?: string;
+  private presentedResult?: string;
   private readyReportAt = 0;
   private readyReporting = false;
   private retry?: NodeJS.Timeout;
@@ -171,6 +172,15 @@ export class HelperUpdater {
       const path = join(runner, 'job.json'); writeFileSync(path, JSON.stringify(job), { mode: 0o600 });
       const resultFile = join(this.dir, 'result.json'); if (existsSync(resultFile)) unlinkSync(resultFile);
       const child = spawn(join(runner, 'node.exe'), [join(runner, 'updater.mjs'), path], { detached: true, stdio: 'ignore', windowsHide: true, cwd: runner });
+      child.once('exit', () => {
+        if (this.closed || this.state.phase !== 'installing') return;
+        try {
+          const result = existsSync(resultFile) ? JSON.parse(readFileSync(resultFile, 'utf8')) : undefined;
+          if (result?.installerRunning === true) { this.state.message = '更新程序已退出，但安装器是否结束尚未确认。请关闭安装器后重启助手。'; return; }
+          if (['installed', 'failed', 'rolled_back'].includes(result?.phase)) { void this.reportPrevious(); return; }
+        } catch {}
+        this.options.freeze(false); this.state.phase = 'error'; this.state.message = '更新程序未能启动安装，请重新检查更新。不影响当前版本使用。';
+      });
       await once(child, 'spawn'); child.unref(); this.state.phase = 'installing'; return { accepted: true };
     } catch (e) { this.options.freeze(false); if (e instanceof RemoteError) throw e; throw new RemoteError('UPDATE_FAILED', '安装准备失败，请重新检查更新。'); }
     finally { this.preparingInstall = false; }
@@ -187,7 +197,10 @@ export class HelperUpdater {
       if (['installed', 'failed', 'rolled_back'].includes(result.phase) && /^\d+\.\d+\.\d+$/.test(result.version)) {
         if (result.installerRunning === true) { this.state.message = '安装器超时且尚未确认退出，请关闭安装器后重启助手。'; return; }
         if (this.state.phase === 'installing' && result.version === this.state.version) { this.state.phase = 'ready'; this.options.freeze(false); }
-        this.state.message = result.phase === 'rolled_back' ? '更新失败，已恢复上一版本' : result.phase === 'failed' ? '更新失败，请重新检查更新' : '';
+        if (contents !== this.presentedResult) {
+          if (this.state.checkedAt === null || result.version === this.state.version) this.state.message = result.phase === 'rolled_back' ? '更新失败，已恢复上一版本' : result.phase === 'failed' ? '更新失败，请重新检查更新' : '';
+          this.presentedResult = contents;
+        }
         const reported = await this.report(result.phase, result.version);
         if (reported) this.reportedResult = contents;
       }

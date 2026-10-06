@@ -19,7 +19,7 @@ const taskModeSchema = z.enum(['plan', 'default']);
 export const permissionModeSchema = z.enum(['ask', 'approve', 'full']);
 export type PermissionMode = z.infer<typeof permissionModeSchema>;
 export const commandSchema = z.discriminatedUnion('method', [
-  z.object({ method: z.literal('list'), params: z.object({ cursor: z.union([z.literal('new'), uid]).optional(), offset: z.number().int().min(0).max(10000).default(0), projectId: z.string().min(1).max(200).nullable().optional(), query: z.string().trim().max(200).optional() }).strict() }).strict(),
+  z.object({ method: z.literal('list'), params: z.object({ cursor: z.union([z.literal('new'), uid]).optional(), offset: z.number().int().min(0).max(1000000).default(0), ids: z.array(uid).max(30).optional(), projectId: z.string().min(1).max(200).nullable().optional(), query: z.string().trim().max(200).optional() }).strict() }).strict(),
   z.object({ method: z.literal('read'), params: z.object({ id: uid, limit: z.number().int().min(20).max(500).default(100), before: z.string().min(1).max(200).optional(), activate: z.boolean().optional(), ifRevision: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict() }).strict(),
   z.object({ method: z.literal('safety.status'), params: z.object({ id: uid }).strict() }).strict(),
   z.object({ method: z.literal('image.read'), params: z.object({ id: uid, imageId: z.string().regex(/^[a-f0-9]{64}$/), variant: z.enum(['thumbnail', 'full']) }).strict() }).strict(),
@@ -58,7 +58,7 @@ export function supportsDesktopCommand(capabilities: string[] | undefined, comma
 }
 export const commandFrame = z.object({ type: z.literal('command'), id: uid, command: commandSchema, controlEpoch: uid.optional() }).strict();
 export const readMethods = new Set<Command['method']>(['list', 'read', 'image.read', 'safety.status', 'projects', 'models', 'activity', 'seen', 'upload.status', 'queue.list', 'command.status']);
-export const isSafetyCommand = (command: Command) => command.method === 'stop' || command.method === 'safety.status' || command.method === 'command.status' || command.method === 'upload.remove' || command.method === 'queue.remove' || command.method === 'respond' && command.params.decision === 'decline' && command.params.answers === undefined;
+export const isSafetyCommand = (command: Command) => command.method === 'stop' || command.method === 'safety.status' || command.method === 'command.status' || command.method === 'upload.remove' || command.method === 'queue.list' || command.method === 'queue.remove' || command.method === 'respond' && command.params.decision === 'decline' && command.params.answers === undefined;
 export type ControlLease = { sessionId: string; clientId: string; epoch: string; expires: number };
 export type ControlState = { role: 'controller' | 'viewer'; epoch: string | null; expires: number | null; terminals: { id: string; label: string; controlling: boolean }[] };
 export type ModelOption = { id: string; name: string; efforts: string[]; defaultEffort: string; images: boolean };
@@ -76,6 +76,7 @@ export type Interaction = { id: string | number; kind: 'command' | 'file' | 'inp
 export type QueuedMessage = { id: string; text: string; attachments: { id: string; name: string }[]; state: 'pending' | 'paused' | 'sending' | 'uncertain'; reason: string | null; created: number };
 export type Snapshot = { id: string; title: string; epoch: string; turnId: string | null; busy: boolean; messages: Message[]; requests: Interaction[]; hasMore: boolean; historyCursor?: string; settings?: ThreadSettings; completionId?: string; revision?: string; lastTurnStatus?: string; lastTurnId?: string | null; lastTurnReason?: string; nativeQueuedCount?: number | null; queued?: QueuedMessage[] };
 export interface DesktopAdapter {
+  hasConversation?(id: string): boolean | undefined;
   updateBlockers?(): Promise<string[]>;
   notificationSources?(taskIds?: string[]): Promise<{ id: string; path: string }[]>;
   status(): Promise<ClientStatus>;

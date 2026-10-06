@@ -329,10 +329,13 @@ export class Agent {
     let dispatched = false; let taskRead = false; let pending = entry.state === 'pending';
     try {
       const current = this.sends.get(entry.id, entry.conversation); pending = current.state === 'pending';
+      if (!pending) {
+        if (this.options.adapter.hasConversation?.(current.conversation) === false) { for (const item of this.sends.entries(current.conversation)) this.sends.finish(item); this.notifyQueue(current.conversation); this.updateSubscriptions(); }
+        return;
+      }
       if (pending && (this.grants.get(current.session) ?? 0) <= Date.now()) throw new RemoteError('AUTH', '原手机授权已失效，请重新确认后继续。');
       const snapshot = await this.options.adapter.execute({ method: 'read', params: { id: current.conversation, limit: 20 } }, current.attempt) as Snapshot;
       taskRead = true;
-      if (!pending) return;
       if (snapshot.epoch !== current.epoch) throw new RemoteError('STALE', '原客户端已重新打开，请核对后继续队列。');
       if (['failed','interrupted'].includes(snapshot.lastTurnStatus ?? '') && current.resumeAfter !== (snapshot.lastTurnId ?? '')) throw new RemoteError('QUEUE_PAUSED', '上一轮已停止或失败，请确认后继续。');
       if (snapshot.busy || snapshot.requests.some(r => r.kind === 'plan') || (snapshot.nativeQueuedCount ?? 0) > 0) return;

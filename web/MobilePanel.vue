@@ -46,7 +46,7 @@ const taskSynced = ref(false);
 type PendingSend = { requestId: string; text: string; message: string; attachments: Attachment[] };
 const pendingSends = reactive<Record<string, PendingSend>>({});
 const checkingSend = ref(false);
-try { const saved = JSON.parse(sessionStorage.getItem('pending-sends:' + props.deviceId) ?? '{}'); for (const [id, value] of Object.entries(saved)) { const row = value as PendingSend; if (/^[a-f0-9-]{36}$/.test(id) && /^[a-f0-9-]{36}$/.test(row?.requestId) && typeof row.text === 'string' && row.text.length <= 32000) pendingSends[id] = { requestId: row.requestId, text: row.text, message: '发送结果待核对，内容已保留，不会自动重发。', attachments: Array.isArray(row.attachments) ? row.attachments.filter(a => /^[a-f0-9-]{36}$/.test(a?.id) && typeof a.name === 'string' && a.name.length <= 180 && a.ready === true && Number.isSafeInteger(a.size) && a.size > 0 && a.size <= 25 * 1024 * 1024 && a.offset === a.size && typeof a.mediaType === 'string').slice(0,5) : [] }; } } catch {}
+try { const saved = JSON.parse(localStorage.getItem('pending-sends:' + props.deviceId) ?? sessionStorage.getItem('pending-sends:' + props.deviceId) ?? '{}'); for (const [id, value] of Object.entries(saved)) { const row = value as PendingSend; if (/^[a-f0-9-]{36}$/.test(id) && /^[a-f0-9-]{36}$/.test(row?.requestId) && typeof row.text === 'string' && row.text.length <= 32000) pendingSends[id] = { requestId: row.requestId, text: row.text, message: '发送结果待核对，内容已保留，不会自动重发。', attachments: Array.isArray(row.attachments) ? row.attachments.filter(a => /^[a-f0-9-]{36}$/.test(a?.id) && typeof a.name === 'string' && a.name.length <= 180 && a.ready === true && Number.isSafeInteger(a.size) && a.size > 0 && a.size <= 25 * 1024 * 1024 && a.offset === a.size && typeof a.mediaType === 'string').slice(0,5) : [] }; } } catch {}
 const pendingSend = computed(() => selected.value ? pendingSends[selected.value.id] : undefined);
 const modeSynced = ref(false); const modeChanging = ref(false); let modeSyncCycle = 0;
 const queuedMessages = ref<QueuedMessage[]>([]); const sendMenu = ref(false); let readingQueue = false;
@@ -85,7 +85,7 @@ const projectModal = ref(false); const projectId = ref(''); const newText = ref(
 type PendingCreate = { requestId: string; command: Extract<Command, { method: 'create' }> };
 const pendingCreate = ref<PendingCreate>();
 try {
-  const saved = JSON.parse(sessionStorage.getItem('pending-create:' + props.deviceId) ?? 'null');
+  const saved = JSON.parse(localStorage.getItem('pending-create:' + props.deviceId) ?? sessionStorage.getItem('pending-create:' + props.deviceId) ?? 'null');
   const command = commandSchema.safeParse(saved?.command);
   if (/^[a-f0-9-]{36}$/.test(saved?.requestId) && command.success && command.data.method === 'create') pendingCreate.value = { requestId: saved.requestId, command: command.data };
 } catch {}
@@ -233,8 +233,16 @@ async function resolveNotificationTasks(ids: string[]) {
         if (!wanted.length) return;
         for (const id of wanted) attempted.add(id);
         let offset = 0; let cursor = hasCapability('task-list-cursor') ? 'new' : undefined;
+        if (hasCapability('task-list-lookup')) {
+          for (let start = 0; start < wanted.length; start += 30) {
+            const result = await request({ method: 'list', params: { offset: 0, ids: wanted.slice(start, start + 30) } });
+            if (!active.value || !canRead.value || epoch !== navigationEpoch) return;
+            for (const task of result.conversations as Conversation[]) notificationTasks[task.id] = task;
+          }
+          continue;
+        }
         // IDs added behind the cursor get one further pass; missing tasks never loop.
-        for (;;) {
+        for (let page = 0; page < 3; page++) {
           const result = await request({ method: 'list', params: { offset, ...(cursor ? { cursor } : {}) } }); cursor = result.cursor;
           if (!active.value || !canRead.value || epoch !== navigationEpoch) return;
           for (const task of result.conversations as Conversation[]) if (notificationTaskIds.has(task.id)) notificationTasks[task.id] = task;
@@ -564,7 +572,7 @@ async function loadHistory() {
   finally { historyLoading.value = false; if (cycle === modeSyncCycle && historyGaps.length && !historyError.value && canRead.value) void loadHistory(); }
 }
 async function readQueue() {
-  const id = selected.value?.id; if (!id || readingQueue || !hasCapability('queued-send') || !connected.value || !status.value.online || !status.value.enabled || !serviceActive.value) return;
+  const id = selected.value?.id; if (!id || readingQueue || !hasCapability('queued-send') || !connected.value || !status.value.online || !status.value.enabled) return;
   const cycle = modeSyncCycle;
   readingQueue = true; try { const result = await request({ method: 'queue.list', params: { id } }); if (active.value && selected.value?.id === id && cycle === modeSyncCycle && JSON.stringify(result.queued) !== JSON.stringify(queuedMessages.value)) await chatScroll.change(() => { queuedMessages.value = result.queued; }); } catch {} finally { readingQueue = false; }
 }
@@ -580,7 +588,7 @@ function queueResized() { void nextTick(chatScroll.layoutChanged); }
 function savePendingSends() {
   if (selected.value) drafts.set(selected.value.id, draft.value);
   sessionStorage.setItem('chat-drafts:' + props.deviceId, JSON.stringify([...drafts]));
-  sessionStorage.setItem('pending-sends:' + props.deviceId, JSON.stringify(pendingSends));
+  localStorage.setItem('pending-sends:' + props.deviceId, JSON.stringify(pendingSends)); sessionStorage.removeItem('pending-sends:' + props.deviceId);
 }
 function settleSend(id: string, attempt: PendingSend, failure?: { message: string }) {
   if (!attempt || pendingSends[id]?.requestId !== attempt.requestId) return;
@@ -712,7 +720,7 @@ function clearNavigation(preserveDrafts = false) {
   if (!preserveDrafts) {
     for (const id of Object.keys(pendingSends)) delete pendingSends[id];
     pendingCreate.value = undefined;
-    try { sessionStorage.removeItem('pending-sends:' + props.deviceId); sessionStorage.removeItem('chat-drafts:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); } catch {}
+    try { sessionStorage.removeItem('pending-sends:' + props.deviceId); sessionStorage.removeItem('chat-drafts:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); localStorage.removeItem('pending-sends:' + props.deviceId); localStorage.removeItem('pending-create:' + props.deviceId); } catch {}
     attachments.clear(); drafts.clear();
   }
   modelModal.value=false;takeoverModal.value=false;draft.value='';for(const key of Object.keys(activities))delete activities[key];
@@ -741,22 +749,22 @@ async function create() {
   const reconciling = !!pendingCreate.value;
   const attempt = pendingCreate.value ?? { requestId: crypto.randomUUID(), command: { method: 'create' as const, params: { projectId: projectId.value, text: newText.value, ...(newModel.value ? { model: newModel.value, effort: newEffort.value as any } : {}) } } };
   try {
-    pendingCreate.value = attempt; sessionStorage.setItem('pending-create:' + props.deviceId, JSON.stringify(attempt));
+    pendingCreate.value = attempt; localStorage.setItem('pending-create:' + props.deviceId, JSON.stringify(attempt)); sessionStorage.removeItem('pending-create:' + props.deviceId);
     const r = await request(attempt.command, attempt.requestId);
     if (!r?.threadId) throw Object.assign(new Error('创建结果尚未确认，请在电脑端核对。'), { code: 'OUTCOME_UNKNOWN' });
-    pendingCreate.value = undefined; sessionStorage.removeItem('pending-create:' + props.deviceId); newText.value = '';
+    pendingCreate.value = undefined; localStorage.removeItem('pending-create:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); newText.value = '';
     const navigate = active.value && revision === notificationNavigationRevision && projectModal.value;
     if (navigate) projectModal.value = false;
     await loadNavigation();
     if (navigate && active.value && revision === notificationNavigationRevision && r.threadId) await select({ id: r.threadId, title: '新任务', cwd: '', updatedAt: Date.now(), projectId: attempt.command.params.projectId });
   } catch (e: any) {
-    if (!reconciling && e.code && !['OUTCOME_UNKNOWN', 'INTERNAL'].includes(e.code)) { pendingCreate.value = undefined; try { sessionStorage.removeItem('pending-create:' + props.deviceId); } catch {} }
+    if (!reconciling && e.code && !['OUTCOME_UNKNOWN', 'INTERNAL'].includes(e.code)) { pendingCreate.value = undefined; try { localStorage.removeItem('pending-create:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); } catch {} }
     if (active.value && revision === notificationNavigationRevision) error.value = e.message;
   } finally { busy.value = false; }
 }
 function releasePendingCreate() {
   if (busy.value || !confirm('请先在电脑端核对新任务。恢复编辑后再次创建可能重复执行，确定已经核对？')) return;
-  pendingCreate.value = undefined; try { sessionStorage.removeItem('pending-create:' + props.deviceId); } catch {}
+  pendingCreate.value = undefined; try { localStorage.removeItem('pending-create:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); } catch {}
 }
 function taskState(c:Conversation){const state=activities[c.id]??c;return{...state,running:hasCapability('live-activity')&&state.running};}
 let activityLoading=false;let seenKey='';let activityOffset=0;

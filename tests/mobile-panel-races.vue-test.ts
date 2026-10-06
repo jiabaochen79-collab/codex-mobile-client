@@ -232,6 +232,7 @@ describe('M06: durable send protection when storage fails', () => {
     p.attachments.restore(a.id, [attachment]);
     const setItem = vi.fn((key: string): void => { if (key === failingKey) throw new DOMException('Quota exceeded', 'QuotaExceededError'); });
     vi.stubGlobal('sessionStorage', { getItem: () => null, setItem, removeItem() {} });
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem, removeItem() {} });
     const command = { method: 'send', params: { id: a.id, epoch: 'fixture', text: p.draft.value, attachmentIds: [attachment.id] } };
     expect(await p.perform(command)).toBe(false);
     expect(FakeSocket.latest.frames).toEqual([]); expect(p.pendingSends[a.id]).toBeUndefined();
@@ -244,7 +245,7 @@ describe('M06: durable send protection when storage fails', () => {
   });
   it('keeps the durable request identity after an ambiguous send result without auto-resending', async () => {
     const p = setup(), a = task(), saved = new Map<string, string>(); p.showConversation(a); p.draft.value = 'Unconfirmed draft'; p.status.value.online = false;
-    vi.stubGlobal('sessionStorage', { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => saved.set(key, value), removeItem() {} });
+    vi.stubGlobal('localStorage', { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => saved.set(key, value), removeItem() {} });
     const sending = p.perform({ method: 'send', params: { id: a.id, epoch: 'fixture', text: p.draft.value } }), frame = FakeSocket.latest.frames.at(-1);
     FakeSocket.latest.receive({ type: 'result', id: frame.id, error: { code: 'OUTCOME_UNKNOWN', message: 'Lost acknowledgement' } });
     expect(await sending).toBe(false); expect(p.pendingSends[a.id].requestId).toBe(frame.id);

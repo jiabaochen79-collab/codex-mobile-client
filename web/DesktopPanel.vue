@@ -14,8 +14,17 @@ const disconnect = ref<'refresh' | 'revoke' | null>(null); const cancelDisconnec
 const deviceId = computed(() => state.value?.deviceId?.replace(/(\d{3})(?=\d)/g, '$1 ') ?? '--- --- ---');
 let timer: ReturnType<typeof setInterval> | undefined;
 let revision = 0, reading = false, closed = false;
-async function refresh() { if (reading || busy.value || closed) return; reading = true; const rev = revision; try { const next = await api('/local/state'); if (rev !== revision || closed) return; state.value = next; readError.value = ''; if (state.value?.subscription?.disabled) { subscriptionOpen.value = false; updateOpen.value = false; editingPassword.value = false; disconnect.value = null; } } catch (e: any) { if (rev === revision && !closed) readError.value = e.message; } finally { reading = false; } }
-async function action(path: string, body = {}) { if (busy.value) return; busy.value = true; revision++; operationError.value = ''; try { state.value = await api(path, body); readError.value = ''; } catch (e: any) { operationError.value = e.message; } finally { busy.value = false; } }
+let uncertainAction: { path: string; body: any; code?: string; checkedAt?: number } | undefined;
+function reconcile(next: any) {
+  const pending = uncertainAction; if (!pending) return;
+  const confirmed = pending.path === '/local/enabled' ? next.enabled === pending.body.enabled
+    : pending.path === '/local/rotate' ? next.authorizedCount === 0 && (next.passwordMode === 'custom' || next.code !== pending.code)
+    : pending.path === '/local/password' ? next.passwordMode === pending.body.mode && (pending.body.mode !== 'custom' || next.code === pending.body.password)
+    : pending.path === '/local/update/check' ? next.update?.checkedAt > (pending.checkedAt ?? 0) && next.update?.phase !== 'checking' : false;
+  if (confirmed) { uncertainAction = undefined; operationError.value = ''; if (pending.path === '/local/rotate') disconnect.value = null; if (pending.path === '/local/password') { editingPassword.value = false; password.value = ''; } }
+}
+async function refresh() { if (reading || busy.value || closed) return; reading = true; const rev = revision; try { const next = await api('/local/state'); if (rev !== revision || closed) return; state.value = next; reconcile(next); readError.value = ''; if (state.value?.subscription?.disabled) { subscriptionOpen.value = false; updateOpen.value = false; editingPassword.value = false; disconnect.value = null; } } catch (e: any) { if (rev === revision && !closed) readError.value = e.message; } finally { reading = false; } }
+async function action(path: string, body = {}) { if (busy.value) return; busy.value = true; revision++; operationError.value = ''; uncertainAction = undefined; const pending = { path, body, code: state.value?.code, checkedAt: state.value?.update?.checkedAt }; try { state.value = await api(path, body); readError.value = ''; } catch (e: any) { operationError.value = e.message; if (!e.code || ['OUTCOME_UNKNOWN', 'INTERNAL'].includes(e.code)) uncertainAction = pending; } finally { busy.value = false; } }
 async function changeEnabled(event: Event) {
   const input = event.target as HTMLInputElement;
   await action('/local/enabled', { enabled: input.checked });

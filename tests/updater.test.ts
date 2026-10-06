@@ -27,6 +27,24 @@ describe('helper updater', () => {
     updaters.push(updater); return updater;
   };
   const latest = () => Response.json({ current: null, release: null });
+  it('A12 retries historical result delivery without overwriting a successful latest check', async () => {
+    const updater = fixture(async path => { if (path.endsWith('/result')) throw new Error('offline POST'); return latest(); });
+    writeFileSync(join(directories.at(-1)!, 'updates/result.json'), JSON.stringify({ phase: 'failed', version: '0.4.17' }));
+    await updater.reportPrevious(); await updater.check(); await updater.reportPrevious();
+    expect(updater.state.message).toBe('已是最新版本');
+  });
+  it.each([false, true])('A01 handles a runner exit with installerRunning=%s without unsafe parallel recovery', async installerRunning => {
+    const updater = fixture(async path => path.includes('/check') ? Response.json({ current: release('0.4.16', 16), release: release('0.4.17', 17) }) : Response.json({}));
+    const dir = directories.at(-1)!;
+    for (const version of ['0.4.16','0.4.17']) writeFileSync(join(dir, 'updates', createHash('sha256').update(version).digest('hex') + '.exe'), version);
+    await updater.check(); const freeze = vi.spyOn((updater as any).options, 'freeze');
+    const child = Object.assign(new EventEmitter(), { unref: vi.fn() });
+    vi.mocked(spawn).mockImplementation(() => { queueMicrotask(() => child.emit('spawn')); return child as unknown as ChildProcess; });
+    await updater.install();
+    if (installerRunning) writeFileSync(join(dir, 'updates/result.json'), JSON.stringify({ phase: 'installing', installerRunning: true }));
+    child.emit('exit', 1); expect(freeze).toHaveBeenLastCalledWith(installerRunning);
+    expect(updater.state.phase).toBe(installerRunning ? 'installing' : 'error'); expect(updater.state.message).toContain(installerRunning ? '尚未确认' : '未能启动安装');
+  });
   it.each([1, 65536])('finishes a disk-write failure with highWaterMark %s and permits a new check', async highWaterMark => {
     const previous = release('0.4.16', 16); const bytes = Buffer.from('0.4.17'); const candidate = release('0.4.17', 17, bytes);
     const request = vi.fn(async (path: string) => {

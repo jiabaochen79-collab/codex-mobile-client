@@ -76,6 +76,7 @@ async function switchTo(device: PairedDevice, cancelUploads = false) {
   working.value = true; error.value = '';
   try {
     const result = await api(`/api/paired-devices/${device.deviceId}/select`, {}); directoryRevision++; applyDirectory(result);
+    if (!devices.value.some(row => row.deviceId === device.deviceId && row.authorized)) { deviceId.value = device.deviceId; code.value = ''; adding.value = true; directoryOpen.value = false; return; }
     panel.value?.suspend(); activeId.value = device.deviceId; rememberSelection(device.deviceId); directoryOpen.value = false; adding.value = false;
   } catch (e: any) { error.value = e.message; if (e.code === 'AUTH') { device.authorized = false; deviceId.value = device.deviceId; code.value = ''; adding.value = true; directoryOpen.value = false; } }
   finally { working.value = false; }

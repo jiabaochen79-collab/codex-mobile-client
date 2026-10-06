@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { hash, privateDirectory } from '../shared/security.js';
 import { RemoteError, readMethods, passwordSettingsSchema, type PasswordSettings, type Command } from '../shared/protocol.js';
@@ -111,7 +112,14 @@ export class AgentStore {
   rejectNotificationTime(eventId: string, occurredAt: number) {
     return this.db.prepare('UPDATE notification_outbox SET serverOccurredAt=NULL WHERE eventId=? AND serverOccurredAt=? AND ackedAt IS NULL').run(eventId, occurredAt).changes > 0;
   }
-  pruneNotifications(before = Date.now() - 30 * 86400000) { this.db.prepare('DELETE FROM notification_outbox WHERE ackedAt IS NOT NULL AND createdAt<?').run(before); this.db.prepare('DELETE FROM notification_watches WHERE lastWatchedAt<?').run(before); }
+  pruneNotifications(before = Date.now() - 30 * 86400000) {
+    this.db.prepare('DELETE FROM notification_outbox WHERE ackedAt IS NOT NULL AND createdAt<?').run(before);
+    this.db.prepare('DELETE FROM notification_watches WHERE lastWatchedAt<?').run(before);
+    for (const row of this.db.prepare('SELECT path FROM notification_cursors WHERE mtime<?').all(before)) {
+      try { statSync(String(row.path)); }
+      catch (error: any) { if (error.code === 'ENOENT') this.db.prepare('DELETE FROM notification_cursors WHERE path=?').run(row.path); }
+    }
+  }
   commandStatus(id: string, session: string, conversation: string) {
     const row = this.db.prepare('SELECT result FROM commands WHERE id=? AND session=? AND conversation=?').get(id, session, conversation);
     if (!row) return { state: 'unknown' };

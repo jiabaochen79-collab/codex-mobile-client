@@ -109,7 +109,7 @@ it('excluded B03 the normally reachable feedback overlay retains the more-menu g
 });
 it('B04 polling refreshes earlier loaded service rows', async () => {
   const p = setup('OrdersPanel.vue', { mode: 'mobile', deviceId: '123456789' });
-  p.data.value = { orders: [], licenses: [{ id: 'old', refunded: null }], refunds: [], readiness: { channels: [] } }; p.historyPage.value = 2;
+  p.data.value = { historyRevision: 'old', orders: [], licenses: [{ id: 'old', refunded: null }], refunds: [], readiness: { channels: [] } }; p.historyPage.value = 2;
   api.mockImplementation(async path => path === '/api/orders' ? { orders: [], licenses: [{ id: 'new' }], refunds: [], readiness: { channels: [] } } : path === '/api/orders?page=2' ? { orders: [], licenses: [{ id: 'old', refunded: 42 }], refunds: [{ id: 'refund', billing_order_id: 'old', state: 'succeeded' }] } : { catalog: {} });
   await p.load(); expect(p.data.value.licenses.find((r: any) => r.id === 'old').refunded).toBe(42); expect(api).toHaveBeenCalledWith('/api/orders?page=2', undefined, expect.anything());
 });

@@ -573,7 +573,7 @@ internal sealed class CompanionForm : Form {
         if (uncertainAction == null || uncertainBody == null || state == null) return;
         bool confirmed = false;
         if (uncertainAction == "/local/enabled" && uncertainBody.ContainsKey("enabled")) confirmed = Convert.ToBoolean(state["enabled"]) == Convert.ToBoolean(uncertainBody["enabled"]);
-        else if (uncertainAction == "/local/rotate") confirmed = Get("code") != actionPreviousCode && Get("authorizedCount") == "0";
+        else if (uncertainAction == "/local/rotate") confirmed = (Get("passwordMode") == "custom" || Get("code") != actionPreviousCode) && Get("authorizedCount") == "0";
         else if (uncertainAction == "/local/password") confirmed = Get("passwordMode") == Convert.ToString(uncertainBody["mode"]) && (Get("passwordMode") != "custom" || Get("code") == Convert.ToString(uncertainBody["password"]));
         else if (uncertainAction == "/local/update/check") {
             var update = state.ContainsKey("update") ? state["update"] as Dictionary<string, object> : null;

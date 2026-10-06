@@ -12,6 +12,7 @@ import { DesktopCompatibility, assessProtocols, type DesktopContract } from './c
 import { normalizeProjectPath, projectForConversation, type IndexedProject } from './projects.js';
 import { collaborationMode, desktopModels, threadSettings, validateModel } from './models.js';
 import { DesktopActivity, DesktopRuntimeActivity, runtimeRunning } from './activity.js';
+import { errorText } from './error-text.js';
 import { ConversationImages, markdownImages, userImageContent } from './images.js';
 import { snapshotResponse } from './snapshot-response.js';
 import { RemoteError, supportsDesktopCommand, uid, type ClientStatus, type Command, type DesktopAdapter, type Snapshot, type Interaction, type Conversation, type Message, type LocalAttachment, type Activity, type PermissionMode } from '../shared/protocol.js';
@@ -32,7 +33,7 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
   const turnStatus = (turn: any) => idle && turn?.status === 'inProgress' ? 'interrupted' : turn?.status;
   const failureReason = (turn: any) => {
     const raw = turn?.status === 'failed' ? (typeof turn.error === 'string' ? turn.error : turn.error?.message) : undefined;
-    return typeof raw === 'string' ? raw.split(/[\r\n]/, 1)[0].replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 400) : '';
+    return errorText(raw);
   };
   images?.begin(state.id, true);
   const imageReferences = new Map<string, { source: string; alt: string }>();
@@ -85,7 +86,10 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
         const summary = (item.summary ?? []).filter((part: unknown) => typeof part === 'string').join('\n\n');
         if (summary) append({ ...turnMeta, id: item.id, role: 'assistant', phase: 'reasoning', text: summary });
       } else if (['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch'].includes(item.type)) {
-        const text = item.type === 'commandExecution' ? item.command : item.type === 'fileChange' ? (item.changes ?? []).map((c: any) => c.path).join('\n') : item.tool ?? item.query ?? item.type;
+        const tool = item.tool ?? item.query ?? item.type;
+        const args = item.arguments ?? item.input;
+        const detail = ['mcpToolCall', 'dynamicToolCall'].includes(item.type) && args !== undefined ? (typeof args === 'string' ? args : JSON.stringify(args)) : '';
+        const text = item.type === 'commandExecution' ? item.command : item.type === 'fileChange' ? (item.changes ?? []).map((c: any) => c.path).join('\n') : detail ? `${tool}\n${detail.length > 32000 ? detail.slice(0, 32000) + '\n[内容已截断]' : detail}` : tool;
         append({ ...turnMeta, id: item.id, role: 'tool', text: String(text ?? item.type), status: item.status });
       }
       if (messages.length > limit) break history;
@@ -130,6 +134,11 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
   private compatibility = new DesktopCompatibility();
   private contract?: DesktopContract;
   private projectCache?: { updated: number; projects: IndexedProject[] };
+  private projectStates = new Map<string, boolean | undefined>();
+  private projectScan?: Promise<void>;
+  private projectScanAt = 0;
+  private projectScanOffset = 0;
+  private projectGeneration = 0;
   private lastContextId?: string;
   private current?: Followed;
   private followed = new Map<string, Followed>();
@@ -162,7 +171,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     super();
     this.activity = new DesktopActivity(codexHome);
     if (!isAbsolute(codexHome) || /%[^%]+%/.test(codexHome)) throw new Error('CODEX_HOME must resolve to an absolute directory.');
-    this.ipc.on('disconnected', () => { for (const entry of this.followed.values()) if (entry.state?.requests?.length) this.pendingApprovals.add(entry.id); this.current = undefined; this.followed.clear(); this.runtimeActivity.clear(); this.tools?.close(); this.tools = undefined; this.discovery = undefined; this.checkedAt = 0; this.checkedStatus = undefined; });
+    this.ipc.on('disconnected', () => { this.projectGeneration++; this.projectStates.clear(); this.projectScanAt = 0; for (const entry of this.followed.values()) if (entry.state?.requests?.length) this.pendingApprovals.add(entry.id); this.current = undefined; this.followed.clear(); this.runtimeActivity.clear(); this.tools?.close(); this.tools = undefined; this.discovery = undefined; this.checkedAt = 0; this.checkedStatus = undefined; });
     this.ipc.on('broadcast', e => this.onBroadcast(e));
   }
   private onBroadcast(event: any) {
@@ -254,18 +263,19 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (!status.available) throw new RemoteError('CLIENT_UNAVAILABLE', status.reason!);
     if (!supportsDesktopCommand(status.capabilities, command)) throw new RemoteError('UNSUPPORTED', '当前客户端的此项接口尚未适配，操作未执行。');
   }
-  list(offset: number, filter: { projectId?: string | null; query?: string; cursor?: string } = {}, projects: IndexedProject[] = []): { conversations: Conversation[]; hasMore: boolean; cursor?: string; reset?: boolean; nextOffset?: number } {
+  list(offset: number, filter: { projectId?: string | null; query?: string; cursor?: string; ids?: string[] } = {}, projects: IndexedProject[] = []): { conversations: Conversation[]; hasMore: boolean; cursor?: string; reset?: boolean; nextOffset?: number } {
     const db = this.index();
     try {
       db.function('remote_project', (id, cwd) => projectForConversation(projects, id as string | null, String(cwd ?? '')));
       db.function('remote_fold', value => String(value ?? '').normalize('NFKC').toLowerCase());
-      const identity = JSON.stringify([filter.projectId, filter.query ?? '', projects.map(p => [p.id, p.roots, p.nativeIds])]);
+      const identity = JSON.stringify([filter.projectId, filter.query ?? '', filter.ids, projects.map(p => [p.id, p.roots, p.nativeIds])]);
       for (const [key, page] of this.listPages) if (page.expires <= Date.now()) this.listPages.delete(key);
       let page = filter.cursor && filter.cursor !== 'new' ? this.listPages.get(filter.cursor) : undefined;
       if (page && page.filter !== identity) throw new RemoteError('INVALID', '任务列表游标与筛选条件不匹配。');
       const title = "COALESCE(NULLIF(name,''), NULLIF(title,''), '未命名会话')";
       const conditions = [ACTIVE_THREADS];
       const values: (string | number | null)[] = [];
+      if (filter.ids) { conditions.push(filter.ids.length ? `id IN (${filter.ids.map(() => '?').join(',')})` : '0=1'); values.push(...filter.ids); }
       if (filter.projectId !== undefined) { conditions.push('remote_project(project_id,cwd) IS ?'); values.push(filter.projectId); }
       if (filter.query) { conditions.push(`instr(remote_fold(${title}),remote_fold(?)) > 0`); values.push(filter.query); }
       const fields = `id, ${title} AS title, cwd, COALESCE(updated_at_ms, updated_at * 1000) AS updatedAt, remote_project(project_id,cwd) AS projectId`;
@@ -352,6 +362,10 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     }
     finally { db.close(); }
   }
+  hasConversation(id: string): boolean | undefined {
+    try { this.known(id); return true; }
+    catch (e) { return e instanceof RemoteError && e.code === 'NOT_FOUND' ? false : undefined; }
+  }
   private taskActivity(id: string, db: DatabaseSync): Activity {
     const row = db.prepare("SELECT rollout_path FROM threads WHERE id=? AND archived=0 AND source='vscode'").get(id);
     if (!row || typeof row.rollout_path === 'string' && win32.normalize(row.rollout_path).toLowerCase().split(win32.sep).includes('archived_sessions')) throw new RemoteError('NOT_FOUND', '会话已归档或删除。');
@@ -369,17 +383,18 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       return { ...row, running: running === true, unread: running === false && this.activity.isUnread(row.id, row.completionId) };
     });
   }
-  private async appTool(name: string, args: unknown, contextId: string) {
+  private async appTool(name: string, args: unknown, contextId: string, authorize?: () => void) {
     if (!this.discovery?.toolsPipe) throw new RemoteError('UNSUPPORTED', '当前客户端未开放此操作。');
     this.tools ??= this.createTools(this.discovery.toolsPipe);
     await this.tools.connect();
+    authorize?.();
     const response = await this.tools.request('tools/call', { namespace: 'codex_app', tool: name, arguments: args, callerSource: 'codex', threadId: contextId, turnId: `remote-${randomUUID()}`, callId: `remote-${randomUUID()}` });
     if (!response.result?.success) throw new RemoteError('CLIENT_REJECTED', '原客户端未完成此操作，请在电脑端检查。');
     this.lastContextId = contextId;
     const text = response.result.contentItems?.filter((x: any) => x.type === 'inputText').map((x: any) => x.text).join('\n');
     try { return JSON.parse(text); } catch { throw new RemoteError('UNSUPPORTED', '客户端返回格式不兼容。'); }
   }
-  private async follow(id: string, activate = false) {
+  private async follow(id: string, activate = false, authorize?: () => void) {
     this.known(id);
     const existing = this.followed.get(id);
     if (existing?.state && Date.now() - (existing.ownerCheckedAt ?? 0) < 30000) { this.current = existing; return; }
@@ -388,7 +403,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     const recoverActivation = activate && existing?.ownerCheckedAt === 0 && !existing.state;
     if (existing) existing.state = undefined;
     if (activate && (!owner?.handledByClientId || recoverActivation)) {
-      await this.appTool('navigate_to_codex_page', { threadId: id }, id);
+      await this.appTool('navigate_to_codex_page', { threadId: id }, id, authorize);
       owner = await this.ipc.request('thread-owner-discovery', { hostId: 'local', conversationId: id });
       const deadline = Date.now() + 6000;
       for (let delay = 250; !owner?.handledByClientId && Date.now() < deadline; delay = Math.min(1000, delay * 2)) {
@@ -441,6 +456,36 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (response.resultType === 'error') throw new RemoteError('CLIENT_REJECTED', '电脑客户端未接受任务设置。');
     if (version === 2 && response.result?.applied !== true) throw new RemoteError(response.result?.applied === false ? 'STALE' : 'OUTCOME_UNKNOWN', '电脑端未确认应用任务设置，请刷新后核对。');
   }
+  private refreshProjectActivity() {
+    if (this.projectScan || this.projectScanAt && Date.now() - this.projectScanAt < 30000) return;
+    const generation = this.projectGeneration;
+    const scan = (async () => {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      if (generation !== this.projectGeneration) return;
+      const db = this.index(); let rows: { id: string; rollout_path: string }[];
+      try { rows = db.prepare(`SELECT id,rollout_path FROM threads WHERE ${ACTIVE_THREADS} ORDER BY updated_at DESC`).all() as typeof rows; } finally { db.close(); }
+      const offset = this.projectScanOffset < rows.length ? this.projectScanOffset : 0;
+      const selected = rows.slice(offset, offset + 200);
+      this.projectScanOffset = offset + selected.length < rows.length ? offset + selected.length : 0;
+      const values = new Map(this.projectStates);
+      for (let start = 0; start < selected.length; start += 20) {
+        if (generation !== this.projectGeneration) return;
+        const batch = selected.slice(start, start + 20), candidates: string[] = [];
+        for (const row of batch) {
+          const live = runtimeRunning(this.followed.get(row.id)?.state?.threadRuntimeStatus);
+          if (live !== undefined) values.set(row.id, live);
+          else { try { if (this.activity.read(row.rollout_path).pending !== false) candidates.push(row.id); else values.set(row.id, false); } catch { values.set(row.id, undefined); } }
+        }
+        const statuses = await this.runtimeActivity.read(candidates);
+        if (generation !== this.projectGeneration) return;
+        for (const id of candidates) values.set(id, statuses.get(id));
+        for (const row of batch) this.projectStates.set(row.id, values.get(row.id));
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      if (generation === this.projectGeneration) { const ids = new Set(rows.map(row => row.id)); this.projectStates = new Map([...values].filter(([id]) => ids.has(id))); this.projectScanAt = Date.now(); if (rows[0]) this.onChange?.(rows[0].id); }
+    })().catch(() => {}).finally(() => { if (this.projectScan === scan) this.projectScan = undefined; });
+    this.projectScan = scan;
+  }
   async execute(command: Command, commandId: string, authorize?: () => void, attachments: LocalAttachment[] = []) {
     if (command.method === 'command.status') throw new RemoteError('INVALID', '发送结果由电脑助手核对。');
     await this.ready(command);
@@ -487,26 +532,25 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       if (command.method === 'projects') {
         const db = this.index();
         try {
-          const candidates = (db.prepare(`SELECT id,project_id,cwd,rollout_path FROM threads WHERE ${ACTIVE_THREADS}`).all()).filter(row => {
-            try { return this.activity.read(String(row.rollout_path)).pending !== false || runtimeRunning(this.followed.get(String(row.id))?.state?.threadRuntimeStatus) === true; } catch { return false; }
-          });
-          const statuses = await this.runtimeActivity.read(candidates.map(row => String(row.id)));
-          const running = new Set(candidates.filter(row => (runtimeRunning(this.followed.get(String(row.id))?.state?.threadRuntimeStatus) ?? statuses.get(String(row.id))) === true).map(row => projectForConversation(projects, row.project_id as string | null, String(row.cwd))));
-          return { projects: projects.map(({ nativeIds, roots, ...project }) => ({ ...project, running: running.has(project.id) })) };
+          const rows = db.prepare(`SELECT id,project_id,cwd FROM threads WHERE ${ACTIVE_THREADS}`).all();
+          this.refreshProjectActivity();
+          const running = new Set<string | null>(), unknown = new Set<string | null>();
+          for (const row of rows) { const project = projectForConversation(projects, row.project_id as string | null, String(row.cwd)); const value = runtimeRunning(this.followed.get(String(row.id))?.state?.threadRuntimeStatus) ?? this.projectStates.get(String(row.id)); if (value === true) running.add(project); else if (value === undefined) unknown.add(project); }
+          return { projects: projects.map(({ nativeIds, roots, ...project }) => ({ ...project, running: running.has(project.id) ? true : unknown.has(project.id) ? undefined : false })) };
         } finally { db.close(); }
       }
       if (!projects.some((p: any) => p.id === command.params.projectId)) throw new RemoteError('NOT_FOUND', '项目不在原客户端的本机项目列表中。');
       authorize?.();
       if (command.params.model) validateModel(await desktopModels(this.discovery?.cliExecutablePath), command.params.model, command.params.effort);
       authorize?.();
-      const result = await this.appTool('create_thread', { prompt: command.params.text, ...(command.params.model ? { model: command.params.model, thinking: command.params.effort } : {}), target: { type: 'project', projectId: command.params.projectId, environment: { type: 'local' } } }, anchor);
+      const result = await this.appTool('create_thread', { prompt: command.params.text, ...(command.params.model ? { model: command.params.model, thinking: command.params.effort } : {}), target: { type: 'project', projectId: command.params.projectId, environment: { type: 'local' } } }, anchor, authorize);
       if (!uid.safeParse(result?.threadId).success) throw new RemoteError('OUTCOME_UNKNOWN', '客户端新建任务的返回格式已变化，请先在电脑核对结果，勿重复创建。');
       return result;
     }
     if (!['read','send','stop','respond','settings.update','mode.update','permissions.update','plan.respond'].includes(command.method)) throw new RemoteError('INVALID', '操作无效。');
     if (command.method === 'queue.list' || command.method === 'queue.remove' || command.method === 'queue.resume') throw new RemoteError('INVALID', '排队操作需要通过助手处理。');
     if (command.method === 'upload.begin' || command.method === 'upload.status' || command.method === 'upload.complete' || command.method === 'upload.remove') throw new RemoteError('INVALID', '操作无效。');
-    await this.follow(command.params.id, command.method === 'read' && command.params.activate);
+    await this.follow(command.params.id, command.method === 'read' && command.params.activate, authorize);
     if (command.method === 'read') return snapshotResponse(this.snapshot(command.params.limit, command.params.before), command.params.ifRevision);
     const snap = this.snapshot();
     if (command.params.epoch !== snap.epoch) throw new RemoteError('STALE', '客户端已重新连接，请刷新会话。');
@@ -539,6 +583,8 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (command.method === 'settings.update') {
       if (snap.settings?.revision !== command.params.revision) throw new RemoteError('STALE', '电脑上的模型设置已改变，请刷新后重试。');
       validateModel(await desktopModels(this.discovery?.cliExecutablePath), command.params.model, command.params.effort); authorize?.();
+      const latest = this.snapshot();
+      if (latest.id !== snap.id || latest.epoch !== command.params.epoch || latest.settings?.revision !== command.params.revision) throw new RemoteError('STALE', '电脑上的模型设置已改变，请刷新后重试。');
       await this.updateSettings(snap.id, { model: command.params.model, effort: command.params.effort });
       this.current!.state = undefined; await this.follow(snap.id); return { settings: this.snapshot().settings };
     }
@@ -584,6 +630,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     return { accepted: true };
   }
   close() {
+    this.projectGeneration++;
     for (const id of this.followed.keys()) this.unfollow(id, true);
     this.ipc.close(); this.tools?.close(); this.current = undefined; this.images.clear();
     this.pendingApprovals.clear();

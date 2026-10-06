@@ -3,10 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { RemoteError } from '../shared/protocol.js';
 import { compactJson } from './compact-json.js';
+import { errorText } from './error-text.js';
 
 function rejection(value: any) {
   const raw = typeof value === 'string' ? value : value?.message;
-  const reason = typeof raw === 'string' ? raw.split(/[\r\n]/, 1)[0].replace(/[\x00-\x1f\x7f]/g, '').replace(/\bBearer\s+\S+|\bsk-[A-Za-z0-9_-]+/gi, '[redacted]').replace(/["']?\b(password|passwd|authorization|cookie|api[_-]?key|token|secret)["']?\s*[:=]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)/gi, '$1=[redacted]').trim().slice(0, 400) : '';
+  const reason = errorText(raw);
   const code = ['NOT_FOUND', 'INVALID', 'UNSUPPORTED', 'CLIENT_UNAVAILABLE', 'BUSY'].includes(value?.code) ? value.code : value?.code === 'PERMISSION_DENIED' ? 'CLIENT_DENIED' : 'CLIENT_REJECTED';
   return new RemoteError(code, reason ? `电脑客户端拒绝操作：${reason}` : '原客户端未接受此操作，请检查目标会话。');
 }

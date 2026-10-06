@@ -44,6 +44,12 @@ internal static class AuditNative {
                 Pump((Task)Call(f, "Action", "/local/enabled", new { enabled = false }));
                 Pump((Task)Call(f, "Poll")); Check(Field(f, "actionError") != null, "unconfirmed change must retain its error");
                 Console.WriteLine("Only matching authoritative success clears transient action errors");
+                string custom = State(true, false).Replace("\"passwordMode\":\"automatic\"", "\"passwordMode\":\"custom\"");
+                Set(f, "state", new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(custom));
+                h.Run = r => r.Method == HttpMethod.Post ? Task.FromException<HttpResponseMessage>(new TaskCanceledException()) : Task.FromResult(Response(HttpStatusCode.OK, custom.Replace("\"authorizedCount\":2", "\"authorizedCount\":0")));
+                Pump((Task)Call(f, "Action", "/local/rotate", new {}));
+                Pump((Task)Call(f, "Poll")); Check(Field(f, "actionError") == null, "A14 fixed password revocation must reconcile when grants reach zero");
+                Console.WriteLine("Fixed-password authorization revocation reconciles");
                 var gate = new TaskCompletionSource<HttpResponseMessage>();
                 h.Run = r => r.Method == HttpMethod.Get ? gate.Task : Task.FromResult(Response(HttpStatusCode.OK, State(false, false)));
                 var poll = (Task)Call(f, "Poll");

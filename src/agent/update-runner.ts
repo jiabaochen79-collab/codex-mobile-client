@@ -73,6 +73,7 @@ export async function runUpdate(jobPath: string) {
     return false;
   };
   let phase = 'failed';
+  result('installing', true);
   try {
     try { if (await install(next.sha256) === 0) { const pid = await launch(next.version, job.nonce); if (await healthy(next.version, job.nonce, pid)) phase = 'installed'; } } catch (error) { if (error instanceof InstallerStillRunning) throw error; }
     if (phase !== 'installed') { try { if (await install(previous.sha256) === 0) { const nonce = job.nonce + '-rollback'; const pid = await launch(previous.version, nonce); phase = await healthy(previous.version, nonce, pid) ? 'rolled_back' : 'failed'; } } catch (error) { if (error instanceof InstallerStillRunning) throw error; } }

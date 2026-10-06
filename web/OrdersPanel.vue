@@ -35,13 +35,20 @@ async function load(force = false) {
   if (disposed || reading && !force) return;
   const revision = ++readRevision; reading = true;
   try { const orders = await api(base); if (disposed || revision !== readRevision) return;
-    for (let page = 2; page <= historyPage.value; page++) { const next = await api(`${base}?page=${page}`); if (disposed || revision !== readRevision) return; for (const key of ['orders', 'licenses', 'refunds']) orders[key].push(...next[key]); orders.hasMore = next.hasMore; }
+    const ownerChanged = data.value?.ownerRevision !== undefined && orders.ownerRevision !== data.value.ownerRevision;
+    if (ownerChanged) { historyPage.value = 1; returnToOrders(); refundTarget.value = undefined; }
+    const refreshHistory = force || data.value?.historyRevision !== undefined && data.value.historyRevision !== orders.historyRevision;
+    if (refreshHistory) for (let page = 2; page <= historyPage.value; page++) { const next = await api(`${base}?page=${page}`); if (disposed || revision !== readRevision) return; for (const key of ['orders', 'licenses', 'refunds']) orders[key].push(...next[key]); orders.hasMore = next.hasMore; }
     const info = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription');
     if (revision !== readRevision) return;
     const previous = new Map<string, string>((data.value?.orders ?? (active.value ? [active.value] : [])).map((order: PaymentOrder) => [order.id, order.status]));
     const entitlementChanged = orders.orders.some((order: PaymentOrder) => ['paid','refunded'].includes(order.status) && previous.get(order.id) !== order.status);
-    if (data.value) for (const key of ['orders', 'licenses', 'refunds']) orders[key] = mergeRecords(data.value[key] ?? [], orders[key] ?? []);
-    hasMore.value = orders.hasMore === true;
+    if (data.value && historyPage.value > 1 && !refreshHistory) {
+      const newHead = ['orders', 'licenses', 'refunds'].some(key => orders[key].some((row: any) => !data.value[key].some((old: any) => old.id === row.id)));
+      for (const key of ['orders', 'licenses', 'refunds']) orders[key] = mergeRecords(data.value[key] ?? [], orders[key] ?? []);
+      if (newHead) historyPage.value = 1;
+    }
+    if (refreshHistory || historyPage.value === 1) hasMore.value = orders.hasMore === true;
     data.value = orders; catalog.value = info.catalog;
     if (!channels.value.includes(channel.value)) channel.value = channels.value[0] ?? '';
     if (active.value) { const next = data.value.orders.find((o: PaymentOrder) => o.id === active.value!.id); if (next) active.value = next; }

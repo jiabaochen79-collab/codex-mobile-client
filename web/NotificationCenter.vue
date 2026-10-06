@@ -253,14 +253,21 @@ async function loadMore() {
     const ids = new Set(items.value.map(item => item.id));
     items.value.push(...page.filter(item => !ids.has(item.id)));
     nextCursor.value = result.nextCursor ?? null;
-    if (revision === listRevision) updateUnread(snapshotUnread(Math.max(unread.value, Number(result.unread) || 0), items.value, priorReceipt));
+    if (revision === listRevision) updateUnread(snapshotUnread(Number(result.unread) || 0, items.value, priorReceipt));
     void props.resolveTasks(page.map(item => item.taskId));
   } catch (e: any) { if (revision === listRevision) error.value = e.message; }
   finally { loadingMore.value = false; }
 }
 function resume() { if (!disposed && !busy.value && document.visibilityState === 'visible') void load(); }
-onMounted(() => { window.addEventListener('remote-notification', onIncoming); window.addEventListener('remote-notification-read', onRead); window.addEventListener('online', resume); document.addEventListener('visibilitychange', resume); void load(); });
-onUnmounted(() => { disposed = true; loadRevision++; window.removeEventListener('remote-notification', onIncoming); window.removeEventListener('remote-notification-read', onRead); window.removeEventListener('online', resume); document.removeEventListener('visibilitychange', resume); });
+let settingsReading = false; let settingsTimer: ReturnType<typeof setInterval> | undefined;
+async function refreshSettings() {
+  if (disposed || busy.value || loading.value || settingsReading || document.visibilityState !== 'visible') return;
+  const revision = loadRevision, previous = settingsRevision; settingsReading = true;
+  try { const result = await api('/api/notifications/settings', undefined, headers()); if (disposed || busy.value || revision !== loadRevision || previous !== settingsRevision) return; settings.value = result.settings; settingsRevision = result.revision; settingsReady.value = true; pushConfigured.value = result.pushConfigured === true; vapidPublicKey.value = result.vapidPublicKey ?? null; await refreshSystemPushState(); }
+  catch {} finally { settingsReading = false; }
+}
+onMounted(() => { window.addEventListener('remote-notification', onIncoming); window.addEventListener('remote-notification-read', onRead); window.addEventListener('online', resume); document.addEventListener('visibilitychange', resume); settingsTimer = setInterval(() => { void refreshSettings(); }, 15000); void load(); });
+onUnmounted(() => { disposed = true; loadRevision++; clearInterval(settingsTimer); window.removeEventListener('remote-notification', onIncoming); window.removeEventListener('remote-notification-read', onRead); window.removeEventListener('online', resume); document.removeEventListener('visibilitychange', resume); });
 </script>
 
 <template>

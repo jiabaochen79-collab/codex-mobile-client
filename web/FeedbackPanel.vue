@@ -53,10 +53,11 @@ async function refreshDetail() {
 }
 function mergeDetail(next: any, older = false) {
   const current = detail.value;
-  if (!current || current.ticket.id !== next.ticket.id) { detail.value = next; return; }
+  if (!current || current.ticket.id !== next.ticket.id || next.reset || next.contentCounts && current.contentCounts && (next.contentCounts.images < current.contentCounts.images || next.contentCounts.diagnostics < current.contentCounts.diagnostics)) { detail.value = next; return; }
   const ids = new Set(next.messages.map((message: any) => message.id));
   const retained = current.messages.filter((message: any) => !ids.has(message.id));
-  detail.value = { ...next, nextBefore: older ? next.nextBefore : current.nextBefore, messages: (older ? [...next.messages, ...retained] : [...retained, ...next.messages]).sort((a: any, b: any) => a.seq - b.seq) };
+  const separated = next.nextBefore && next.messages[0]?.seq > (current.messages.at(-1)?.seq ?? 0);
+  detail.value = { ...next, nextBefore: older ? next.nextBefore : separated ? next.nextBefore : current.nextBefore, messages: (older ? [...next.messages, ...retained] : [...retained, ...next.messages]).sort((a: any, b: any) => a.seq - b.seq) };
 }
 async function olderMessages() {
   if (busy.value || !detail.value?.nextBefore) return;
@@ -92,8 +93,9 @@ async function state(value: string) {
   } finally { busy.value = false; }
 }
 let polling: ReturnType<typeof setInterval> | undefined;
-onMounted(() => { void list(); polling = setInterval(() => { void refreshDetail(); }, 15000); document.addEventListener('visibilitychange', refreshDetail); });
-onUnmounted(() => { disposed = true; listRevision++; clearInterval(polling); document.removeEventListener('visibilitychange', refreshDetail); });
+function refreshView() { if (disposed || busy.value || document.visibilityState !== 'visible') return; if (detail.value) void refreshDetail(); else if (!writing.value && !listing.value) void list(); }
+onMounted(() => { void list(); polling = setInterval(refreshView, 15000); document.addEventListener('visibilitychange', refreshView); });
+onUnmounted(() => { disposed = true; listRevision++; clearInterval(polling); document.removeEventListener('visibilitychange', refreshView); });
 </script>
 <template>
   <div class="modal-backdrop feedback-backdrop"><section class="modal feedback-panel" role="dialog" aria-modal="true" aria-label="问题反馈">

@@ -92,8 +92,8 @@ it('Regression: newly inserted orders re-enable pagination after the last page w
   await p.load(); await p.loadMore(); expect(p.historyPage.value).toBe(2); expect(p.hasMore.value).toBe(false);
   rows = [...Array.from({ length: 201 }, (_, id) => ({ id: 'new-' + id, status: 'closed' })), ...rows];
   await p.load(); expect(p.hasMore.value).toBe(true);
-  expect(p.data.value.orders).toHaveLength(400); expect(rows).toHaveLength(401);
-  await p.loadMore(); expect(p.data.value.orders.some((o: any) => o.id === 'new-200')).toBe(true);
+  expect(p.data.value.orders).toHaveLength(300); expect(rows).toHaveLength(401);
+  await p.loadMore(); await p.loadMore(); expect(p.data.value.orders.some((o: any) => o.id === 'new-200')).toBe(true);
 });
 it('CONTROL order refresh preserves rows from an overlapping load-more page', async () => {
   const p = setup('OrdersPanel.vue', { mode: 'mobile', deviceId: '123456789' }), more = deferred(), info = deferred();

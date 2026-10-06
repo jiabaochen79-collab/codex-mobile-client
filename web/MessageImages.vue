@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onDeactivated, onUnmounted, reactive, ref } from 'vue';
+import { nextTick, onDeactivated, onUnmounted, reactive, ref, watch } from 'vue';
 import { ImageOff, RefreshCw, X } from 'lucide-vue-next';
 import type { MessageImage } from '../src/shared/protocol';
 const props = defineProps<{ conversationId: string; images: MessageImage[]; deviceId?: string }>();
@@ -15,6 +15,13 @@ async function preview(image: MessageImage) {
 }
 function retryPreview() { previewFailed.value = false; previewLoaded.value = false; previewAttempt.value++; }
 function close() { dialog.value?.close(); selected.value = undefined; }
+watch(() => props.images, images => {
+  if (!selected.value || images.includes(selected.value)) return;
+  const exact = images.find(image => image.id === selected.value!.id);
+  const replacements = exact ? [exact] : images.filter(image => image.alt === selected.value!.alt);
+  if (replacements.length !== 1) { close(); return; }
+  selected.value = replacements[0]; retryPreview();
+});
 onUnmounted(() => dialog.value?.close());
 onDeactivated(close);
 </script>
