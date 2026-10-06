@@ -37,6 +37,8 @@ const readRecovering = ref(false);
 const historyLoading = ref(false); const historyError = ref('');
 let historyCursor: string | undefined; let historyMore = false;
 let historyGaps: string[] = [];
+let imageRefresh: { taskId: string; epoch: string; before: string; ids: Set<string> } | undefined;
+let refreshingImages = false;
 const readRetryDelays = [1000, 2000, 4000];
 const retryableReadErrors = new Set(['CLIENT_REJECTED', 'CLIENT_UNAVAILABLE', 'READ_TIMEOUT', 'READ_DISCONNECTED', 'OUTCOME_UNKNOWN', 'OFFLINE', 'UNAVAILABLE', 'BUSY']);
 let readFailures = 0; let readRetry: ReturnType<typeof setTimeout> | undefined;
@@ -250,7 +252,7 @@ async function openNotificationTask(taskId: string, stillRequested = () => true)
   if (busy.value || modeChanging.value || permissionChanging.value) throw new Error('操作正在确认，请稍后查看提醒。');
   const cycle = modeSyncCycle;
   const revision = notificationNavigationRevision;
-  const next: Snapshot = await request({ method: 'read', params: { id: taskId, limit: 100, activate: false } });
+  const next: Snapshot = await request({ method: 'read', params: { id: taskId, limit: 100, activate: canControl.value } });
   if (!active.value || !canRead.value || cycle !== modeSyncCycle || revision !== notificationNavigationRevision || !stillRequested()) return false;
   if (next.id !== taskId) throw new Error('会话状态不匹配，已保留当前会话，请稍后重试。');
   const known = knownNotificationTask(taskId);
@@ -362,15 +364,19 @@ async function loadGroup(id: string | null, append = false) {
   const state = group(id ?? 'recent'); if (state.loading) return; state.loading = true;
   const epoch = navigationEpoch;
   try {
-    const target = append ? 30 : Math.max(30, state.rows.length); const rows: Conversation[] = []; let hasMore = false; let cursor = hasCapability('task-list-cursor') ? append ? state.cursor ?? 'new' : 'new' : undefined;
+    const refresh = !append && state.loaded;
+    const rows: Conversation[] = []; let hasMore = false; let cursor = hasCapability('task-list-cursor') ? append ? state.cursor ?? 'new' : refresh ? undefined : 'new' : undefined;
     let offset = append ? state.offset ?? state.rows.length : 0;
-    do {
+    {
       const params = { offset, ...(cursor ? { cursor } : {}), ...(projectNavigation.value ? { projectId: id } : {}) };
-      const r = await request({ method: 'list', params }); if (r.reset) { append = false; rows.length = 0; } cursor = r.cursor; rows.push(...r.conversations); hasMore = r.hasMore;
-      const next = r.nextOffset ?? offset + r.conversations.length; if (!r.reset && next <= offset) break; offset = next;
-    } while (hasMore && rows.length < target);
+      const r = await request({ method: 'list', params }); cursor = r.cursor; rows.push(...r.conversations); hasMore = r.hasMore;
+      offset = r.nextOffset ?? offset + r.conversations.length;
+    }
     if (groups[id ?? 'recent'] !== state || epoch !== navigationEpoch) return;
-    state.rows = append ? [...state.rows, ...rows] : rows; state.cursor = cursor; state.offset = offset; state.hasMore = hasMore; state.loaded = true; state.error = '';
+    const ids = new Set(rows.map(row => row.id));
+    state.rows = append ? [...state.rows.filter(row => !ids.has(row.id)), ...rows] : refresh ? [...rows, ...state.rows.filter(row => !ids.has(row.id))] : rows;
+    if (!refresh) { state.cursor = cursor; state.offset = offset; state.hasMore = hasMore; }
+    state.loaded = true; state.error = '';
     for (const row of rows) if (activities[row.id]) activities[row.id] = { ...activities[row.id], running: row.running === true, unread: row.unread === true };
   } catch (e: any) { if (groups[id ?? 'recent'] === state && epoch === navigationEpoch) state.error = e.message; } finally { state.loading = false; }
 }
@@ -382,7 +388,7 @@ async function loadNavigation() {
     if (projectNavigation.value) {
       const r = await request({ method: 'projects', params: {} }); if (epoch !== navigationEpoch) return; projects.value = r.projects;
       if (focusedNavigationEpoch !== epoch) {
-        const running = hasCapability('live-activity') ? await runningProjectIds(epoch) : new Set<string>();
+        const running = new Set(projects.value.filter(project => project.running).map(project => project.id));
         if (!running || epoch !== navigationEpoch) return;
         if (interaction === projectInteraction) {
           for (const id of automaticProjects) if (!running.has(id)) { expandedProjects.delete(id); automaticProjects.delete(id); }
@@ -402,18 +408,6 @@ function refreshPage() {
   if (selected.value) drafts.set(selected.value.id, draft.value);
   try { sessionStorage.setItem('chat-drafts:' + props.deviceId, JSON.stringify([...drafts])); } catch { error.value = '草稿保存失败，未刷新网页。'; return; }
   location.reload();
-}
-async function runningProjectIds(epoch: number) {
-  const running = new Set<string>(); let offset = 0; let cursor = hasCapability('task-list-cursor') ? 'new' : undefined; if (!projects.value.length) return running;
-  // Scan task summaries once per entry, including projects outside the first page.
-  for (;;) {
-    const result = await request({ method: 'list', params: { offset, ...(cursor ? { cursor } : {}) } }); cursor = result.cursor;
-    if (epoch !== navigationEpoch || disposed.value || !canRead.value) return null;
-    for (const task of result.conversations as Conversation[]) if (task.running && task.projectId) running.add(task.projectId);
-    const next = result.nextOffset ?? offset + result.conversations.length;
-    if (!result.hasMore || next <= offset) return running;
-    offset = next;
-  }
 }
 async function toggleProject(id: string) { projectInteraction++; automaticProjects.delete(id); if (expandedProjects.has(id)) expandedProjects.delete(id); else { expandedProjects.add(id); await loadGroup(id); } }
 async function runSearch(append = false) {
@@ -452,6 +446,7 @@ function cancelNotificationNavigation() {
 function showConversation(conversation: Conversation, activate = false) {
   resetReadRecovery();
   historyCursor = undefined; historyMore = false; historyGaps = []; historyError.value = '';
+  imageRefresh = undefined;
   modelModal.value = false; editingTask = undefined; permissionPicker.value = false; fullAccessConfirm.value = false;
   activateSelected = activate; pendingActivations.clear();
   attachmentPicker.value = false;
@@ -482,10 +477,15 @@ async function read(activate = false) {
   const activateTask=pendingActivations.has(id) && canControl.value;
   try { const next = await request({ method: 'read', params: { id, limit: limit.value, ...(hasCapability('multi-terminal') ? {activate:activateTask} : {}), ...(hasCapability('conditional-read') && modeSynced.value && snapshot.value?.revision ? { ifRevision: snapshot.value.revision } : {}) } }); if (next.id !== id) throw new Error('会话状态不匹配，已保留当前会话，请稍后重试。'); if (selected.value?.id === id && cycle === modeSyncCycle) { pendingActivations.delete(id); resetReadRecovery(); readError.value = ''; if (!next.notModified) await chatScroll.change(() => { if (hasCapability('history-pages')) {
       const previous = snapshot.value?.messages ?? [];
+      if (snapshot.value && snapshot.value.epoch !== next.epoch) {
+        const freshIds = new Set(next.messages.map((message: Message) => message.id));
+        const staleImages = previous.filter(message => message.images?.length && !freshIds.has(message.id));
+        imageRefresh = staleImages.length && next.historyCursor ? { taskId: id, epoch: next.epoch, before: next.historyCursor, ids: new Set(staleImages.map(message => message.id)) } : undefined;
+      }
       if (!previous.length) { historyCursor = next.historyCursor; historyMore = next.hasMore; }
       else if (next.hasMore && next.historyCursor && next.messages.length && !next.messages.some((message: Message) => previous.some(old => old.id === message.id)) && !historyGaps.includes(next.historyCursor)) historyGaps.push(next.historyCursor);
       next.messages = mergeMessages(previous, next.messages); next.hasMore = historyMore || historyGaps.length > 0;
-    } snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } if (historyGaps.length && !historyError.value) void loadHistory(); void markSeen(); void reconcileSends(); } }
+    } snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } if (historyGaps.length && !historyError.value) void loadHistory(); void refreshHistoryImages(); void markSeen(); void reconcileSends(); } }
   catch (e: any) {
     if (selected.value?.id !== id || cycle !== modeSyncCycle) return;
     if (e.code === 'NOT_FOUND') {
@@ -513,6 +513,27 @@ function mergeMessages(previous: Message[], incoming: Message[]) {
   const updates = new Map(incoming.map(message => [message.id, message]));
   const ids = new Set(previous.map(message => message.id));
   return previous.map(message => updates.get(message.id) ?? message).concat(incoming.filter(message => !ids.has(message.id)));
+}
+async function refreshHistoryImages() {
+  const refresh = imageRefresh, cycle = modeSyncCycle;
+  if (!refresh || refreshingImages || !canRead.value) return;
+  refreshingImages = true;
+  try {
+    while (imageRefresh === refresh && refresh.ids.size) {
+      const page = await request({ method: 'read', params: { id: refresh.taskId, limit: 100, before: refresh.before } });
+      if (cycle !== modeSyncCycle || snapshot.value?.id !== refresh.taskId || page.epoch !== refresh.epoch || imageRefresh !== refresh) return;
+      if (page.id !== refresh.taskId || page.hasMore && (!page.messages.length || !page.historyCursor || page.historyCursor === refresh.before)) throw new Error('历史图片状态暂未同步。');
+      await chatScroll.change(() => {
+        const updated = new Map<string, Message>(page.messages.map((message: Message) => [message.id, message]));
+        snapshot.value!.messages = snapshot.value!.messages.map(message => updated.get(message.id) ?? message);
+        for (const message of page.messages) refresh.ids.delete(message.id);
+      }, 'preserve');
+      if (!page.hasMore || !page.historyCursor) break;
+      refresh.before = page.historyCursor;
+    }
+    if (imageRefresh === refresh) imageRefresh = undefined;
+  } catch { /* Retry token refresh after the next successful task read. */ }
+  finally { refreshingImages = false; }
 }
 async function loadHistory() {
   const id = selected.value?.id; if (!id || !canRead.value || historyLoading.value) return;
@@ -965,7 +986,7 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
     <div v-if="projectModal" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="new-title"><div class="modal-title"><h2 id="new-title">新建任务</h2><button class="icon-button" title="关闭" @click="projectModal = false"><X :size="20"/></button></div><form @submit.prevent="create"><label for="project">现有项目</label><select id="project" v-model="projectId" :disabled="busy || !!pendingCreate"><option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name ?? p.path }}</option></select><p v-if="!projects.length" class="muted">暂无本机项目</p><button v-if="hasCapability('model-settings')" type="button" class="text-button" :disabled="busy || !!pendingCreate" @click="openModels('new')"><Brain :size="14"/>{{ newModel || '默认模型' }} {{ effortNames[newEffort] || '' }}</button><label for="new-text">任务</label><textarea id="new-text" v-model="newText" :disabled="busy || !!pendingCreate" rows="5" maxlength="32000" required/><p v-if="pendingCreate && !busy" class="warning" role="status">创建结果待核对，原请求已保留，不会自动重复创建。</p><button class="button primary" :disabled="busy || !canCreate || !projectId || !newText.trim()">{{ pendingCreate ? '核对创建结果' : '创建任务' }}<ArrowRight :size="16"/></button><button v-if="pendingCreate" type="button" class="text-button" :disabled="busy" @click="releasePendingCreate">已核对，恢复编辑</button></form></section></div>
     <SubscriptionPanel v-if="subscriptionOpen" mode="mobile" :device-id="deviceId" @close="subscriptionOpen = false" @changed="subscriptionChanged"/>
     <NotificationCenter v-if="notificationOpen" :device-id="deviceId" :task-labels="notificationTaskLabels" :resolve-tasks="resolveNotificationTasks" :open-task="openNotificationTask" @close="notificationOpen = false" @unread="notificationUnread = $event"/>
-    <div v-if="modelModal" class="modal-backdrop settings-backdrop" @click.self="modelModal=false"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="model-title"><div class="modal-title"><h2 id="model-title">模型与思考深度</h2><button class="icon-button" title="关闭模型设置" @click="modelModal=false"><X :size="20"/></button></div><form @submit.prevent="saveModel"><label for="model-choice">模型</label><select id="model-choice" v-model="chosenModel"><option v-for="m in models" :key="m.id" :value="m.id">{{ m.name }}</option></select><label for="effort-choice">思考深度</label><select id="effort-choice" v-model="chosenEffort"><option v-for="effort in availableEfforts" :key="effort" :value="effort">{{ effortNames[effort] ?? effort }}</option></select><button class="button primary" :disabled="busy || !canControl || !chosenModel || !chosenEffort"><Check :size="16"/>保存</button></form></section></div>
+    <div v-if="modelModal" class="modal-backdrop settings-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="model-title"><div class="modal-title"><h2 id="model-title">模型与思考深度</h2><button class="icon-button" title="关闭模型设置" @click="modelModal=false"><X :size="20"/></button></div><form @submit.prevent="saveModel"><label for="model-choice">模型</label><select id="model-choice" v-model="chosenModel"><option v-for="m in models" :key="m.id" :value="m.id">{{ m.name }}</option></select><label for="effort-choice">思考深度</label><select id="effort-choice" v-model="chosenEffort"><option v-for="effort in availableEfforts" :key="effort" :value="effort">{{ effortNames[effort] ?? effort }}</option></select><button class="button primary" :disabled="busy || !canControl || !chosenModel || !chosenEffort"><Check :size="16"/>保存</button></form></section></div>
     <div v-if="takeoverModal" class="modal-backdrop settings-backdrop" @click.self="takeoverModal=false"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="terminal-title"><div class="modal-title"><h2 id="terminal-title">在线终端</h2><button class="icon-button" title="关闭终端列表" @click="takeoverModal=false"><X :size="20"/></button></div><div v-for="t in status.control?.terminals ?? []" :key="t.id" class="terminal-row"><MonitorSmartphone :size="20"/><span>{{ t.label }}{{ t.id === clientId ? '（本终端）' : '' }}</span><small>{{ t.controlling ? '控制中' : '查看中' }}</small></div><button v-if="!canControl" class="button primary" :disabled="busy || !canRead" @click="takeControl"><MonitorSmartphone :size="17"/>确认接管</button></section></div>
     <div v-if="permissionPicker" class="modal-backdrop permission-backdrop" @click.self="permissionPicker=false"><section class="modal permission-picker" role="dialog" aria-modal="true" aria-labelledby="permission-title"><div class="modal-title"><h2 id="permission-title">任务权限</h2><button class="icon-button" title="关闭任务权限" @click="permissionPicker=false"><X :size="20"/></button></div><div role="radiogroup" aria-label="选择任务权限"><button type="button" class="permission-option" role="radio" :aria-checked="snapshot?.settings?.permission === 'ask'" :disabled="!canChangePermission" @click="choosePermission('ask')"><Shield :size="22"/><span><strong>请求批准</strong><small>编辑工作区外文件和使用互联网时始终询问</small></span><Check v-if="snapshot?.settings?.permission === 'ask'" :size="18"/></button><button type="button" class="permission-option" role="radio" :aria-checked="snapshot?.settings?.permission === 'approve'" :disabled="!canChangePermission" @click="choosePermission('approve')"><ShieldCheck :size="22"/><span><strong>帮我批准</strong><small>仅对检测到的风险操作请求批准</small></span><Check v-if="snapshot?.settings?.permission === 'approve'" :size="18"/></button><button type="button" class="permission-option full" role="radio" :aria-checked="snapshot?.settings?.permission === 'full'" :disabled="!canChangePermission" @click="choosePermission('full')"><ShieldAlert :size="22"/><span><strong>完全访问权限</strong><small>可不受限制访问互联网和电脑文件</small></span><Check v-if="snapshot?.settings?.permission === 'full'" :size="18"/></button></div><p v-if="snapshot?.settings?.permission === 'custom' && !permissionReason" class="compatibility-notice">当前任务使用自定义权限配置，可切换为以上任一档。</p><p v-else-if="permissionReason" class="compatibility-notice">暂时无法更改：{{ permissionReason }}</p></section></div>
     <div v-if="fullAccessConfirm" class="modal-backdrop permission-confirm-backdrop" @click.self="fullAccessConfirm=false"><section class="modal permission-confirm" role="alertdialog" aria-modal="true" aria-labelledby="full-access-title"><div class="modal-title"><h2 id="full-access-title">启用完全访问权限？</h2><button class="icon-button" title="关闭确认" @click="fullAccessConfirm=false"><X :size="20"/></button></div><div class="permission-warning"><ShieldAlert :size="24"/><p>后续消息可不经批准访问互联网和电脑上的任意文件。仅在你信任当前任务时启用。</p></div><p v-if="permissionReason" class="compatibility-notice">暂时无法更改：{{ permissionReason }}</p><div class="permission-confirm-actions"><button type="button" class="button" @click="fullAccessConfirm=false">取消</button><button type="button" class="button confirm-full" :disabled="!canChangePermission" @click="setPermission('full')">确认启用</button></div></section></div>

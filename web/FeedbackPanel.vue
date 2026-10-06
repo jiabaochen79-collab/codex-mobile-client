@@ -21,7 +21,8 @@ const imageUrl = (id: string) => base + '/images/' + id + (props.mode === 'mobil
 const date = (n: number) => new Date(n).toLocaleString('zh-CN', { hour12: false });
 const diagnostics = computed(() => {
   const source = props.mode; const userAgent = navigator.userAgent; const state = props.status;
-  const base: any = { source, system: props.mode === 'desktop' ? 'Windows' : /iPhone|iPad/.test(userAgent) ? 'iOS' : /Android/.test(userAgent) ? 'Android' : /Windows/.test(userAgent) ? 'Windows' : 'other', browser: /Edg/.test(userAgent) ? 'Edge' : /Chrome|CriOS/.test(userAgent) ? 'Chrome' : /Firefox/.test(userAgent) ? 'Firefox' : /Safari/.test(userAgent) ? 'Safari' : 'other', connection: props.mode === 'desktop' ? state?.connection ?? 'unknown' : state?.online ? 'online' : 'offline' };
+  const isIos = /iPhone|iPad|iPod/.test(userAgent) || navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+  const base: any = { source, system: props.mode === 'desktop' ? 'Windows' : isIos ? 'iOS' : /Android/.test(userAgent) ? 'Android' : /Windows/.test(userAgent) ? 'Windows' : 'other', browser: /Edg/.test(userAgent) ? 'Edge' : /Chrome|CriOS/.test(userAgent) ? 'Chrome' : /Firefox/.test(userAgent) ? 'Firefox' : /Safari/.test(userAgent) ? 'Safari' : 'other', connection: props.mode === 'desktop' ? state?.connection ?? 'unknown' : state?.online ? 'online' : 'offline' };
   if (/^[\d.]{1,30}$/.test(state?.helperVersion ?? '')) base.helperVersion = state.helperVersion;
   if (/^[\d.]{1,40}$/.test(state?.client?.version ?? '')) base.clientVersion = state.client.version;
   if (/^[A-Z0-9_]{1,60}$/.test(state?.connectionError?.code ?? '')) base.errorCode = state.connectionError.code;
@@ -41,12 +42,27 @@ async function refreshDetail() {
   const revision = detailRevision;
   detailReading = true;
   try {
-    const next = await request('/' + id);
+    const next = await request('/' + id + '?' + new URLSearchParams({ after: String(detail.value.messages.at(-1)?.seq ?? 0), ...(detail.value.revision ? { revision: detail.value.revision } : {}) }));
     if (disposed || busy.value || detail.value?.ticket.id !== id || revision !== detailRevision) return;
-    detail.value = next;
+    if (next.unchanged) return;
+    mergeDetail(next);
+    if (next.hasMoreAfter) detail.value.revision = undefined;
     await request('/' + id + '/read', { through: next.messages.at(-1)?.seq ?? 0 }); emit('changed');
   } catch { /* Keep the conversation and draft until the next refresh. */ }
   finally { detailReading = false; }
+}
+function mergeDetail(next: any, older = false) {
+  const current = detail.value;
+  if (!current || current.ticket.id !== next.ticket.id) { detail.value = next; return; }
+  const ids = new Set(next.messages.map((message: any) => message.id));
+  const retained = current.messages.filter((message: any) => !ids.has(message.id));
+  detail.value = { ...next, nextBefore: older ? next.nextBefore : current.nextBefore, messages: (older ? [...next.messages, ...retained] : [...retained, ...next.messages]).sort((a: any, b: any) => a.seq - b.seq) };
+}
+async function olderMessages() {
+  if (busy.value || !detail.value?.nextBefore) return;
+  busy.value = true; error.value = '';
+  try { mergeDetail(await request('/' + detail.value.ticket.id + '?before=' + detail.value.nextBefore), true); }
+  catch (e: any) { error.value = e.message; } finally { busy.value = false; }
 }
 async function create() { if (busy.value) return; busy.value = true; try { if (!await saveDraft()) return; detail.value = undefined; writing.value = true; error.value = ''; await restore(); } finally { busy.value = false; } }
 async function back() { if (busy.value) return; busy.value = true; try { if (!await saveDraft()) return; detail.value = undefined; writing.value = false; loaded.value = false; await list(); } finally { busy.value = false; } }
@@ -56,7 +72,12 @@ async function send() {
   busy.value = true; error.value = '';
   try { const id = detail.value?.ticket.id; pending.value ??= { requestId: requestId.value, text: text.value, images: images.value, diagnostics: diagnostics.value, ...(!id ? { category: category.value, occurredAt: new Date(occurredAt.value).getTime(), contact: contact.value } : {}) }; if (!await saveDraft()) { pending.value = undefined; return; }
     const uploaded = await uploadFeedbackPictures(base, pending.value.images, headers, saveDraft);
-    const result = await request(id ? '/' + id + '/messages' : '', { ...pending.value, images: uploaded }); const oldKey = draftKey.value; loaded.value = false; text.value = ''; images.value = []; pending.value = undefined; await feedbackDraft(oldKey, null); detail.value = result; writing.value = false; await restore(); emit('changed');
+    const result = await request(id ? '/' + id + '/messages' : '', { ...pending.value, images: uploaded });
+    const oldKey = draftKey.value; loaded.value = false;
+    mergeDetail(result); writing.value = false; emit('changed');
+    try { await feedbackDraft(oldKey, null); }
+    catch { error.value = '反馈已提交成功，但本地旧草稿未能清理；再次打开时可核对工单编号。'; }
+    text.value = ''; images.value = []; pending.value = undefined; requestId.value = crypto.randomUUID(); loaded.value = true;
   } catch (e: any) {
     if (['INVALID', 'CAPACITY', 'UPLOAD_CORRUPT', 'UPLOAD_CONSUMED', 'NOT_FOUND'].includes(e.code)) { images.value = images.value.map(image => ({ data: image.data })); pending.value = undefined; requestId.value = crypto.randomUUID(); error.value = e.message + ' 请修改反馈内容或移除截图后重新提交。'; await saveDraft(); }
     else error.value = e.message + ' 草稿已保留，可重试原提交。';
@@ -64,9 +85,9 @@ async function send() {
 }
 async function state(value: string) {
   const ticketId = detail.value.ticket.id; busy.value = true; error.value = '';
-  try { detail.value = await request('/' + ticketId + '/state', { state: value }); emit('changed'); }
+  try { mergeDetail(await request('/' + ticketId + '/state', { state: value })); emit('changed'); }
   catch (e: any) {
-    try { const current = await request('/' + ticketId); if (current.ticket.state === value) { detail.value = current; emit('changed'); return; } } catch {}
+    try { const current = await request('/' + ticketId); if (current.ticket.state === value) { mergeDetail(current); emit('changed'); return; } } catch {}
     error.value = e.message;
   } finally { busy.value = false; }
 }
@@ -81,7 +102,7 @@ onUnmounted(() => { disposed = true; listRevision++; clearInterval(polling); doc
     <div v-if="error" class="alert" role="alert">{{ error }}</div>
     <template v-if="!detail && !writing"><button class="button primary" :disabled="busy" @click="create"><Plus :size="17"/>提交问题</button><p v-if="busy || listing" class="muted" role="status">正在读取反馈</p><ul class="feedback-list"><li v-for="row in rows" :key="row.id"><button :disabled="busy || listing" @click="show(row)"><strong>{{ feedbackCategories[row.category as keyof typeof feedbackCategories] }}<span v-if="row.unread" class="feedback-dot"/></strong><span>{{ feedbackStates[row.state as keyof typeof feedbackStates] }} · {{ date(row.updated) }}</span><small>{{ row.id }}</small></button></li></ul><p v-if="!rows.length && !listing" class="muted">暂无反馈</p><footer><button class="button" :disabled="busy || listing || page <= 1" @click="list(page - 1)">上一页</button><span>{{ page }}</span><button class="button" :disabled="busy || listing || page * 30 >= total" @click="list(page + 1)">下一页</button></footer></template>
     <template v-else>
-      <div v-if="detail" class="feedback-thread"><p class="small muted">{{ detail.ticket.id }} · {{ feedbackStates[detail.ticket.state as keyof typeof feedbackStates] }}</p><article v-for="m in detail.messages" :key="m.id"><header>{{ m.actor === 'admin' ? '客服回复' : '我的消息' }} <time>{{ date(m.created) }}</time></header><p>{{ m.text }}</p><div class="feedback-pictures"><a v-for="picture in m.images" :key="picture.id" :href="imageUrl(picture.id)" target="_blank" rel="noreferrer"><img :src="imageUrl(picture.id)" alt="反馈截图" loading="lazy"></a></div></article><div class="feedback-actions"><button v-if="!['resolved','closed'].includes(detail.ticket.state)" class="button" :disabled="busy" @click="state('resolved')"><Check :size="16"/>确认解决</button><button v-else class="button" :disabled="busy" @click="state('open')"><RefreshCw :size="16"/>重新打开</button><button v-if="detail.ticket.state !== 'closed'" class="button" :disabled="busy" @click="state('closed')">关闭工单</button></div></div>
+      <div v-if="detail" class="feedback-thread"><p class="small muted">{{ detail.ticket.id }} · {{ feedbackStates[detail.ticket.state as keyof typeof feedbackStates] }}</p><button v-if="detail.nextBefore" class="text-button" :disabled="busy" @click="olderMessages">加载更早的消息</button><article v-for="m in detail.messages" :key="m.id"><header>{{ m.actor === 'admin' ? '客服回复' : '我的消息' }} <time>{{ date(m.created) }}</time></header><p>{{ m.text }}</p><div class="feedback-pictures"><a v-for="picture in m.images" :key="picture.id" :href="imageUrl(picture.id)" target="_blank" rel="noreferrer"><img :src="imageUrl(picture.id)" alt="反馈截图" loading="lazy"></a></div></article><div class="feedback-actions"><button v-if="!['resolved','closed'].includes(detail.ticket.state)" class="button" :disabled="busy" @click="state('resolved')"><Check :size="16"/>确认解决</button><button v-else class="button" :disabled="busy" @click="state('open')"><RefreshCw :size="16"/>重新打开</button><button v-if="detail.ticket.state !== 'closed'" class="button" :disabled="busy" @click="state('closed')">关闭工单</button></div></div>
       <form @submit.prevent="send"><fieldset :disabled="busy || !!pending"><template v-if="writing"><label>问题分类<select v-model="category"><option v-for="(label, key) in feedbackCategories" :key="key" :value="key">{{ label }}</option></select></label><label>发生时间<input v-model="occurredAt" type="datetime-local" required></label><label>联系方式（选填）<input v-model="contact" maxlength="200" autocomplete="off"></label></template><label>{{ writing ? '问题描述' : '补充信息' }}<textarea v-model="text" required maxlength="8000" rows="4" placeholder="描述遇到的问题和操作步骤"/></label><div class="feedback-pictures"><div v-for="(picture, index) in images" :key="index"><img :src="'data:image/jpeg;base64,' + picture.data" alt="待提交截图"><button type="button" class="icon-button" title="移除截图" @click="images.splice(index, 1)"><X :size="15"/></button></div></div><input ref="input" type="file" accept="image/*" multiple hidden @change="photos"><button type="button" class="button" :disabled="images.length >= 3" @click="input?.click()"><ImagePlus :size="17"/>添加截图</button><label class="feedback-check"><input v-model="extra" type="checkbox">附带详细诊断</label><details><summary>预览将提交的诊断信息</summary><pre>{{ JSON.stringify(diagnostics, null, 2) }}</pre></details></fieldset><button class="button primary" :disabled="busy || !text.trim()"><RefreshCw v-if="busy" :size="17" class="spin"/><Send v-else :size="17"/>{{ pending ? '重试提交' : '提交' }}</button></form>
       <p class="small muted">诊断保留 30 天；工单关闭后截图保留 90 天、文字保留 180 天。请检查截图中是否包含密码或私人信息。</p>
     </template>

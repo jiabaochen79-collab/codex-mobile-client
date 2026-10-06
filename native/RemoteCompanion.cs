@@ -177,6 +177,10 @@ internal sealed class CompanionForm : Form {
     private readonly string root;
     private string agentError;
     private string actionError;
+    private string uncertainAction;
+    private Dictionary<string, object> uncertainBody;
+    private string actionPreviousCode;
+    private double actionStartedAt;
     private int actionRevision;
     private string lastConnectionFailure;
     private int agentFailures;
@@ -450,6 +454,7 @@ internal sealed class CompanionForm : Form {
             var next = JsonObject(await http.GetStringAsync("http://127.0.0.1:" + port + "/local/state"));
             if (exiting || IsDisposed || revision != actionRevision) return;
             state = next; failedPolls = 0;
+            ReconcileActionError();
             if (DateTime.UtcNow - agentReadyAt > TimeSpan.FromMinutes(5)) agentFailures = 0;
             Render();
         }
@@ -548,7 +553,7 @@ internal sealed class CompanionForm : Form {
         return Task.FromResult(0);
     }
     private async Task Action(string url, object body) {
-        if (token == null || working) return; working = true; actionRevision++; actionError = null; SetControlsEnabled();
+        if (token == null || working) return; working = true; actionRevision++; actionError = null; uncertainAction = null; uncertainBody = null; actionPreviousCode = Get("code"); actionStartedAt = (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds; SetControlsEnabled();
         try {
             using (var result = await http.PostAsync("http://127.0.0.1:" + port + url, new StringContent(Program.Json.Serialize(body), Encoding.UTF8, "application/json"))) {
                 var response = await result.Content.ReadAsStringAsync();
@@ -561,8 +566,20 @@ internal sealed class CompanionForm : Form {
                 if (ApplyActionResponse(url, response)) { error.Text = ""; Render(); }
             }
         }
-        catch { actionError = "未收到操作确认，请先核对当前状态，再重试。"; error.Text = actionError; error.ForeColor = Color.FromArgb(169, 61, 65); }
+        catch { uncertainAction = url; uncertainBody = JsonObject(Program.Json.Serialize(body)); actionError = "未收到操作确认，请先核对当前状态，再重试。"; error.Text = actionError; error.ForeColor = Color.FromArgb(169, 61, 65); }
         finally { working = false; SetControlsEnabled(); }
+    }
+    private void ReconcileActionError() {
+        if (uncertainAction == null || uncertainBody == null || state == null) return;
+        bool confirmed = false;
+        if (uncertainAction == "/local/enabled" && uncertainBody.ContainsKey("enabled")) confirmed = Convert.ToBoolean(state["enabled"]) == Convert.ToBoolean(uncertainBody["enabled"]);
+        else if (uncertainAction == "/local/rotate") confirmed = Get("code") != actionPreviousCode && Get("authorizedCount") == "0";
+        else if (uncertainAction == "/local/password") confirmed = Get("passwordMode") == Convert.ToString(uncertainBody["mode"]) && (Get("passwordMode") != "custom" || Get("code") == Convert.ToString(uncertainBody["password"]));
+        else if (uncertainAction == "/local/update/check") {
+            var update = state.ContainsKey("update") ? state["update"] as Dictionary<string, object> : null;
+            confirmed = update != null && update.ContainsKey("checkedAt") && update["checkedAt"] != null && Convert.ToDouble(update["checkedAt"]) >= actionStartedAt && Convert.ToString(update["phase"]) != "checking" && Convert.ToString(update["phase"]) != "error";
+        }
+        if (confirmed) { actionError = null; uncertainAction = null; uncertainBody = null; }
     }
     private bool ApplyActionResponse(string url, string response) {
         var next = JsonObject(response);

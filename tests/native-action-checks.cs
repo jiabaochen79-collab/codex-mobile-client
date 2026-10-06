@@ -36,6 +36,14 @@ internal static class AuditNative {
                 Check(error == "An upload is in progress", "C09 generic operation error");
                 Pump((Task)Call(f, "Poll")); Check(((Label)Field(f, "error")).Text == "An upload is in progress", "C09 poll erases failure");
                 Console.WriteLine("Operation reason survives polling");
+                h.Run = r => r.Method == HttpMethod.Post ? Task.FromException<HttpResponseMessage>(new TaskCanceledException()) : Task.FromResult(Response(HttpStatusCode.OK, State(true, false).Replace("\"phase\":\"idle\"", "\"phase\":\"idle\",\"checkedAt\":4102444800000")));
+                Pump((Task)Call(f, "Action", "/local/update/check", new {}));
+                Check(Field(f, "actionError") != null, "missing uncertain update error");
+                Pump((Task)Call(f, "Poll")); Check(Field(f, "actionError") == null, "successful authoritative check must clear transient error");
+                h.Run = r => r.Method == HttpMethod.Post ? Task.FromException<HttpResponseMessage>(new TaskCanceledException()) : Task.FromResult(Response(HttpStatusCode.OK, State(true, false)));
+                Pump((Task)Call(f, "Action", "/local/enabled", new { enabled = false }));
+                Pump((Task)Call(f, "Poll")); Check(Field(f, "actionError") != null, "unconfirmed change must retain its error");
+                Console.WriteLine("Only matching authoritative success clears transient action errors");
                 var gate = new TaskCompletionSource<HttpResponseMessage>();
                 h.Run = r => r.Method == HttpMethod.Get ? gate.Task : Task.FromResult(Response(HttpStatusCode.OK, State(false, false)));
                 var poll = (Task)Call(f, "Poll");

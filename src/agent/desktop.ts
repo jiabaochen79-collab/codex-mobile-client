@@ -47,11 +47,17 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
   const seen = new Set<string>();
   let reached = before === undefined;
   const append = (message: Message) => {
-    const count = Math.max(1, Math.ceil(message.text.length / 64000));
-    for (let part = count - 1; part >= 0; part--) {
+    const chunks: string[] = [];
+    for (let start = 0; start < message.text.length;) {
+      let end = Math.min(start + 64000, message.text.length);
+      if (end < message.text.length && /[\uD800-\uDBFF]/.test(message.text[end - 1])) end--;
+      chunks.push(message.text.slice(start, end)); start = end;
+    }
+    if (!chunks.length) chunks.push('');
+    for (let part = chunks.length - 1; part >= 0; part--) {
       const id = part ? `${message.id}:part:${part}` : message.id;
       if (!reached) { if (id === before) reached = true; continue; }
-      messages.push({ ...message, id, text: message.text.slice(part * 64000, (part + 1) * 64000), ...(part ? { images: undefined } : {}) });
+      messages.push({ ...message, id, itemId: message.id, text: chunks[part], ...(part ? { images: undefined } : {}) });
       if (messages.length > limit) break;
     }
   };
@@ -266,9 +272,10 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       const selection = `FROM threads WHERE ${conditions.join(' AND ')} ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC,id DESC`;
       let cursor = filter.cursor; const reset = !!cursor && cursor !== 'new' && !page;
       if (cursor && !page) {
-        while (this.listPages.size >= 32) this.listPages.delete(this.listPages.keys().next().value!);
-        cursor = randomUUID(); page = { filter: identity, ids: db.prepare('SELECT id ' + selection + ' LIMIT 10000').all(...values).map(row => String(row.id)), expires: Date.now() + 15 * 60000 }; this.listPages.set(cursor, page);
-        offset = 0;
+        const ids = db.prepare('SELECT id ' + selection + ' LIMIT 1000001').all(...values).map(row => String(row.id));
+        if (ids.length + [...this.listPages.values()].reduce((n, value) => n + value.ids.length, 0) > 1000000) throw new RemoteError('BUSY', '任务列表缓存已满，请缩小项目或搜索范围，稍后重试。');
+        cursor = randomUUID(); page = { filter: identity, ids, expires: Date.now() + 15 * 60000 }; this.listPages.set(cursor, page);
+        if (!reset) offset = 0;
       }
       const lookup = db.prepare(`SELECT ${fields} FROM threads WHERE id=? AND ${ACTIVE_THREADS}`);
       const rows = page ? page.ids.slice(offset, offset + 30).flatMap(id => { const row = lookup.get(id); return row ? [row as unknown as Conversation] : []; }) : db.prepare('SELECT ' + fields + ' ' + selection + ' LIMIT 31 OFFSET ?').all(...values, offset) as unknown as Conversation[];
@@ -477,7 +484,17 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       const anchor = this.contextId();
       if (!anchor) throw new RemoteError('CLIENT_UNAVAILABLE', '请先在电脑端创建一个任务。');
       const projects = await this.projects(true);
-      if (command.method === 'projects') return { projects: projects.map(({ nativeIds, roots, ...project }) => project) };
+      if (command.method === 'projects') {
+        const db = this.index();
+        try {
+          const candidates = (db.prepare(`SELECT id,project_id,cwd,rollout_path FROM threads WHERE ${ACTIVE_THREADS}`).all()).filter(row => {
+            try { return this.activity.read(String(row.rollout_path)).pending !== false || runtimeRunning(this.followed.get(String(row.id))?.state?.threadRuntimeStatus) === true; } catch { return false; }
+          });
+          const statuses = await this.runtimeActivity.read(candidates.map(row => String(row.id)));
+          const running = new Set(candidates.filter(row => (runtimeRunning(this.followed.get(String(row.id))?.state?.threadRuntimeStatus) ?? statuses.get(String(row.id))) === true).map(row => projectForConversation(projects, row.project_id as string | null, String(row.cwd))));
+          return { projects: projects.map(({ nativeIds, roots, ...project }) => ({ ...project, running: running.has(project.id) })) };
+        } finally { db.close(); }
+      }
       if (!projects.some((p: any) => p.id === command.params.projectId)) throw new RemoteError('NOT_FOUND', '项目不在原客户端的本机项目列表中。');
       authorize?.();
       if (command.params.model) validateModel(await desktopModels(this.discovery?.cliExecutablePath), command.params.model, command.params.effort);

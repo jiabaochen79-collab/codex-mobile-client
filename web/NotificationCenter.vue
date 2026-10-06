@@ -128,13 +128,17 @@ function subscriptionKeyMatches(subscription: PushSubscription) {
   const actual = new Uint8Array(saved); const expected = decodeKey(vapidPublicKey.value);
   return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
 }
-async function registerPush() {
+function acquirePermission() {
+  if (!pushConfigured.value || !pushAvailable.value || !vapidPublicKey.value) return Promise.resolve<NotificationPermission>('default');
+  return Notification.permission === 'default' ? Notification.requestPermission() : Promise.resolve(Notification.permission);
+}
+async function registerPush(permissionRequest = acquirePermission()) {
   if (!pushConfigured.value || !vapidPublicKey.value) { systemPushState.value = 'unknown'; return '站内通知已开启；服务器暂未提供系统推送。'; }
   if (isIos && !standalone.value) { systemPushState.value = 'unknown'; return browserMessage.value; }
   if (!pushAvailable.value) { systemPushState.value = 'unknown'; return browserMessage.value; }
   systemPushState.value = 'needed';
   if (Notification.permission === 'denied') return browserMessage.value;
-  const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+  const permission = await permissionRequest;
   if (permission !== 'granted') return '系统通知权限未开启，站内通知仍可用。';
   const registration = await pushRegistration();
   let subscription = await registration.pushManager.getSubscription();
@@ -154,7 +158,11 @@ async function enable() {
   if (busy.value || loading.value || !settingsReady.value) return;
   if (!canEnableReminders.value) { error.value = ''; info.value = browserMessage.value; return; }
   busy.value = true; error.value = ''; info.value = '';
-  try { await save({ ...settings.value, enabled: true }); info.value = await registerPush(); }
+  try {
+    const permissionRequest = acquirePermission();
+    void permissionRequest.catch(() => {});
+    await save({ ...settings.value, enabled: true }); info.value = await registerPush(permissionRequest);
+  }
   catch (e: any) { error.value = e.message; }
   finally { busy.value = false; }
 }
@@ -185,12 +193,13 @@ async function readOne(item: NotificationItem) {
   if (busy.value) return; busy.value = true; error.value = '';
   listRevision++;
   readingOne = true; incomingDuringReadOne.clear();
+  const priorReceipt = latestReceipt;
   try {
     if (!await props.openTask(item.taskId)) return;
     const result = await api(`/api/notifications/${encodeURIComponent(item.id)}/read`, undefined, headers(), 'POST');
     const wasUnread = item.readAt === null;
     item.readAt ??= Date.now();
-    updateUnread(typeof result.throughSequence === 'number' ? (Number(result.unread) || 0) + [...incomingDuringReadOne.values()].filter(row => row.id !== item.id && !row.readAt && typeof row.sequence === 'number' && row.sequence > result.throughSequence).length : unread.value - Number(wasUnread)); emit('close');
+    updateUnread(snapshotUnread(typeof result.throughSequence === 'number' ? (Number(result.unread) || 0) + [...incomingDuringReadOne.values()].filter(row => row.id !== item.id && !row.readAt && typeof row.sequence === 'number' && row.sequence > result.throughSequence).length : unread.value - Number(wasUnread), items.value, priorReceipt)); emit('close');
   } catch (e: any) { error.value = e.message; }
   finally { readingOne = false; incomingDuringReadOne.clear(); busy.value = false; }
 }
@@ -199,11 +208,12 @@ async function readAll() {
   listRevision++;
   const ids = new Set(items.value.map(item => item.id));
   markingAll = true; incomingDuringReadAll.clear();
+  const priorReceipt = latestReceipt;
   try {
     const result = await api('/api/notifications/read-all', {}, headers());
     const covered = (item: NotificationItem) => typeof result.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence <= result.throughSequence : ids.has(item.id);
     for (const item of items.value) if (covered(item)) item.readAt ??= result.readAt ?? Date.now();
-    updateUnread(typeof result.throughSequence === 'number' ? (Number(result.unread) || 0) + [...incomingDuringReadAll.values()].filter(item => !item.readAt && !covered(item)).length : items.value.filter(item => !item.readAt).length);
+    updateUnread(snapshotUnread(typeof result.throughSequence === 'number' ? (Number(result.unread) || 0) + [...incomingDuringReadAll.values()].filter(item => !item.readAt && !covered(item)).length : items.value.filter(item => !item.readAt).length, items.value, priorReceipt));
   }
   catch (e: any) { error.value = e.message; }
   finally { markingAll = false; incomingDuringReadAll.clear(); busy.value = false; }

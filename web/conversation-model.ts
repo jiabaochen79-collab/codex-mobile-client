@@ -19,7 +19,13 @@ export function processEntries(messages: Message[]): ProcessEntry[] {
 export function conversationTurns(snapshot: Snapshot | null): DisplayTurn[] {
   if (!snapshot) return [];
   const groups: { id: string; status: string; messages: Message[]; legacy: boolean }[] = [];
+  const logical: Message[] = [];
   for (const message of snapshot.messages) {
+    const prior = logical.at(-1);
+    if (message.itemId && prior?.itemId === message.itemId && prior.turnId === message.turnId && prior.role === message.role) prior.text += message.text;
+    else logical.push({ ...message });
+  }
+  for (const message of logical) {
     let group = groups.at(-1);
     if (message.turnId) {
       if (!group || group.id !== message.turnId) { group = { id: message.turnId, status: message.turnStatus ?? 'completed', messages: [], legacy: false }; groups.push(group); }

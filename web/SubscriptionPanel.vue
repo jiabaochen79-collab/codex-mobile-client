@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue';
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue';
 import { Check, ClipboardList, Eye, EyeOff, KeyRound, RefreshCw, ShoppingCart, X } from 'lucide-vue-next';
 import { api as requestApi } from './api';
 import { licenseCodeSchema, subscriptionLabel, type Catalog, type Subscription, type TrialEligibility } from '../src/shared/subscription';
@@ -9,6 +9,7 @@ const api = (path: string, body?: unknown) => requestApi(path, body, props.mode 
 const OrdersPanel = defineAsyncComponent(() => import('./OrdersPanel.vue')); const ordersOpen = ref(false); const purchasePlan = ref<string>();
 const emit = defineEmits<{ close: []; changed: [Subscription] }>();
 const catalog = ref<Catalog>(); const subscription = ref<Subscription>();
+watch(() => subscription.value?.disabled, disabled => { if (disabled) { ordersOpen.value = false; purchasePlan.value = undefined; } }, { flush: 'sync' });
 const trial = ref<TrialEligibility>(); const trialRequest = crypto.randomUUID();
 async function claimTrial() {
   if (!accepted.value || !trial.value?.available || !catalog.value) return; busy.value = true; error.value = '';

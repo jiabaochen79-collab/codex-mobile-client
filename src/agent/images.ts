@@ -99,6 +99,7 @@ export class ConversationImages {
       let bytes = await convert(variant === 'thumbnail' ? 600 : 2000, variant === 'thumbnail' ? 72 : 85);
       if (bytes.length > MAX_IMAGE_BYTES) bytes = await convert(1280, 70);
       if (bytes.length > MAX_IMAGE_BYTES || !this.threads.get(threadId)?.has(imageId)) throw unavailable();
+      this.cacheBytes -= this.cache.get(key)?.length ?? 0;
       this.cache.set(key, bytes); this.cacheBytes += bytes.length;
       while (this.cacheBytes > 16 * 1024 * 1024) { const oldest = this.cache.keys().next().value!; this.cacheBytes -= this.cache.get(oldest)!.length; this.cache.delete(oldest); }
       return { mediaType: 'image/jpeg' as const, data: bytes.toString('base64') };

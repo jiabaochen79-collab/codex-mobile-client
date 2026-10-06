@@ -140,7 +140,8 @@ it('B10 homepage recent tasks render before the full project scan', async () => 
   const recent = task(); expect(Socket.latest.frames.at(-1).command.method).toBe('list');
   Socket.latest.reply({ conversations: [recent], hasMore: false }); await vi.waitFor(() => expect(Socket.latest.frames.at(-1).command.method).toBe('projects'));
   expect(p.groups.recent.rows[0].id).toBe(recent.id);
-  Socket.latest.reply({ projects: [{ id: 'project' }] }); await vi.waitFor(() => expect(Socket.latest.frames.at(-1).command.method).toBe('list'));
+  Socket.latest.reply({ projects: [{ id: 'project', running: true }] }); await vi.waitFor(() => expect(Socket.latest.frames.at(-1).command.method).toBe('list'));
+  expect(Socket.latest.frames.at(-1).command.params.projectId).toBe('project');
   Socket.latest.reply({ conversations: [], hasMore: false }); await loading;
 });
 it('B11 corrupted screenshots unlock the form without losing its content', async () => {

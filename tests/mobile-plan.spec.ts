@@ -72,6 +72,21 @@ test('clears a recovered read error without losing the draft or allowing stale s
   await expect(page.getByTitle('发送消息', { exact: true })).toBeEnabled();
   await expect(page.getByLabel('消息', { exact: true })).toHaveValue('弱网草稿');
 });
+test('keeps unsaved model choices after an outside tap at 320px and 390px', async ({ page }, info) => {
+  const f = await fixture(page, { mode: 'default' });
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.locator('.model-trigger').click();
+    const dialog = page.getByRole('dialog', { name: '模型与思考深度', exact: true });
+    await page.getByLabel('模型', { exact: true }).selectOption('other-model');
+    await page.locator('.modal-backdrop').click({ position: { x: 2, y: 2 } });
+    await expect(dialog).toBeVisible(); await expect(page.getByLabel('模型', { exact: true })).toHaveValue('other-model');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath('model-backdrop-' + width + '.png') });
+    await page.getByTitle('关闭模型设置', { exact: true }).click();
+  }
+  expect(f.commands.filter(c => c.method === 'settings.update')).toEqual([]);
+});
 test('isolates answers and field IDs between requests with the same question ID', async ({ page }) => {
   const f = await fixture(page, { inputRequest: true });
   f.snapshot.requests = ['first', 'second'].map(id => ({ id, kind: 'input', title: id, detail: '', questions: [{ id: 'choice', question: id + ' question', options: [{ label: id + ' answer' }] }] })); f.update();

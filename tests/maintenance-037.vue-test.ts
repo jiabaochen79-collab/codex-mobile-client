@@ -140,7 +140,7 @@ it('Regression: two delete clicks cannot resurrect a deleted attachment', async 
 it('Regression: an open feedback detail refreshes to display a later customer-support reply', async () => {
   let replied = false;
   const ticket = { ticket: { id: 'fixture', state: 'open' }, messages: [{ id: 'question', seq: 1, text: 'question', actor: 'user' }] };
-  api.mockImplementation(async path => path.endsWith('/read') ? { ok: true } : path.endsWith('/fixture') ? { ...ticket, messages: replied ? [...ticket.messages, { id: 'answer', seq: 2, text: 'support reply', actor: 'admin' }] : ticket.messages } : { rows: [], total: 0 });
+  api.mockImplementation(async path => path.endsWith('/read') ? { ok: true } : path.split('?')[0].endsWith('/fixture') ? { ...ticket, messages: replied ? [...ticket.messages, { id: 'answer', seq: 2, text: 'support reply', actor: 'admin' }] : ticket.messages } : { rows: [], total: 0 });
   const p = setup('FeedbackPanel.vue', { mode: 'mobile', deviceId: '123456789' }, true); await p.show({ id: 'fixture' });
   p.text.value = 'unsent draft'; replied = true; api.mockClear(); await vi.advanceTimersByTimeAsync(120000);
   expect(api).toHaveBeenCalled(); expect(p.detail.value.messages.map((m: any) => m.text)).toEqual(['question', 'support reply']); expect(p.text.value).toBe('unsent draft');

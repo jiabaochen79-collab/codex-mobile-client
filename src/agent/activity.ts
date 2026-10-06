@@ -1,7 +1,7 @@
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-type Entry = { size: number; mtime: number; completionId: string };
+type Entry = { size: number; mtime: number; completionId: string; pending?: boolean };
 export class DesktopActivity {
   private cache = new Map<string, Entry>();
   private seen = new Map<string, string>();
@@ -26,10 +26,11 @@ export class DesktopActivity {
         let event: any; try { event = JSON.parse(line); } catch { continue; }
         if (event.type !== 'event_msg') continue;
         const p = event.payload;
-        if (['task_complete', 'turn_aborted', 'task_failed'].includes(p?.type)) { entry.completionId = `${p.turn_id ?? ''}:${event.timestamp ?? ''}`; break; }
+        if (p?.type === 'task_started') { entry.pending = true; continue; }
+        if (['task_complete', 'turn_aborted', 'task_failed'].includes(p?.type)) { entry.pending ??= false; entry.completionId = `${p.turn_id ?? ''}:${event.timestamp ?? ''}`; break; }
       }
     } finally { closeSync(fd); }
-    if (this.cache.size > 2000) this.cache.clear();
+    if (this.cache.size > 20000) this.cache.delete(this.cache.keys().next().value!);
     this.cache.set(file, entry); return entry;
   }
   isUnread(id: string, completionId: string) {
