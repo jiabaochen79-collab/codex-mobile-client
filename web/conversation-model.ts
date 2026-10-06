@@ -23,6 +23,7 @@ export function conversationTurns(snapshot: Snapshot | null): DisplayTurn[] {
     let group = groups.at(-1);
     if (message.turnId) {
       if (!group || group.id !== message.turnId) { group = { id: message.turnId, status: message.turnStatus ?? 'completed', messages: [], legacy: false }; groups.push(group); }
+      else if (message.turnStatus && message.turnStatus !== 'inProgress') group.status = message.turnStatus;
     } else if (!group || message.role === 'user' && group.messages.some(m => m.role === 'user')) {
       group = { id: `legacy:${message.id}`, status: 'completed', messages: [], legacy: true }; groups.push(group);
     }
@@ -32,7 +33,7 @@ export function conversationTurns(snapshot: Snapshot | null): DisplayTurn[] {
     groups.push({ id: snapshot.lastTurnId, status: snapshot.lastTurnStatus!, messages: [], legacy: false });
   }
   return groups.map((group, index) => {
-    const status = group.id === snapshot.turnId && snapshot.busy || group.legacy && index === groups.length - 1 && snapshot.busy ? 'inProgress' : group.status;
+    const status = group.id === snapshot.turnId && snapshot.busy || group.legacy && index === groups.length - 1 && snapshot.busy ? 'inProgress' : group.id === snapshot.lastTurnId && snapshot.lastTurnStatus ? snapshot.lastTurnStatus : group.status;
     let results = group.messages.filter(m => m.role === 'assistant' && m.phase === 'final');
     if (!results.length && status === 'completed') {
       const last = group.messages.findLast(m => m.role === 'assistant' && !m.phase);

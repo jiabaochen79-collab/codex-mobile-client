@@ -3,7 +3,7 @@ import { MAX_ATTACHMENT_TOTAL, MAX_FILE_SIZE, MAX_UPLOAD_CHUNK } from '../src/sh
 import type { Attachment, Command } from '../src/shared/protocol';
 import { preparePhoto } from './prepare-photo';
 
-export type PendingFile = { key: string; file: File; threadId: string; photosOnly: boolean; prepared: boolean; preparing: boolean; attachment?: Attachment; progress: number; error: string; uploading: boolean; cancelled: boolean; preview?: string; controller?: AbortController };
+export type PendingFile = { key: string; file: File; threadId: string; photosOnly: boolean; prepared: boolean; preparing: boolean; attachment?: Attachment; progress: number; error: string; uploading: boolean; cancelled: boolean; removing?: boolean; preview?: string; controller?: AbortController };
 export function useAttachments(options: { request: (command: Command, id?: string) => Promise<any>; thread: () => string | undefined; deviceId?: string; control: () => { clientId: string; epoch?: string; allowed: boolean } }) {
   const all = reactive<PendingFile[]>([]);
   const current = computed(() => all.filter(f => f.threadId === options.thread()));
@@ -81,7 +81,7 @@ export function useAttachments(options: { request: (command: Command, id?: strin
     for(const item of items)await upload(item);
   }
   function discard(item:PendingFile){item.cancelled=true;item.controller?.abort();if(item.preview){URL.revokeObjectURL(item.preview);item.preview=undefined;}const index=all.indexOf(item);if(index>=0)all.splice(index,1);}
-  async function remove(item:PendingFile){item.cancelled=true;item.controller?.abort();try{if(item.attachment)await options.request({method:'upload.remove',params:{attachmentId:item.attachment.id}});discard(item);}catch{item.cancelled=false;item.error='附件未能从电脑移除，请恢复连接后重试删除。';if(!all.includes(item))all.push(item);}}
+  async function remove(item:PendingFile){if(item.removing)return;item.removing=true;item.cancelled=true;item.controller?.abort();try{if(item.attachment)await options.request({method:'upload.remove',params:{attachmentId:item.attachment.id}});discard(item);}catch(e:any){if(e?.code==='NOT_FOUND'){discard(item);return;}item.cancelled=false;item.error='附件未能从电脑移除，请恢复连接后重试删除。';if(!all.includes(item))all.push(item);}finally{item.removing=false;}}
   function clear(threadId?:string){for(const item of [...all])if(!threadId||item.threadId===threadId)discard(item);}
   function cancelPending() { for (const item of [...all]) if (!item.attachment?.ready) void remove(item); }
   function restore(threadId: string, attachments: Attachment[]) {

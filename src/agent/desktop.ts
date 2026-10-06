@@ -46,6 +46,15 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
   const messages: Message[] = [];
   const seen = new Set<string>();
   let reached = before === undefined;
+  const append = (message: Message) => {
+    const count = Math.max(1, Math.ceil(message.text.length / 64000));
+    for (let part = count - 1; part >= 0; part--) {
+      const id = part ? `${message.id}:part:${part}` : message.id;
+      if (!reached) { if (id === before) reached = true; continue; }
+      messages.push({ ...message, id, text: message.text.slice(part * 64000, (part + 1) * 64000), ...(part ? { images: undefined } : {}) });
+      if (messages.length > limit) break;
+    }
+  };
   history: for (let index = turns.length - 1; index >= 0; index--) {
     const turn = turns[index];
     const turnReason = failureReason(turn);
@@ -53,26 +62,25 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
     for (const item of [...(turn.items ?? [])].reverse()) {
       if (!item.id || seen.has(item.id)) continue;
       seen.add(item.id);
-      if (!reached) { if (item.id === before) reached = true; continue; }
       if (item.type === 'userMessage' || item.type === 'steeringUserMessage') {
         const content = userImageContent(item.type === 'steeringUserMessage' ? { ...item, content: item.input } : item); const media = projectImages(content.images);
-        if (content.text || media.length) messages.push({ ...turnMeta, id: item.id, role: 'user', text: content.text.slice(0,64000), ...(media.length ? { images: media } : {}) });
+        if (content.text || media.length) append({ ...turnMeta, id: item.id, role: 'user', text: content.text, ...(media.length ? { images: media } : {}) });
       } else if (item.type === 'plan') {
-        if (typeof item.text === 'string' && item.text) messages.push({ ...turnMeta, id: item.id, role: 'assistant', phase: 'final', text: item.text.slice(0,64000) });
+        if (typeof item.text === 'string' && item.text) append({ ...turnMeta, id: item.id, role: 'assistant', phase: 'final', text: item.text });
       } else if (item.type === 'agentMessage') {
         if (item.text) {
-          const text = item.text.slice(0,64000); const media = projectImages(markdownImages(text));
-          messages.push({ ...turnMeta, id: item.id, role: 'assistant', text, ...(media.length ? { images: media } : {}), phase: item.phase === 'final' || item.phase === 'commentary' ? item.phase : undefined });
+          const text = item.text; const media = projectImages(markdownImages(text));
+          append({ ...turnMeta, id: item.id, role: 'assistant', text, ...(media.length ? { images: media } : {}), phase: item.phase === 'final' || item.phase === 'commentary' ? item.phase : undefined });
         }
       } else if (item.type === 'imageView' && typeof item.path === 'string') {
         const media = projectImages([{ source: item.path, alt: win32.basename(item.path) }]);
-        if (media.length) messages.push({ ...turnMeta, id: item.id, role: 'tool', text: '查看图片', images: media });
+        if (media.length) append({ ...turnMeta, id: item.id, role: 'tool', text: '查看图片', images: media });
       } else if (item.type === 'reasoning') {
         const summary = (item.summary ?? []).filter((part: unknown) => typeof part === 'string').join('\n\n');
-        if (summary) messages.push({ ...turnMeta, id: item.id, role: 'assistant', phase: 'reasoning', text: summary.slice(0,16000) });
+        if (summary) append({ ...turnMeta, id: item.id, role: 'assistant', phase: 'reasoning', text: summary });
       } else if (['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch'].includes(item.type)) {
         const text = item.type === 'commandExecution' ? item.command : item.type === 'fileChange' ? (item.changes ?? []).map((c: any) => c.path).join('\n') : item.tool ?? item.query ?? item.type;
-        messages.push({ ...turnMeta, id: item.id, role: 'tool', text: String(text ?? item.type).slice(0,8000), status: item.status });
+        append({ ...turnMeta, id: item.id, role: 'tool', text: String(text ?? item.type), status: item.status });
       }
       if (messages.length > limit) break history;
     }
@@ -431,7 +439,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     await this.ready(command);
     if (command.method === 'safety.status') {
       await this.follow(command.params.id, false); const snapshot = this.snapshot(20);
-      return { id: snapshot.id, epoch: snapshot.epoch, busy: snapshot.busy, turnId: snapshot.turnId };
+      return { id: snapshot.id, epoch: snapshot.epoch, busy: snapshot.busy, turnId: snapshot.turnId, requests: snapshot.requests.filter(request => request.kind === 'command' || request.kind === 'file').slice(0,100).map(request => ({ id: request.id, kind: request.kind, title: request.title, detail: '' })) };
     }
     if (command.method === 'image.read') {
       this.known(command.params.id); authorize?.();

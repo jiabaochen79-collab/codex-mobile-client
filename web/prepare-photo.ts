@@ -27,19 +27,20 @@ async function validateRaster(file: File) {
   try {
     if (typeof createImageBitmap === 'function') {
       const image = await createImageBitmap(file);
-      try { if (!image.width || !image.height || image.width * image.height > 40000000) throw new Error(); }
+      try { if (!image.width || !image.height || image.width * image.height > 40000000) throw new Error(); return { width: image.width, height: image.height }; }
       finally { image.close(); }
     } else {
       const url = URL.createObjectURL(file); const image = new Image();
-      try { image.src = url; await image.decode(); if (!image.naturalWidth || !image.naturalHeight || image.naturalWidth * image.naturalHeight > 40000000) throw new Error(); }
+      try { image.src = url; await image.decode(); if (!image.naturalWidth || !image.naturalHeight || image.naturalWidth * image.naturalHeight > 40000000) throw new Error(); return { width: image.naturalWidth, height: image.naturalHeight }; }
       finally { image.src = ''; URL.revokeObjectURL(url); }
     }
   } catch { throw new Error('图片损坏或尺寸过大，请重新选择。'); }
 }
-export async function preparePhoto(file: File, photosOnly: boolean): Promise<File> {
+export async function preparePhoto(file: File, photosOnly: boolean, maxPixels = 40000000): Promise<File> {
   const header = new Uint8Array(await file.slice(0,16).arrayBuffer()); const format = rasterFormat(header);
   if (format) {
-    await validateRaster(file);
+    const size = await validateRaster(file);
+    if (size.width * size.height > maxPixels) return new File([await nativeJpeg(file)], photoName(file.name, 'jpg'), { type: 'image/jpeg', lastModified: file.lastModified });
     const name = format.suffix.test(file.name) ? file.name : photoName(file.name,format.extension);
     return name === file.name && file.type === format.type ? file : new File([file],name,{type:format.type,lastModified:file.lastModified});
   }

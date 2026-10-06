@@ -219,7 +219,7 @@ export class Agent {
           if (this.closing || !this.enabled || (this.grants.get(sessionId) ?? 0) <= Date.now()) throw new RemoteError('AUTH', '远控授权已失效。');
           if (this.subscription && !this.subscription.access && !isSafetyCommand(frame.command)) throw new RemoteError('SUBSCRIPTION_REQUIRED', '订阅未开通或已到期。');
           if (!supportsDesktopCommand(this.client.capabilities, frame.command)) throw new RemoteError('UNSUPPORTED', '当前客户端的此项接口尚未适配，操作未执行。');
-          if (!readMethods.has(frame.command.method)) this.authorizeControl(sessionId, m.clientId, frame.controlEpoch);
+          if (!readMethods.has(frame.command.method) || frame.command.method === 'read' && frame.command.params.activate) this.authorizeControl(sessionId, m.clientId, frame.controlEpoch);
         };
         authorize(); const command = frame.command;
         let result: unknown;

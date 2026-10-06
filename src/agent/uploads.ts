@@ -1,4 +1,4 @@
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, truncateSync, writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { extname, join, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -79,7 +79,11 @@ export class UploadStore {
     const source = existsSync(part) ? part : finalized;
     if (lstatSync(source).isSymbolicLink()) throw new RemoteError('INVALID', '附件路径无效。');
     const bytes = hashFile(source, row.size);
-    if (bytes.size !== row.size || bytes.sha256 !== row.sha256) throw new RemoteError('UPLOAD_CORRUPT', '文件校验失败，请重新上传。');
+    if (bytes.size !== row.size || bytes.sha256 !== row.sha256) {
+      authorize(); truncateSync(source, 0); if (source !== part) renameSync(source, part);
+      this.db.prepare('UPDATE uploads SET offset=0,ready=0 WHERE id=? AND owner=? AND committed=0').run(id, owner);
+      throw new RemoteError('UPLOAD_CORRUPT', '文件校验失败，已重置上传进度，请重试。');
+    }
     const extension = extname(row.name).toLowerCase();
     const header = bytes.header;
     const types: Record<string, [string, boolean]> = {

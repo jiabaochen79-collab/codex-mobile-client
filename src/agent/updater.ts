@@ -104,7 +104,7 @@ export class HelperUpdater {
     if (this.abort.signal.aborted) return;
     this.succeeded(); this.state.phase = 'ready'; this.state.progress = 100;
     this.options.store.set('update:ready-report', this.state.version!); this.readyReportAt = 0;
-    await this.reportReady();
+    void this.reportReady();
   }
   private async cached(envelope: SignedRelease) {
     const { manifest } = verifyRelease(envelope, this.options.publicKey); const file = join(this.dir, manifest.sha256 + '.exe');

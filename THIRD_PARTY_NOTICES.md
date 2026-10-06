@@ -13,6 +13,8 @@ The exact resolved versions are in `package-lock.json`; this table is a dependen
 | ws | MIT | WebSocket transport |
 | Zod | MIT | Protocol and configuration validation |
 | Immer | MIT | Desktop state updates |
+| stream-json | BSD-3-Clause | Bounded streaming parsing of large native states and task logs |
+| stream-chain | BSD-3-Clause | Ordered synchronous JSON token processing |
 | @electron/asar | MIT | Read-only inspection of installed desktop archives |
 | Acorn | MIT | Parse versioned IPC definitions without executing desktop code |
 | marked | MIT | Markdown rendering |

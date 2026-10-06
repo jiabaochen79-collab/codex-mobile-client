@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, openSync, closeSync, readSync, statSync } from 'node:fs';
 import type { LocalNotificationEvent } from '../shared/notifications.js';
 import { AgentStore } from './store.js';
+import { setImmediate } from 'node:timers/promises';
+import { readCompactRecord } from './compact-json.js';
 
 export type NotificationSource = { id: string; path: string };
 type Cursor = { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; remainder: string };
@@ -49,13 +51,13 @@ export class CompletionMonitor {
     try {
       const rows = await this.sources(this.store.notificationWatchIds());
       for (const source of rows.slice(0, 400)) if (!this.closed) {
-        try { this.readSource(source); } catch { /* Retry this file without starving other tasks. */ }
+        try { await setImmediate(); if (!this.closed) await this.readSource(source); } catch { /* Retry this file without starving other tasks. */ }
       }
       this.store.pruneNotifications();
     } catch { /* The desktop index may be replacing files while Codex starts. */ }
     finally { this.polling = false; }
   }
-  private readSource(source: NotificationSource) {
+  private async readSource(source: NotificationSource) {
     if (!source.id || !existsSync(source.path)) return;
     const stat = statSync(source.path);
     let previous = this.store.notificationCursor(source.path);
@@ -90,7 +92,14 @@ export class CompletionMonitor {
     for (let i = 0; i < combined.length; i++) if (combined[i] === 10) { lines.push(combined.subarray(start, i).toString('utf8')); start = i + 1; }
     const tail = combined.subarray(start);
     remainder = tail.length <= MAX_REMAINDER_BYTES ? `b64:${tail.toString('base64')}` : '';
-    const next: Cursor = { path: source.path, offset: offset + bytesRead, mtime: stat.mtimeMs, size: stat.size, fileId: currentFileId, baselineAt, remainder };
+    let nextOffset = offset + bytesRead;
+    if (tail.length > MAX_REMAINDER_BYTES) {
+      nextOffset -= tail.length;
+      const record = await readCompactRecord(source.path, nextOffset);
+      if (record) { if (record.value) lines.push(JSON.stringify(record.value)); nextOffset = record.offset; }
+    }
+    if (this.closed) return;
+    const next: Cursor = { path: source.path, offset: nextOffset, mtime: stat.mtimeMs, size: stat.size, fileId: currentFileId, baselineAt, remainder };
     const events: LocalNotificationEvent[] = [];
     for (const line of lines) {
       if (!line.trim()) continue;

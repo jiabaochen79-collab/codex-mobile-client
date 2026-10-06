@@ -2,6 +2,7 @@ import net from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { RemoteError } from '../shared/protocol.js';
+import { compactJson } from './compact-json.js';
 
 function rejection(value: any) {
   const raw = typeof value === 'string' ? value : value?.message;
@@ -14,6 +15,12 @@ function rejection(value: any) {
 export class NativeIpc extends EventEmitter {
   private socket?: net.Socket;
   private buffer = Buffer.alloc(0);
+  private header = Buffer.alloc(4);
+  private headerBytes = 0;
+  private frameBytes = 0;
+  private frameOffset = 0;
+  private compact?: ReturnType<typeof compactJson>;
+  private generation = 0;
   private pending = new Map<string, { method: string; resolve: (v: any) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   private connecting?: Promise<void>;
   clientId = 'initializing-client';
@@ -33,7 +40,7 @@ export class NativeIpc extends EventEmitter {
         clearTimeout(timer);
         reject(new RemoteError('UNAVAILABLE', '连接已关闭。'));
         if (this.socket !== socket) return;
-        this.socket = undefined; this.buffer = Buffer.alloc(0); this.clientId = 'initializing-client';
+        this.socket = undefined; this.resetReader(); this.clientId = 'initializing-client';
         for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new RemoteError('OUTCOME_UNKNOWN', '客户端连接中断，请核对操作结果，勿重复提交。')); }
         this.pending.clear(); this.emit('disconnected');
       });
@@ -68,14 +75,36 @@ export class NativeIpc extends EventEmitter {
     this.send({ type: 'broadcast', method, params, targetClientIds, sourceClientId: this.clientId, version });
   }
   private read(chunk: Buffer) {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-    while (this.buffer.length >= 4) {
-      const size = this.buffer.readUInt32LE();
-      if (size > 64 * 1024 * 1024 || size === 0) { this.close(); return; }
-      if (this.buffer.length < size + 4) return;
-      let message: any;
-      try { message = JSON.parse(this.buffer.subarray(4, size + 4).toString()); } catch { this.close(); return; }
-      this.buffer = this.buffer.subarray(size + 4);
+    const generation = this.generation;
+    for (let offset = 0; offset < chunk.length;) {
+      if (!this.frameBytes) {
+        const length = Math.min(4 - this.headerBytes, chunk.length - offset);
+        chunk.copy(this.header, this.headerBytes, offset, offset + length); this.headerBytes += length; offset += length;
+        if (this.headerBytes < 4) return;
+        const size = this.header.readUInt32LE(); this.headerBytes = 0;
+        if (!size || size > 256 * 1024 * 1024) { this.close(); return; }
+        this.frameBytes = size; this.frameOffset = 0;
+        if (size > 64 * 1024 * 1024) {
+          // Historical command output is not part of mobile snapshots. Stream it
+          // away instead of retaining the oversized native frame.
+          this.compact = compactJson(/(?:^|\.)aggregatedOutput$/, 64 * 1024 * 1024, message => { if (generation === this.generation) this.message(message); }, () => { if (generation === this.generation) this.close(); });
+        } else this.buffer = Buffer.allocUnsafe(size);
+      }
+      const length = Math.min(this.frameBytes - this.frameOffset, chunk.length - offset);
+      if (this.compact) this.compact.write(chunk.subarray(offset, offset + length));
+      else chunk.copy(this.buffer, this.frameOffset, offset, offset + length);
+      if (generation !== this.generation) return;
+      this.frameOffset += length; offset += length;
+      if (this.frameOffset === this.frameBytes) {
+        const compact = this.compact; const buffer = this.buffer;
+        this.compact = undefined; this.buffer = Buffer.alloc(0); this.frameBytes = 0; this.frameOffset = 0;
+        if (compact) compact.end();
+        else { let message: any; try { message = JSON.parse(buffer.toString()); } catch { this.close(); return; } this.message(message); }
+        if (generation !== this.generation) return;
+      }
+    }
+  }
+  private message(message: any) {
       if (!message || typeof message !== 'object' || Array.isArray(message)) { this.close(); return; }
       if (message.type === 'response' || this.tools && ('result' in message || 'error' in message)) {
         const id = String(message.requestId ?? message.id); const pending = this.pending.get(id);
@@ -88,10 +117,10 @@ export class NativeIpc extends EventEmitter {
       } else if (message.type === 'client-discovery-request') {
         try { this.send({ type: 'client-discovery-response', requestId: message.requestId, response: { canHandle: false } }); } catch { this.close(); return; }
       } else if (message.type === 'broadcast') this.emit('broadcast', message);
-    }
   }
+  private resetReader() { this.generation++; this.buffer = Buffer.alloc(0); this.headerBytes = 0; this.frameBytes = 0; this.frameOffset = 0; this.compact?.destroy(); this.compact = undefined; }
   close() {
-    const socket = this.socket; this.socket = undefined; this.connecting = undefined; this.clientId = 'initializing-client'; this.buffer = Buffer.alloc(0);
+    const socket = this.socket; this.socket = undefined; this.connecting = undefined; this.clientId = 'initializing-client'; this.resetReader();
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new RemoteError('OUTCOME_UNKNOWN', '连接已关闭，请核对原会话。')); }
     this.pending.clear(); socket?.destroy(); this.emit('disconnected');
   }

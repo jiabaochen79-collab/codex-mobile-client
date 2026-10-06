@@ -9,7 +9,7 @@ const fragment = new URLSearchParams(location.hash.slice(1));
 const needsExchange = ref(fragment.has('ticket') || fragment.has('oauthCode'));
 function rememberOrder(id: string) { intendedOrder.value = id; history.replaceState(null, '', location.pathname + '?order=' + encodeURIComponent(id)); }
 let reading = false;
-async function load() { if (reading) return; if (!intendedOrder.value) { readError.value = '请从订阅页面打开对应订单。'; return; } reading = true; try { const result = await api('/api/payments/session?orderId=' + encodeURIComponent(intendedOrder.value)); order.value = result.order; ready.value = result.readiness.ready; readError.value = !ready.value && ['pending','confirming'].includes(result.order.status) ? result.readiness.reason : ''; } catch (e: any) { readError.value = e.message; ready.value = false; } finally { reading = false; } }
+async function load() { if (reading) return; if (!intendedOrder.value) { readError.value = '请从订阅页面打开对应订单。'; return; } reading = true; try { const result = await api('/api/payments/session?orderId=' + encodeURIComponent(intendedOrder.value)); order.value = result.order; if (['paid','refunded','closed'].includes(result.order.status)) { operationError.value = ''; externalLink.value = ''; } ready.value = result.readiness.ready; readError.value = !ready.value && ['pending','confirming'].includes(result.order.status) ? result.readiness.reason : ''; } catch (e: any) { readError.value = e.message; ready.value = false; } finally { reading = false; } }
 async function pay() {
   loading.value = true; operationError.value = '';
   try {

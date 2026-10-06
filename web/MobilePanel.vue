@@ -190,10 +190,11 @@ async function suppressVisibleNotification(item: any) {
   const viewed = () => active.value && document.visibilityState === 'visible' && !resultObscured.value && !document.querySelector('dialog[open]') && !chatScroll.awayFromBottom.value && selected.value?.id === item.taskId && snapshot.value && !snapshot.value.busy && snapshot.value.lastTurnId === item.turnId;
   if (!viewed()) return;
   const incoming = new Map<string, any>(); notificationReads.add(incoming);
+  const revision = notificationReadRevision;
   try {
     const result = await api('/api/notifications', undefined, notificationHeaders());
     const row = (result.items ?? []).find((entry: any) => entry.id === item.id);
-    if (!viewed()) return;
+    if (!viewed() || revision !== notificationReadRevision) return;
     if (row && !row.readAt) await readNotification(item.id);
     else {
       const ids = new Set((result.items ?? []).map((entry: any) => entry.id));
@@ -203,8 +204,10 @@ async function suppressVisibleNotification(item: any) {
 }
 async function readNotification(id: string) {
   const incoming = new Map<string, any>(); notificationReads.add(incoming);
+  const revision = ++notificationReadRevision;
   try {
     const result = await api(`/api/notifications/${encodeURIComponent(id)}/read`, undefined, notificationHeaders(), 'POST');
+    if (revision !== notificationReadRevision) return;
     notificationUnread.value = typeof result.throughSequence === 'number'
       ? (Number(result.unread) || 0) + [...incoming.values()].filter(item => item.id !== id && !item.readAt && typeof item.sequence === 'number' && item.sequence > result.throughSequence).length
       : Math.max(0, notificationUnread.value - 1);
@@ -468,7 +471,7 @@ async function read(activate = false) {
   if (!serviceActive.value) {
     if (reading || !hasCapability('safety-status')) return; reading = true;
     const id = selected.value.id; const cycle = modeSyncCycle;
-    try { const state = await request({ method: 'safety.status', params: { id } }); if (active.value && cycle === modeSyncCycle && state.id === id && selected.value?.id === id) { if (!snapshot.value) snapshot.value = { id, title: selected.value.title, epoch: state.epoch, busy: state.busy, turnId: state.turnId, messages: [], requests: [], hasMore: false }; else { snapshot.value.busy = state.busy; snapshot.value.turnId = state.turnId; snapshot.value.epoch = state.epoch; } } }
+    try { const state = await request({ method: 'safety.status', params: { id } }); if (active.value && cycle === modeSyncCycle && state.id === id && selected.value?.id === id) { if (!snapshot.value) snapshot.value = { id, title: selected.value.title, epoch: state.epoch, busy: state.busy, turnId: state.turnId, messages: [], requests: state.requests ?? [], hasMore: false }; else { snapshot.value.busy = state.busy; snapshot.value.turnId = state.turnId; snapshot.value.epoch = state.epoch; snapshot.value.requests = state.requests ?? []; } } }
     catch { /* Keep the last known stop target if the desktop is unavailable. */ }
     finally { reading = false; }
     return;
@@ -641,7 +644,7 @@ function chooseAnswer(request: Interaction, question: NonNullable<Interaction['q
     void nextTick(() => { const field = select.nextElementSibling; if (field instanceof HTMLInputElement) field.focus(); });
     return;
   }
-  const index = Number(mode); answers.value[key] = Number.isInteger(index) ? question.options[index]?.label ?? '' : '';
+  const index = mode === '' ? NaN : Number(mode); answers.value[key] = Number.isInteger(index) ? question.options[index]?.label ?? '' : '';
 }
 function answersComplete(r: Interaction) { return (r.questions ?? []).every(question => !!answers.value[answerKey(r, question)]?.trim()); }
 function invalidateMode() { modeSyncCycle++; modeSynced.value = false; taskSynced.value = false; }

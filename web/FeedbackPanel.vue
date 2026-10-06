@@ -33,10 +33,25 @@ async function restore() { loaded.value = false; try { const saved = await feedb
 async function saveDraft() { if (!loaded.value) return true; try { await feedbackDraft(draftKey.value, { text: text.value, images: images.value.map(i => ({ data: i.data })), contact: contact.value, category: category.value, extra: extra.value, occurredAt: occurredAt.value, requestId: requestId.value, pending: pending.value ? JSON.parse(JSON.stringify(pending.value)) : null }); return true; } catch { error.value = '草稿保存失败，请检查浏览器存储空间。'; return false; } }
 watch([text, images, contact, category, extra, occurredAt, pending], () => { void saveDraft(); }, { deep: true });
 async function show(row: any) { if (busy.value) return; busy.value = true; error.value = ''; try { detail.value = await request('/' + row.id); writing.value = false; await restore(); const through = detail.value.messages.at(-1)?.seq ?? 0; await request('/' + row.id + '/read', { through }); emit('changed'); } catch (e: any) { error.value = e.message; } finally { busy.value = false; } }
+let detailReading = false, disposed = false, detailRevision = 0;
+watch(detail, () => { detailRevision++; }, { flush: 'sync' });
+async function refreshDetail() {
+  const id = detail.value?.ticket.id;
+  if (!id || busy.value || detailReading || disposed || document.visibilityState !== 'visible') return;
+  const revision = detailRevision;
+  detailReading = true;
+  try {
+    const next = await request('/' + id);
+    if (disposed || busy.value || detail.value?.ticket.id !== id || revision !== detailRevision) return;
+    detail.value = next;
+    await request('/' + id + '/read', { through: next.messages.at(-1)?.seq ?? 0 }); emit('changed');
+  } catch { /* Keep the conversation and draft until the next refresh. */ }
+  finally { detailReading = false; }
+}
 async function create() { if (busy.value) return; busy.value = true; try { if (!await saveDraft()) return; detail.value = undefined; writing.value = true; error.value = ''; await restore(); } finally { busy.value = false; } }
 async function back() { if (busy.value) return; busy.value = true; try { if (!await saveDraft()) return; detail.value = undefined; writing.value = false; loaded.value = false; await list(); } finally { busy.value = false; } }
 async function close() { if (busy.value) return; busy.value = true; try { if (await saveDraft()) emit('close'); } finally { busy.value = false; } }
-async function photos(event: Event) { const selected = (event.target as HTMLInputElement).files; const files = selected ? Array.from(selected) : []; (event.target as HTMLInputElement).value = ''; busy.value = true; error.value = ''; try { if (images.value.length + files.length > 3) throw new Error('每条消息最多三张图片。'); for (const original of files) { if (original.size > 5 * 1024 * 1024) throw new Error('每张图片不能超过 5MB。'); const file = await preparePhoto(original, true); if (file.size > 5 * 1024 * 1024) throw new Error('转换后的图片超过 5MB。'); const data = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = reject; reader.readAsDataURL(file); }); images.value.push({ data }); } } catch (e: any) { error.value = e.message; } finally { busy.value = false; } }
+async function photos(event: Event) { const selected = (event.target as HTMLInputElement).files; const files = selected ? Array.from(selected) : []; (event.target as HTMLInputElement).value = ''; busy.value = true; error.value = ''; try { if (images.value.length + files.length > 3) throw new Error('每条消息最多三张图片。'); for (const original of files) { if (original.size > 5 * 1024 * 1024) throw new Error('每张图片不能超过 5MB。'); const file = await preparePhoto(original, true, 25000000); if (file.size > 5 * 1024 * 1024) throw new Error('转换后的图片超过 5MB。'); const data = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = reject; reader.readAsDataURL(file); }); images.value.push({ data }); } } catch (e: any) { error.value = e.message; } finally { busy.value = false; } }
 async function send() {
   busy.value = true; error.value = '';
   try { const id = detail.value?.ticket.id; pending.value ??= { requestId: requestId.value, text: text.value, images: images.value, diagnostics: diagnostics.value, ...(!id ? { category: category.value, occurredAt: new Date(occurredAt.value).getTime(), contact: contact.value } : {}) }; if (!await saveDraft()) { pending.value = undefined; return; }
@@ -55,8 +70,9 @@ async function state(value: string) {
     error.value = e.message;
   } finally { busy.value = false; }
 }
-onMounted(() => list());
-onUnmounted(() => { listRevision++; });
+let polling: ReturnType<typeof setInterval> | undefined;
+onMounted(() => { void list(); polling = setInterval(() => { void refreshDetail(); }, 15000); document.addEventListener('visibilitychange', refreshDetail); });
+onUnmounted(() => { disposed = true; listRevision++; clearInterval(polling); document.removeEventListener('visibilitychange', refreshDetail); });
 </script>
 <template>
   <div class="modal-backdrop feedback-backdrop"><section class="modal feedback-panel" role="dialog" aria-modal="true" aria-label="问题反馈">
