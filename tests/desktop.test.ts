@@ -37,6 +37,11 @@ describe('desktop snapshot projection', () => {
     expect(result.messages.every(message => message.turnStatus === 'interrupted')).toBe(true);
     expect(turn.status).toBe('inProgress');
   });
+  it.each(['systemError', 'notLoaded'])('does not retain a running turn after runtime becomes %s', type => {
+    const result = normalizeSnapshot({ id: 'id', threadRuntimeStatus: { type }, turns: [turn] }, 'epoch');
+    expect(result).toMatchObject({ busy: false, turnId: null, lastTurnStatus: 'interrupted' });
+    expect(result.messages.every(message => message.turnStatus === 'interrupted')).toBe(true);
+  });
   it('keeps a genuinely active long-running turn without imposing an age timeout', () => {
     const result = normalizeSnapshot({ id: 'id', threadRuntimeStatus: { type: 'active' }, turns: [{ ...turn, turnStartedAtMs: 1 }] }, 'epoch');
     expect(result.busy).toBe(true); expect(result.turnId).toBe('turn-1'); expect(result.lastTurnStatus).toBe('inProgress');

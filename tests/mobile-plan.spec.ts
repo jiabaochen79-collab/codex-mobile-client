@@ -72,6 +72,21 @@ test('clears a recovered read error without losing the draft or allowing stale s
   await expect(page.getByTitle('发送消息', { exact: true })).toBeEnabled();
   await expect(page.getByLabel('消息', { exact: true })).toHaveValue('弱网草稿');
 });
+test('closes task-bound model and permission dialogs when a notification opens another task', async ({ page }) => {
+  const f = await fixture(page, { mode: 'default', secondTask: true });
+  const notification = '12345678-1234-4234-8234-123456789abf'; const second = '12345678-1234-4234-8234-123456789abe';
+  await page.route('**/api/notifications/' + notification, route => route.fulfill({ json: { item: { id: notification, taskId: second, readAt: 1 } } }));
+  await page.locator('.model-trigger').click(); await page.getByLabel('模型', { exact: true }).selectOption('other-model');
+  await page.evaluate(url => navigator.serviceWorker.dispatchEvent(new MessageEvent('message', { data: { type: 'notification.open', url } })), origin + '/?notification=' + notification + '&notificationDevice=123456789');
+  await expect(page.getByRole('heading', { name: '另一任务', exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: '模型与思考深度', exact: true })).toHaveCount(0);
+  expect(f.commands.filter(c => c.method === 'settings.update')).toEqual([]);
+  await permissionTrigger(page).click(); await expect(page.getByRole('dialog', { name: '任务权限', exact: true })).toBeVisible();
+  await page.route('**/api/notifications/' + notification, route => route.fulfill({ json: { item: { id: notification, taskId: f.snapshot.id, readAt: 1 } } }));
+  await page.evaluate(url => navigator.serviceWorker.dispatchEvent(new MessageEvent('message', { data: { type: 'notification.open', url } })), origin + '/?notification=' + notification + '&notificationDevice=123456789');
+  await expect(page.getByRole('heading', { name: f.snapshot.title, exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: '任务权限', exact: true })).toHaveCount(0);
+});
 
 test('does not erase a rejected operation when reading and reconnecting succeed', async ({ page }) => {
   const f = await fixture(page, { reject: true, mode: 'default' });

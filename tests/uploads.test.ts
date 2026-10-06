@@ -55,11 +55,11 @@ describe('attachment uploads',()=>{
   });
   it('preserves a valid image and completes concurrent decode requests idempotently',async()=>{
     const bytes=await sharp({create:{width:16,height:16,channels:3,background:'white'}}).png().toBuffer();image(bytes);
-    const results=await Promise.all([store.complete(id,owner),store.complete(id,owner)]);
+    const results=await Promise.all(Array.from({length:16},()=>store.complete(id,owner)));
     expect(results.every(row=>row.ready&&row.mediaType==='image/png')).toBe(true);
     expect(readFileSync(store.resolve([id],owner,thread)[0].path)).toEqual(bytes);
   });
-  it('accepts a duplicate completion whose decoder opens the part file after finalization',async()=>{
+  it('accepts a duplicate completion whose decoder finishes after finalization',async()=>{
     const bytes=await sharp({create:{width:16,height:16,channels:3,background:'white'}}).png().toBuffer();image(bytes);
     const original=sharp.prototype.toBuffer;let calls=0;let first:Promise<unknown>;
     vi.spyOn(sharp.prototype,'toBuffer').mockImplementation(function(this:ReturnType<typeof sharp>){

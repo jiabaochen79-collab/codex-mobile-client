@@ -1,4 +1,4 @@
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { extname, join, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -88,10 +88,11 @@ export class UploadStore {
     };
     if (types[extension] && !types[extension][1]) throw new RemoteError('INVALID', '图片内容与格式不匹配。');
     if (types[extension]) {
-      try { await sharp(part, { limitInputPixels: 40000000, failOn: 'warning' }).resize(1, 1).raw().toBuffer(); }
+      // Decode a bounded snapshot so concurrent validators cannot lock the file during finalization on Windows.
+      try { await sharp(readFileSync(part), { limitInputPixels: 40000000, failOn: 'warning' }).resize(1, 1).raw().toBuffer(); }
       catch {
         authorize();
-        // A concurrent verified completion can rename the file before this decoder opens it.
+        // Another verified completion may have finalized the upload during decoding.
         const current = this.get(id, owner); if (current.ready) return this.info(current);
         throw new RemoteError('INVALID', '图片损坏或尺寸过大，请重新选择。');
       }
@@ -122,7 +123,7 @@ export class UploadStore {
     if (this.db.prepare('SELECT 1 FROM upload_holds WHERE attachment_id=?').get(id)) throw new RemoteError('INVALID', '附件已加入待发送队列，请先移除对应排队消息。');
     rmSync(this.folder(id), { recursive: true, force: true }); this.db.prepare('DELETE FROM uploads WHERE id=?').run(id); return { removed: true };
   }
-  private cleanup() {
+  cleanup() {
     const rows = this.db.prepare('SELECT id,owner FROM uploads WHERE committed=0 AND created<? AND NOT EXISTS(SELECT 1 FROM upload_holds h WHERE h.attachment_id=uploads.id)').all(Date.now() - 86400000);
     for (const row of rows) this.remove(String(row.id), String(row.owner));
   }

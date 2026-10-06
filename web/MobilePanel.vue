@@ -53,6 +53,7 @@ try {
   sessionStorage.setItem(clientKey, clientId.value);
 } catch {}
 const modelModal = ref(false); const modelTarget = ref<'current'|'new'>('current'); const models = ref<ModelOption[]>([]); const chosenModel = ref(''); const chosenEffort = ref(''); const editingSettings = ref<ThreadSettings>();
+let editingTask: { id: string; epoch: string } | undefined;
 const newModel = ref(''); const newEffort = ref(''); const takeoverModal = ref(false); const claimEpoch = ref<string|null>(null);
 const fileInput = ref<HTMLInputElement>(); const activities = reactive<Record<string, Activity>>({}); const drafts = new Map<string,string>();
 try { const saved = JSON.parse(sessionStorage.getItem('chat-drafts:' + props.deviceId) ?? '[]'); if (Array.isArray(saved)) for (const item of saved) if (Array.isArray(item) && typeof item[0] === 'string' && typeof item[1] === 'string') drafts.set(item[0], item[1]); } catch {}
@@ -405,6 +406,7 @@ function cancelNotificationNavigation() {
 }
 function showConversation(conversation: Conversation, activate = false) {
   resetReadRecovery();
+  modelModal.value = false; editingTask = undefined; permissionPicker.value = false; fullAccessConfirm.value = false;
   activateSelected = activate; pendingActivations.clear();
   attachmentPicker.value = false;
   for (const key of Object.keys(answers.value)) delete answers.value[key]; for (const key of Object.keys(answerModes)) delete answerModes[key];
@@ -658,8 +660,8 @@ async function chooseFiles(event:Event,photosOnly=false){const element=event.tar
 const availableEfforts=computed(()=>models.value.find(m=>m.id===chosenModel.value)?.efforts??[]);
 const effortNames:Record<string,string>={none:'默认',minimal:'最少',low:'低',medium:'中',high:'高',xhigh:'极高',max:'最大',ultra:'超高'};
 watch(chosenModel,()=>{if(!availableEfforts.value.includes(chosenEffort.value))chosenEffort.value=models.value.find(m=>m.id===chosenModel.value)?.defaultEffort??availableEfforts.value[0]??'';});
-async function openModels(target:'current'|'new'='current'){try{const result=await request({method:'models',params:{}});models.value=result.models;modelTarget.value=target;editingSettings.value=snapshot.value?.settings;chosenModel.value=(target==='new'?newModel.value:snapshot.value?.settings?.model)||models.value[0]?.id||'';chosenEffort.value=(target==='new'?newEffort.value:snapshot.value?.settings?.effort)||models.value.find(m=>m.id===chosenModel.value)?.defaultEffort||'';modelModal.value=true;moreMenu.value=false;}catch(e:any){error.value=e.message;}}
-async function saveModel(){if(modelTarget.value==='new'){newModel.value=chosenModel.value;newEffort.value=chosenEffort.value;modelModal.value=false;return;}const s=snapshot.value;if(!s||!editingSettings.value||busy.value)return;busy.value=true;invalidateMode();try{const result=await request({method:'settings.update',params:{id:s.id,epoch:s.epoch,revision:editingSettings.value.revision,model:chosenModel.value,effort:chosenEffort.value as any}});if(snapshot.value?.id===s.id)snapshot.value.settings=result.settings;modelModal.value=false;}catch(e:any){error.value=e.message;modelModal.value=false;}finally{invalidateMode();busy.value=false;if(active.value)await read();}}
+async function openModels(target:'current'|'new'='current'){const s=snapshot.value;const cycle=modeSyncCycle;try{const result=await request({method:'models',params:{}});if(!active.value||cycle!==modeSyncCycle||target==='current'&&(!s||snapshot.value?.id!==s.id||snapshot.value?.epoch!==s.epoch))return;models.value=result.models;modelTarget.value=target;editingTask=target==='current'?{id:s!.id,epoch:s!.epoch}:undefined;editingSettings.value=s?.settings;chosenModel.value=(target==='new'?newModel.value:s?.settings?.model)||models.value[0]?.id||'';chosenEffort.value=(target==='new'?newEffort.value:s?.settings?.effort)||models.value.find(m=>m.id===chosenModel.value)?.defaultEffort||'';modelModal.value=true;moreMenu.value=false;}catch(e:any){if(active.value&&cycle===modeSyncCycle)error.value=e.message;}}
+async function saveModel(){if(modelTarget.value==='new'){newModel.value=chosenModel.value;newEffort.value=chosenEffort.value;modelModal.value=false;return;}const s=snapshot.value;if(!s||!editingTask||s.id!==editingTask.id||s.epoch!==editingTask.epoch||!editingSettings.value||busy.value)return;busy.value=true;invalidateMode();try{const result=await request({method:'settings.update',params:{id:s.id,epoch:s.epoch,revision:editingSettings.value.revision,model:chosenModel.value,effort:chosenEffort.value as any}});if(snapshot.value?.id===s.id)snapshot.value.settings=result.settings;modelModal.value=false;}catch(e:any){error.value=e.message;modelModal.value=false;}finally{invalidateMode();busy.value=false;if(active.value)await read();}}
 function openTakeover(){claimEpoch.value=status.value.control?.epoch??null;takeoverModal.value=true;moreMenu.value=false;}
 function openNotifications() { notificationOpen.value = true; moreMenu.value = false; }
 async function takeControl(){busy.value=true;try{await request({method:'control.claim',params:{epoch:claimEpoch.value}});takeoverModal.value=false;}catch(e:any){error.value=e.message;takeoverModal.value=false;}finally{busy.value=false;}}

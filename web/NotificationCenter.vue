@@ -67,7 +67,7 @@ async function load() {
       return incoming ? { ...incoming, readAt: incoming.readAt ?? item.readAt } : item;
     })).sort((a, b) => b.createdAt - a.createdAt);
     nextCursor.value = listResult.nextCursor ?? null;
-    updateUnread((Number(listResult.unread) || 0) + [...incomingDuringLoad.values()].filter(item => !snapshotIds.has(item.id) && !item.readAt).length);
+    updateUnread((Number(listResult.unread) || 0) + [...incomingDuringLoad.values()].filter(item => !item.readAt && (typeof listResult.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence > listResult.throughSequence : !snapshotIds.has(item.id))).length);
     incomingDuringLoad.clear();
     void props.resolveTasks(items.value.map(item => item.taskId));
     await refreshSystemPushState();

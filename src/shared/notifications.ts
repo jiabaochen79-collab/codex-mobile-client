@@ -34,6 +34,7 @@ export type PushSubscriptionInput = z.infer<typeof pushSubscriptionSchema>;
 
 export type NotificationItem = {
   id: string;
+  sequence?: number;
   deviceId: string;
   taskId: string;
   turnId: string;

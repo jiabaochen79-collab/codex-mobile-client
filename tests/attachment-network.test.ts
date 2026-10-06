@@ -5,6 +5,15 @@ import type { Attachment, Command } from '../src/shared/protocol.js';
 
 afterEach(() => vi.restoreAllMocks());
 describe('attachment offset recovery', () => {
+  it('keeps a failed removal visible and permits a later delete retry', async () => {
+    let fail = true;
+    const request = vi.fn(async () => { if (fail) throw new Error('offline'); return { removed: true }; });
+    const uploads = useAttachments({ thread: () => 'task', request, control: () => ({ clientId: 'fixture', allowed: true }) });
+    uploads.restore('task', [{ id: randomUUID(), name: 'fixture.txt', size: 10, offset: 0, ready: false, mediaType: 'text/plain' }]);
+    await uploads.remove(uploads.current.value[0]);
+    expect(uploads.current.value).toHaveLength(1); expect(uploads.current.value[0].error).toContain('重试删除');
+    fail = false; await uploads.remove(uploads.current.value[0]); expect(uploads.current.value).toHaveLength(0);
+  });
   it('removes a reservation confirmed after the user cancelled upload initialization', async () => {
     const task = randomUUID();
     const attachment: Attachment = { id: randomUUID(), name: 'cancelled.txt', size: 4, mediaType: 'text/plain', offset: 0, ready: false };

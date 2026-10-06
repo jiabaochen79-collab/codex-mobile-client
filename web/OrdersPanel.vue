@@ -33,6 +33,15 @@ async function load(force = false) {
   finally { if (revision === readRevision) reading = false; }
 }
 async function showPayment(result: any) { active.value = result.order; payUrl.value = result.payUrl; qr.value = await QRCode.toDataURL(result.payUrl, { width: 260, margin: 2, errorCorrectionLevel: 'M' }); copied.value = false; }
+async function openPayment(event: MouseEvent) {
+  if (loading.value || !active.value) { event.preventDefault(); return; }
+  event.preventDefault();
+  const popup = window.open('about:blank', '_blank'); if (popup) popup.opener = null;
+  loading.value = true; error.value = '';
+  try { await showPayment(await api(`${base}/${active.value.id}/open`, {})); if (popup) popup.location.replace(payUrl.value); else location.assign(payUrl.value); }
+  catch (e: any) { popup?.close(); error.value = e.message; }
+  finally { loading.value = false; }
+}
 async function create() {
   if (!canBuy.value) return; loading.value = true; error.value = ''; readRevision++; reading = false;
   try { await showPayment(await api(base, { planId: selected.value, planRevision: plan.value!.revision, channel: channel.value, termsVersion: PAYMENT_TERMS_VERSION, idempotencyKey: key.value })); key.value = crypto.randomUUID(); accepted.value = false; await load(true); }
@@ -64,7 +73,7 @@ onUnmounted(() => { readRevision++; clearInterval(polling); });
         <button class="text-button" @click="active = undefined; view = 'orders'"><ArrowLeft :size="16"/>返回订单</button>
         <p class="purchase-device">设备 {{ active.deviceId }}</p><h3>{{ active.planName }} · {{ active.days }} 天</h3><strong class="purchase-price">¥{{ money(active.priceFen) }}</strong>
         <p class="purchase-state" :class="{ good: active.status === 'paid' }"><Check v-if="active.status === 'paid'" :size="18"/>{{ paymentStatusNames[active.status] }} · {{ active.serviceStatus }}</p>
-        <template v-if="['pending','confirming'].includes(active.status)"><div class="purchase-payment-actions"><a class="button primary" :href="payUrl" target="_blank" rel="noopener noreferrer" @click="loading && $event.preventDefault()"><ArrowUpRight :size="17"/>{{ active.channel === 'alipay' ? '去支付宝支付' : '打开付款页面' }}</a><button class="text-button" :disabled="loading" @click="copyLink"><Check v-if="copied" :size="16"/><Copy v-else :size="16"/>{{ copied ? '已复制' : '复制付款链接' }}</button></div><p class="muted small">有效至 {{ date(active.expires) }}</p><img v-if="qr" :src="qr" class="purchase-qr" alt="本订单付款二维码" width="260" height="260"></template>
+        <template v-if="['pending','confirming'].includes(active.status)"><div class="purchase-payment-actions"><a class="button primary" :href="payUrl" target="_blank" rel="noopener noreferrer" @click="openPayment"><ArrowUpRight :size="17"/>{{ active.channel === 'alipay' ? '去支付宝支付' : '打开付款页面' }}</a><button class="text-button" :disabled="loading" @click="copyLink"><Check v-if="copied" :size="16"/><Copy v-else :size="16"/>{{ copied ? '已复制' : '复制付款链接' }}</button></div><p class="muted small">有效至 {{ date(active.expires) }}</p><img v-if="qr" :src="qr" class="purchase-qr" alt="本订单付款二维码" width="260" height="260"></template>
         <div v-if="active.lastError" class="alert">{{ active.lastError }}</div>
       </div>
       <template v-else-if="refundTarget">

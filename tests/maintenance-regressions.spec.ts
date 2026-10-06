@@ -1,6 +1,7 @@
 import { expect, test, type Route } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
-const mount = (kind: string) => 'http://127.0.0.1:18890/@fs/' + fileURLToPath(new URL('./component-harness.html', import.meta.url)).replaceAll('\\', '/') + '?component=' + kind;
+const origin = process.env.PLAN_WEB_ORIGIN ?? 'http://127.0.0.1:18890';
+const mount = (kind: string) => origin + '/@fs/' + fileURLToPath(new URL('./component-harness.html', import.meta.url)).replaceAll('\\', '/') + '?component=' + kind;
 const notification = (id: string) => ({ id, deviceId: '123456789', taskId: id, turnId: id, status: 'completed', occurredAt: Date.now(), createdAt: Date.now(), readAt: null, delivery: 'accepted' });
 const update = (phase: string) => ({ phase, progress: 100, version: '0.4.28', autoDownload: true });
 
@@ -12,6 +13,27 @@ for (const included of [false, true]) test(`keeps a notification received during
   await page.evaluate(item => { for (let n = 0; n < 2; n++) window.dispatchEvent(new CustomEvent('remote-notification', { detail: item })); }, notification('new'));
   await held!.fulfill({ json: { items: included ? [notification('new')] : [], unread: included ? 1 : 0 } });
   await expect(page.locator('.notification-item')).toHaveCount(1); await expect(page.locator('#unread')).toHaveText('1');
+});
+test('does not double count incoming notifications beyond the snapshot first page', async ({ page }) => {
+  let held: Route | undefined;
+  const incoming = Array.from({ length: 32 }, (_, i) => ({ ...notification('notification-' + i), sequence: i + 1 }));
+  await page.route('**/api/notifications/settings', route => route.fulfill({ json: { settings: { enabled: false }, pushConfigured: false } }));
+  await page.route('**/api/notifications', route => { held = route; });
+  await page.goto(mount('notifications')); await expect.poll(() => !!held).toBe(true);
+  await page.evaluate(items => items.forEach(detail => window.dispatchEvent(new CustomEvent('remote-notification', { detail }))), incoming);
+  await held!.fulfill({ json: { items: incoming.slice(1, 31), unread: 31, throughSequence: 31, nextCursor: 'fixture' } });
+  await expect(page.locator('#unread')).toHaveText('32'); await expect(page.locator('.notification-item')).toHaveCount(32);
+});
+test('requests a fresh ticket for each payment-button click and permits popup fallback', async ({ page }) => {
+  const order = { id: '12345678-1234-4234-8234-123456789abc', deviceId: '123456789', planName: 'Monthly', priceFen: 600, days: 30, channel: 'alipay', status: 'pending', serviceStatus: '未开通', created: Date.now(), expires: Date.now() + 900000 };
+  let opened = 0;
+  await page.route('**/api/orders', route => route.fulfill({ json: { deviceId: order.deviceId, orders: [order], licenses: [], refunds: [], readiness: { ready: true, channels: ['alipay'] } } }));
+  await page.route('**/api/subscription', route => route.fulfill({ json: { catalog: { plans: [] } } }));
+  await page.route('**/api/orders/*/open', route => route.fulfill({ json: { order, payUrl: `${origin}/pay/#ticket=fixture-${++opened}` } }));
+  await page.goto(mount('orders')); await page.getByTitle('打开付款', { exact: true }).click();
+  await page.evaluate(() => { const urls: string[] = []; (window as any).paymentUrls = urls; window.open = () => ({ opener: null, location: { replace: (url: string) => urls.push(url) }, close() {} }) as any; });
+  for (let count = 2; count <= 3; count++) { await page.getByRole('link', { name: '去支付宝支付', exact: true }).click(); await expect.poll(() => opened).toBe(count); await expect(page.getByRole('button', { name: '复制付款链接', exact: true })).toBeEnabled(); }
+  expect(await page.evaluate(() => (window as any).paymentUrls)).toEqual([origin + '/pay/#ticket=fixture-2', origin + '/pay/#ticket=fixture-3']);
 });
 
 test('serializes update polls and ignores stale readiness after installation', async ({ page }) => {

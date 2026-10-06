@@ -28,7 +28,7 @@ const permissionSettings: Record<PermissionMode, { permissions: string; approval
 };
 
 export function normalizeSnapshot(state: any, epoch: string, limit = 100, images?: ConversationImages): Snapshot {
-  const idle = state.threadRuntimeStatus?.type === 'idle';
+  const idle = runtimeRunning(state.threadRuntimeStatus) === false;
   const turnStatus = (turn: any) => idle && turn?.status === 'inProgress' ? 'interrupted' : turn?.status;
   const failureReason = (turn: any) => {
     const raw = turn?.status === 'failed' ? (typeof turn.error === 'string' ? turn.error : turn.error?.message) : undefined;

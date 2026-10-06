@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "source": "codex-mobile-contracts",
-  "sourceRevision": "90096e7f1bd206909b3aaf4dc1053330f1ca48cb",
+  "sourceRevision": "6c2d1858d71d773040d66b8a771717d57879c14a",
   "files": [
     "commerce.ts",
     "feedback.ts",

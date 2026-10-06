@@ -20,6 +20,10 @@ describe('native IPC transport', () => {
     });
     expect(client.clientId).toBe('fixture-client'); const result = await client.request('test', { value: '你好' }); expect(result.result.echoed.value).toBe('你好');
   });
+  it('preserves actionable rejection reasons without exposing credential fields or extra lines', async () => {
+    await start((socket, m) => socket.write(frame(m.method === 'initialize' ? { type: 'response', requestId: m.requestId, resultType: 'success', result: { clientId: 'fixture' } } : { type: 'response', requestId: m.requestId, resultType: 'error', error: { code: 'PERMISSION_DENIED', message: 'workspace is read-only; token=fixture-secret\nprivate details' } })));
+    await expect(client.request('write', {})).rejects.toMatchObject({ code: 'CLIENT_DENIED', message: '电脑客户端拒绝操作：workspace is read-only; token=[redacted]' });
+  });
   it('does not claim it can handle requests for the desktop client', async () => {
     let response: any;
     await start((socket, m) => { if (m.method === 'initialize') socket.write(frame({ type: 'response', requestId: m.requestId, resultType: 'success', result: { clientId: 'fixture' } })); else response = m; });

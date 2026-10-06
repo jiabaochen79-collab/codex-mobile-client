@@ -3,6 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { RemoteError } from '../shared/protocol.js';
 
+function rejection(value: any) {
+  const raw = typeof value === 'string' ? value : value?.message;
+  const reason = typeof raw === 'string' ? raw.split(/[\r\n]/, 1)[0].replace(/[\x00-\x1f\x7f]/g, '').replace(/\bBearer\s+\S+|\bsk-[A-Za-z0-9_-]+/gi, '[redacted]').replace(/\b(password|passwd|authorization|cookie|api[_-]?key|token|secret)\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1=[redacted]').trim().slice(0, 400) : '';
+  const code = ['NOT_FOUND', 'INVALID', 'UNSUPPORTED', 'CLIENT_UNAVAILABLE', 'BUSY'].includes(value?.code) ? value.code : value?.code === 'PERMISSION_DENIED' ? 'CLIENT_DENIED' : 'CLIENT_REJECTED';
+  return new RemoteError(code, reason ? `电脑客户端拒绝操作：${reason}` : '原客户端未接受此操作，请检查目标会话。');
+}
+
 // Codex 26.901 uses length-prefixed JSON on its current-user IPC pipe.
 export class NativeIpc extends EventEmitter {
   private socket?: net.Socket;
@@ -70,7 +77,7 @@ export class NativeIpc extends EventEmitter {
         const id = String(message.requestId ?? message.id); const pending = this.pending.get(id);
         if (pending) {
           this.pending.delete(id); clearTimeout(pending.timer);
-          if (message.error || !this.tools && message.resultType === 'error') pending.reject(new RemoteError('CLIENT_REJECTED', '原客户端未接受此操作，请检查目标会话。'));
+          if (message.error || !this.tools && message.resultType === 'error') pending.reject(rejection(message.error ?? message.result));
           else if (!this.tools && (message.resultType !== 'success' || message.method !== undefined && message.method !== pending.method)) pending.reject(new RemoteError('OUTCOME_UNKNOWN', '客户端返回格式不兼容，操作结果未确认，请在电脑核对，勿重复提交。'));
           else pending.resolve(message);
         }

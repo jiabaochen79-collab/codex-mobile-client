@@ -69,8 +69,8 @@ export function useAttachments(options: { request: (command: Command, id?: strin
     all.push(...items);
     for(const item of items)await upload(item);
   }
-  function discard(item:PendingFile){item.cancelled=true;item.controller?.abort();if(item.preview)URL.revokeObjectURL(item.preview);const index=all.indexOf(item);if(index>=0)all.splice(index,1);}
-  async function remove(item:PendingFile){discard(item);if(item.attachment){try{await options.request({method:'upload.remove',params:{attachmentId:item.attachment.id}});}catch{}}}
+  function discard(item:PendingFile){item.cancelled=true;item.controller?.abort();if(item.preview){URL.revokeObjectURL(item.preview);item.preview=undefined;}const index=all.indexOf(item);if(index>=0)all.splice(index,1);}
+  async function remove(item:PendingFile){item.cancelled=true;item.controller?.abort();try{if(item.attachment)await options.request({method:'upload.remove',params:{attachmentId:item.attachment.id}});discard(item);}catch{item.cancelled=false;item.error='附件未能从电脑移除，请恢复连接后重试删除。';if(!all.includes(item))all.push(item);}}
   function clear(threadId?:string){for(const item of [...all])if(!threadId||item.threadId===threadId)discard(item);}
   function cancelPending() { for (const item of [...all]) if (!item.attachment?.ready) void remove(item); }
   function restore(threadId: string, attachments: Attachment[]) {

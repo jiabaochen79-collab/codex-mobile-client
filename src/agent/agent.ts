@@ -307,7 +307,7 @@ export class Agent {
       this.sends.finish(current); this.notifyQueue(current.conversation); this.updateSubscriptions();
     } catch (e) {
       const row = this.sends.entries(entry.conversation).find(r => r.id === entry.id); if (!row) return;
-      if (!dispatched && e instanceof RemoteError && ['BUSY', 'QUEUE_RETRY', 'CLIENT_UNAVAILABLE', 'OFFLINE'].includes(e.code)) { if (pending) this.sends.mark(row, 'pending', e.code === 'BUSY' ? null : e.message); this.notifyQueue(entry.conversation); this.updateSubscriptions(); return; }
+      if (!dispatched && e instanceof RemoteError && (['BUSY', 'QUEUE_RETRY', 'CLIENT_UNAVAILABLE', 'OFFLINE'].includes(e.code) || !taskRead && ['CLIENT_REJECTED', 'OUTCOME_UNKNOWN', 'UNAVAILABLE'].includes(e.code))) { if (pending) this.sends.mark(row, 'pending', e.code === 'BUSY' ? null : e.message); this.notifyQueue(entry.conversation); this.updateSubscriptions(); return; }
       if (!taskRead && e instanceof RemoteError && e.code === 'NOT_FOUND') { for (const item of this.sends.entries(entry.conversation)) this.sends.finish(item); }
       else if (!pending) return;
       else { this.sends.mark(row, dispatched ? 'uncertain' : 'paused', dispatched ? '发送结果待核对，不会自动重发；请查看原任务后处理。' : e instanceof RemoteError ? e.message : '待发送内容暂不可用，请核对后继续。'); this.sends.pause('前一条消息需要处理，队列已暂停。', entry.conversation); }
@@ -364,6 +364,7 @@ export class Agent {
   }
   private async updateBlockers() {
     const reasons: string[] = [];
+    this.uploads.cleanup();
     if (this.queued || this.mediaQueued || this.pumping) reasons.push('有正在处理的远程操作');
     if (this.sends.entries().length) reasons.push('有尚未发送的队列消息');
     if (this.store.db.prepare('SELECT 1 FROM uploads WHERE committed=0 AND ready=0').get()) reasons.push('有尚未完成的附件上传');

@@ -6,8 +6,41 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Agent } from '../src/agent/agent.js';
 import { CodexDesktop } from '../src/agent/desktop.js';
+import { RemoteError } from '../src/shared/protocol.js';
 
 describe('queue recovery during rollout replacement', () => {
+  it.each(['CLIENT_REJECTED', 'OUTCOME_UNKNOWN', 'UNAVAILABLE'])('recovers a %s read without replaying a dispatched send', async code => {
+    const dir = mkdtempSync(join(tmpdir(), 'queue-read-error-')); const task = randomUUID(), session = randomUUID();
+    let healthy = false, dispatched = false, sends = 0;
+    const adapter: any = { close() {}, execute: async (command: any, _id: string, authorize?: () => void) => {
+      if (command.method === 'read') { if (!healthy) throw new RemoteError(code, 'transient read failure'); return { id: task, epoch: 'epoch', busy: false, requests: [], nativeQueuedCount: 0, messages: [] }; }
+      sends++; authorize?.(); dispatched = true; throw new RemoteError('OUTCOME_UNKNOWN', 'send acknowledgement lost');
+    } };
+    const agent = new Agent({ origin: 'http://127.0.0.1:8790', dir, adapter }); const state = agent as any;
+    vi.spyOn(state.store, 'protect').mockImplementation((value: any) => value);
+    state.notifyQueue = () => {}; state.updateSubscriptions = () => {};
+    state.queueAuthorization = async () => ({ allowed: true, validForMs: 10000 });
+    state.enabled = true; state.connection = 'online'; state.grants.set(session, Date.now() + 60000);
+    try {
+      const row = state.sends.add(randomUUID(), task, session, 'epoch', { text: 'queued', attachments: [] });
+      await state.dispatchQueued(row); expect(state.sends.get(row.id, task).state).toBe('pending'); expect(sends).toBe(0);
+      healthy = true; await state.dispatchQueued(state.sends.get(row.id, task));
+      expect(dispatched).toBe(true); expect(sends).toBe(1); expect(state.sends.get(row.id, task).state).toBe('uncertain');
+      await state.dispatchQueued(state.sends.get(row.id, task)); expect(sends).toBe(1);
+    } finally { await agent.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('cleans only expired unheld reservations before checking update blockers', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'update-upload-cleanup-'));
+    const agent = new Agent({ origin: 'http://127.0.0.1:8790', dir, adapter: { close() {} } as any }); const state = agent as any;
+    const begin = () => state.uploads.begin(randomUUID(), 'owner', { id: randomUUID(), name: 'fixture.txt', size: 10, sha256: 'a'.repeat(64) });
+    try {
+      const expired = begin(); state.store.db.prepare('UPDATE uploads SET created=? WHERE id=?').run(Date.now() - 2 * 86400000, expired.id);
+      expect(await state.updateBlockers()).toEqual([]); expect(() => state.uploads.status(expired.id, 'owner')).toThrow();
+      const held = begin(); state.store.db.prepare('INSERT INTO upload_holds VALUES(?,?)').run('queue-fixture', held.id);
+      state.store.db.prepare('UPDATE uploads SET created=? WHERE id=?').run(Date.now() - 2 * 86400000, held.id);
+      expect(await state.updateBlockers()).toContain('有尚未完成的附件上传'); expect(state.uploads.status(held.id, 'owner')).toBeDefined();
+    } finally { await agent.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
   it('preserves queued messages while a live task rollout is temporarily missing', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'queue-read-recovery-'));
     const task = randomUUID(), session = randomUUID(), file = join(dir, 'task.jsonl');
