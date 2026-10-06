@@ -23,12 +23,19 @@ export function useAttachments(options: { request: (command: Command, id?: strin
         item.file = file; item.prepared = true; item.preparing = false;
         item.preview = /^image\/(png|jpeg|webp|gif)$/.test(file.type) ? URL.createObjectURL(file) : undefined;
       }
+      if (item.attachment) {
+        try { item.attachment = await options.request({method:'upload.status',params:{attachmentId:item.attachment.id}}); }
+        catch (error: any) {
+          if (error?.code !== 'NOT_FOUND' || item.file.size === 0) throw error;
+          item.attachment = undefined; item.key = crypto.randomUUID(); item.progress = 0;
+        }
+      }
       if (!item.attachment) {
         const hash = await crypto.subtle.digest('SHA-256', await item.file.arrayBuffer());
         const sha256 = Array.from(new Uint8Array(hash), n => n.toString(16).padStart(2,'0')).join('');
         if (item.cancelled) return;
         item.attachment = await options.request({ method:'upload.begin', params:{id:item.threadId,name:item.file.name,size:item.file.size,mediaType:item.file.type,sha256} }, item.key);
-      } else item.attachment = await options.request({method:'upload.status',params:{attachmentId:item.attachment.id}});
+      }
       if (item.cancelled) { await remove(item); return; }
       let chunkSize = 16 * 1024; let failures = 0;
       while (item.attachment!.offset < item.file.size && !item.cancelled) {

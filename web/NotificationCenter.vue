@@ -84,7 +84,7 @@ async function refreshSystemPushState() {
   try {
     const registration = await pushRegistration();
     const subscription = await registration.pushManager.getSubscription();
-    if (!subscription || Notification.permission !== 'granted') { systemPushState.value = 'needed'; return; }
+    if (!subscription || Notification.permission !== 'granted' || !subscriptionKeyMatches(subscription)) { systemPushState.value = 'needed'; return; }
     const result = await api('/api/push/subscriptions/status', { endpoint: subscription.endpoint }, headers());
     systemPushState.value = result.active === true ? 'enabled' : 'needed';
     saveLocalSubscription(result.active === true ? result.id : undefined);
@@ -100,6 +100,12 @@ function decodeKey(value: string) {
   const bytes = atob(value.replace(/-/g, '+').replace(/_/g, '/') + padding);
   return Uint8Array.from(bytes, char => char.charCodeAt(0));
 }
+function subscriptionKeyMatches(subscription: PushSubscription) {
+  const saved = subscription.options.applicationServerKey;
+  if (!saved || !vapidPublicKey.value) return false;
+  const actual = new Uint8Array(saved); const expected = decodeKey(vapidPublicKey.value);
+  return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+}
 async function registerPush() {
   if (!pushConfigured.value || !vapidPublicKey.value) { systemPushState.value = 'unknown'; return '站内通知已开启；服务器暂未提供系统推送。'; }
   if (isIos && !standalone.value) { systemPushState.value = 'unknown'; return browserMessage.value; }
@@ -109,7 +115,12 @@ async function registerPush() {
   const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
   if (permission !== 'granted') return '系统通知权限未开启，站内通知仍可用。';
   const registration = await pushRegistration();
-  const subscription = await registration.pushManager.getSubscription() ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodeKey(vapidPublicKey.value) });
+  let subscription = await registration.pushManager.getSubscription();
+  if (subscription && !subscriptionKeyMatches(subscription)) {
+    if (!await subscription.unsubscribe()) throw new Error('旧推送订阅未能移除，请重试。');
+    subscription = null;
+  }
+  subscription ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodeKey(vapidPublicKey.value) });
   const json = subscription.toJSON();
   if (!json.endpoint || !json.keys?.p256dh || !json.keys.auth) throw new Error('浏览器未返回有效的推送订阅。');
   const result = await api('/api/push/subscriptions', { endpoint: json.endpoint, keys: { p256dh: json.keys.p256dh, auth: json.keys.auth }, browser: isIos ? 'ios-home-screen' : /Android/i.test(userAgent) ? 'android-chrome' : 'desktop' }, headers());
@@ -181,7 +192,6 @@ function onIncoming(event: Event) {
   if (markingAll) incomingDuringReadAll.set(item.id, item);
   if (readingOne) incomingDuringReadOne.set(item.id, item);
   if (loading.value) incomingDuringLoad.set(item.id, item);
-  listRevision++;
   const index = items.value.findIndex(row => row.id === item.id);
   if (index >= 0) { if (items.value[index].readAt) item.readAt ??= items.value[index].readAt; items.value[index] = item; }
   else { items.value.unshift(item); if (!item.readAt) updateUnread(unread.value + 1); }
@@ -190,15 +200,15 @@ function onIncoming(event: Event) {
 async function loadMore() {
   if (loadingMore.value || busy.value || !nextCursor.value) return;
   loadingMore.value = true; error.value = '';
-  const revision = listRevision;
+  const revision = listRevision; const cursor = nextCursor.value;
   try {
-    const result = await api(`/api/notifications?cursor=${encodeURIComponent(nextCursor.value)}`, undefined, headers());
-    if (revision !== listRevision) return;
+    const result = await api(`/api/notifications?cursor=${encodeURIComponent(cursor)}`, undefined, headers());
+    if (revision !== listRevision || cursor !== nextCursor.value) return;
     const page = (result.items ?? []) as NotificationItem[];
     const ids = new Set(items.value.map(item => item.id));
     items.value.push(...page.filter(item => !ids.has(item.id)));
     nextCursor.value = result.nextCursor ?? null;
-    updateUnread(Number(result.unread) || 0);
+    if (revision === listRevision) updateUnread(Math.max(unread.value, Number(result.unread) || 0));
     void props.resolveTasks(page.map(item => item.taskId));
   } catch (e: any) { if (revision === listRevision) error.value = e.message; }
   finally { loadingMore.value = false; }

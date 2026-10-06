@@ -58,6 +58,7 @@ function applyDirectory(result: { devices: PairedDevice[] }) {
   if (activeId.value && !current.value?.authorized) expired(activeId.value, current.value?.disabled ? '该设备已被管理员封禁，请联系运营方。' : '授权已失效，请使用当前连接密码重新连接。');
 }
 async function refreshDirectory(restore = false) {
+  if (loading.value && !restore) return;
   const revision = ++directoryRevision; loading.value = true;
   try { const result = await api(restore ? '/api/paired-devices/restore' : '/api/paired-devices', restore ? {} : undefined); if (!disposed && revision === directoryRevision) applyDirectory(result); }
   finally { if (revision === directoryRevision) loading.value = false; }

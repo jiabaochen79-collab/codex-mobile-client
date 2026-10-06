@@ -45,9 +45,11 @@ export class UploadStore {
     const reserved = Number(this.db.prepare('SELECT COALESCE(sum(size-offset),0) AS bytes FROM uploads WHERE committed=0').get()!.bytes);
     if (disk.bavail * disk.bsize < BigInt(reserved + params.size + 128 * 1024 ** 2)) throw new RemoteError('UPLOAD_STORAGE', '电脑剩余存储空间不足，请清理电脑存储后重试。');
     const folder = this.folder(id); mkdirSync(folder);
-    const fd = openSync(join(folder, 'upload.part'), 'wx'); closeSync(fd);
     const row: Upload = { id, owner, conversation: params.id, name: params.name, size: params.size, sha256: params.sha256, mediaType: 'application/octet-stream', offset: 0, ready: 0, committed: 0, created: Date.now() };
-    this.db.prepare('INSERT INTO uploads VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(row.id, row.owner, row.conversation, row.name, row.size, row.sha256, row.mediaType, 0, 0, 0, row.created);
+    try {
+      const fd = openSync(join(folder, 'upload.part'), 'wx'); closeSync(fd);
+      this.db.prepare('INSERT INTO uploads VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(row.id, row.owner, row.conversation, row.name, row.size, row.sha256, row.mediaType, 0, 0, 0, row.created);
+    } catch (error) { rmSync(folder, { recursive: true, force: true }); throw error; }
     return this.info(row);
   }
   status(id: string, owner: string) { return this.info(this.get(id, owner)); }

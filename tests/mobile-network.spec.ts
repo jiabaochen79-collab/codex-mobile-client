@@ -142,7 +142,7 @@ for (const source of ['list', 'projects', 'search'] as const) test(`clears only 
 
 test('detects a blackholed socket even when the browser still reports it open', async ({ page }) => {
   await page.clock.install(); const f = await fixture(page); f.silent();
-  await page.clock.runFor(81000); await expect.poll(f.connects).toBeGreaterThan(1);
+  await page.clock.runFor(101000); await expect.poll(f.connects).toBeGreaterThan(1);
   expect(f.frames.some(f => f.type === 'ping')).toBe(true);
   expect(f.sends()).toBe(0);
 });

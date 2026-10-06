@@ -20,7 +20,7 @@ export const permissionModeSchema = z.enum(['ask', 'approve', 'full']);
 export type PermissionMode = z.infer<typeof permissionModeSchema>;
 export const commandSchema = z.discriminatedUnion('method', [
   z.object({ method: z.literal('list'), params: z.object({ cursor: z.union([z.literal('new'), uid]).optional(), offset: z.number().int().min(0).max(10000).default(0), projectId: z.string().min(1).max(200).nullable().optional(), query: z.string().trim().max(200).optional() }).strict() }).strict(),
-  z.object({ method: z.literal('read'), params: z.object({ id: uid, limit: z.number().int().min(20).max(500).default(100), activate: z.boolean().optional(), ifRevision: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict() }).strict(),
+  z.object({ method: z.literal('read'), params: z.object({ id: uid, limit: z.number().int().min(20).max(500).default(100), before: z.string().min(1).max(200).optional(), activate: z.boolean().optional(), ifRevision: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict() }).strict(),
   z.object({ method: z.literal('safety.status'), params: z.object({ id: uid }).strict() }).strict(),
   z.object({ method: z.literal('image.read'), params: z.object({ id: uid, imageId: z.string().regex(/^[a-f0-9]{64}$/), variant: z.enum(['thumbnail', 'full']) }).strict() }).strict(),
   z.object({ method: z.literal('send'), params: z.object({ id: uid, text: z.string().trim().max(32000), epoch: epochSchema, attachmentIds: z.array(uid).max(5).optional(), mode: z.enum(['queue','steer']).optional(), turnId: epochSchema.optional() }).strict().refine(p => (!!p.text || !!p.attachmentIds?.length) && (p.mode !== 'steer' || !!p.turnId)) }).strict(),
@@ -74,7 +74,7 @@ export const MAX_IMAGE_BYTES = 1024 * 1024;
 export type Message = { id: string; role: 'user' | 'assistant' | 'tool'; text: string; images?: MessageImage[]; status?: string; turnId?: string; turnStatus?: string; turnReason?: string; phase?: 'commentary' | 'final' | 'reasoning' };
 export type Interaction = { id: string | number; kind: 'command' | 'file' | 'input' | 'plan' | 'unsupported'; title: string; detail: string; plan?: { turnId: string; revision: string }; questions?: { id: string; question: string; options: { label: string; description?: string }[] }[] };
 export type QueuedMessage = { id: string; text: string; attachments: { id: string; name: string }[]; state: 'pending' | 'paused' | 'sending' | 'uncertain'; reason: string | null; created: number };
-export type Snapshot = { id: string; title: string; epoch: string; turnId: string | null; busy: boolean; messages: Message[]; requests: Interaction[]; hasMore: boolean; settings?: ThreadSettings; completionId?: string; revision?: string; lastTurnStatus?: string; lastTurnId?: string | null; lastTurnReason?: string; nativeQueuedCount?: number | null; queued?: QueuedMessage[] };
+export type Snapshot = { id: string; title: string; epoch: string; turnId: string | null; busy: boolean; messages: Message[]; requests: Interaction[]; hasMore: boolean; historyCursor?: string; settings?: ThreadSettings; completionId?: string; revision?: string; lastTurnStatus?: string; lastTurnId?: string | null; lastTurnReason?: string; nativeQueuedCount?: number | null; queued?: QueuedMessage[] };
 export interface DesktopAdapter {
   updateBlockers?(): Promise<string[]>;
   notificationSources?(taskIds?: string[]): Promise<{ id: string; path: string }[]>;

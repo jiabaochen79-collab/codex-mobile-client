@@ -316,11 +316,13 @@ export class Agent {
     });
   }
   private pumpQueue() {
-    if (this.updateFrozen || this.pumping || this.closing || !this.enabled || this.connection !== 'online' || !this.client.available || this.queued || this.safetyQueued) return;
+    if (this.updateFrozen || this.pumping || this.closing || !this.enabled || this.connection !== 'online' || !this.client.available || this.safetyQueued) return;
     const first = new Map<string, QueueEntry>(); for (const row of this.sends.entries()) if (!first.has(row.conversation)) first.set(row.conversation, row);
     const heads = [...first.values()];
     if (!heads.length) return; const entry = heads[this.queueCursor++ % heads.length]; this.pumping = true; this.queued++;
-    this.queue = this.queue.then(async () => { try { await this.dispatchQueued(entry); } finally { this.pumping = false; this.queued--; } });
+    this.commandWork.push({ priority: 1, work: async () => { try { await this.dispatchQueued(entry); } finally { this.pumping = false; this.queued--; } } });
+    this.commandWork.sort((a, b) => a.priority - b.priority);
+    this.queue = this.queue.then(async () => { await this.commandWork.shift()?.work(); });
   }
   private async dispatchQueued(entry: QueueEntry) {
     let dispatched = false; let taskRead = false; let pending = entry.state === 'pending';
@@ -433,7 +435,7 @@ export class Agent {
   }
   async orders(action: 'list' | 'create' | 'open' | 'close' | 'refund', input?: unknown, orderId?: string) {
     if (!this.credentials) throw new RemoteError('OFFLINE', '设备尚未连接服务器。');
-    const path = `/api/subscription/device/orders${action === 'open' || action === 'close' || action === 'refund' ? `/${uid.parse(orderId)}/${action}` : ''}`;
+    const path = `/api/subscription/device/orders${action === 'open' || action === 'close' || action === 'refund' ? `/${uid.parse(orderId)}/${action}` : action === 'list' ? `?page=${z.number().int().min(1).max(10000).parse(input ?? 1)}` : ''}`;
     const response = await fetch(`${this.origin}${path}`, { method: action === 'list' ? 'GET' : 'POST', headers: { Authorization: `Bearer ${this.credentials.secret}`, 'X-Device-Id': this.credentials.id, ...(action === 'list' ? {} : { 'Content-Type': 'application/json' }) }, ...(action === 'list' ? {} : { body: JSON.stringify(action === 'create' ? checkoutSchema.parse(input) : action === 'refund' ? refundRequestSchema.parse(input) : {}) }), signal: AbortSignal.timeout(15000), redirect: 'error' });
     const result = await response.json() as any; if (!response.ok) throw new RemoteError(result.error?.code ?? 'UNAVAILABLE', result.error?.message ?? '订单服务暂不可用。'); return result;
   }
@@ -493,7 +495,7 @@ export async function createLocalServer(agent: Agent, options: { port: number; w
   app.post('/local/update/:action', async req => agent.update(z.object({ action: z.enum(['check', 'download', 'cancel', 'install', 'settings']) }).parse(req.params).action, req.body));
   for (const path of ['/local/feedback', '/local/feedback/*']) app.route({ url: path, method: ['GET', 'POST'], bodyLimit: 22 * 1024 * 1024, handler: async (req, reply) => {
     const requestUrl = new URL(req.url, origin); const pathname = requestUrl.pathname; const prefix = '/local/feedback';
-    const suffix = pathname.slice(prefix.length); const validSuffix = suffix === '' || /^\/(?:unread|images\/[a-f0-9-]{36}|[a-f0-9-]{36}(?:\/(?:messages|read|state))?)$/.test(suffix);
+    const suffix = pathname.slice(prefix.length); const validSuffix = suffix === '' || /^\/(?:unread|uploads(?:\/[a-f0-9-]{36}(?:\/chunks)?)?|images\/[a-f0-9-]{36}|[a-f0-9-]{36}(?:\/(?:messages|read|state))?)$/.test(suffix);
     if (!validSuffix || !pathname.startsWith(prefix)) throw new RemoteError('INVALID', '反馈地址无效。');
     const upstreamSuffix = suffix + requestUrl.search;
     const response = await agent.serviceRequest('/api/feedback/device' + upstreamSuffix, { method: req.method, ...(req.method === 'POST' ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body) } : {}) });
@@ -501,7 +503,7 @@ export async function createLocalServer(agent: Agent, options: { port: number; w
     if (suffix.endsWith('/read') || req.method === 'POST') void agent.refreshFeedbackUnread(true);
     return reply.type(response.headers.get('content-type')?.startsWith('image/') ? 'image/jpeg' : 'application/json; charset=utf-8').send(bytes);
   } });
-  app.get('/local/orders', async () => agent.orders('list'));
+  app.get('/local/orders', async req => agent.orders('list', z.object({ page: z.coerce.number().int().min(1).max(10000).default(1) }).parse(req.query).page));
   app.post('/local/orders', async req => agent.orders('create', checkoutSchema.parse(req.body)));
   app.post('/local/orders/:id/open', async req => agent.orders('open', undefined, z.object({ id: uid }).parse(req.params).id));
   app.post('/local/orders/:id/close', async req => agent.orders('close', undefined, z.object({ id: uid }).parse(req.params).id));

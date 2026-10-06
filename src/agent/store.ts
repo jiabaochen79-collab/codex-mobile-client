@@ -94,7 +94,11 @@ export class AgentStore {
     return this.db.prepare('SELECT eventId,taskId,turnId,status,occurredAt,attempts,lastAttempt,createdAt,ackedAt FROM notification_outbox WHERE ackedAt IS NULL AND (lastAttempt IS NULL OR lastAttempt<?) ORDER BY createdAt LIMIT 20').all(now - 10000) as { eventId: string; taskId: string; turnId: string; status: 'completed' | 'failed' | 'interrupted'; occurredAt: number; attempts: number; lastAttempt: number | null; createdAt: number; ackedAt: number | null }[];
   }
   markNotificationAttempt(eventId: string) { this.db.prepare('UPDATE notification_outbox SET attempts=attempts+1,lastAttempt=? WHERE eventId=? AND ackedAt IS NULL').run(Date.now(), eventId); }
-  syncNotificationClock(origin: string, serverTime: number, localTime = Date.now()) { this.set(`notification:clock:${hash(origin)}`, String(serverTime - localTime)); }
+  syncNotificationClock(origin: string, serverTime: number, localTime = Date.now()) {
+    const key = `notification:clock:${hash(origin)}`; const previous = this.get(key);
+    if (previous !== null) this.db.prepare('UPDATE notification_outbox SET serverOccurredAt=MAX(0,ROUND(occurredAt+?)) WHERE serverOccurredAt IS NULL AND ackedAt IS NULL').run(Number(previous));
+    this.set(key, String(serverTime - localTime));
+  }
   notificationTime(eventId: string, origin: string) {
     const row = this.db.prepare('SELECT occurredAt,serverOccurredAt FROM notification_outbox WHERE eventId=?').get(eventId) as { occurredAt: number; serverOccurredAt: number | null };
     if (row.serverOccurredAt !== null) return row.serverOccurredAt;

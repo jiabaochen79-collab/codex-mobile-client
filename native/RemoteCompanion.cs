@@ -516,7 +516,7 @@ internal sealed class CompanionForm : Form {
         copyAll.Enabled = openWeb.Enabled = state != null && !String.IsNullOrEmpty(Get("url"));
         subscriptionDetails.Enabled = state != null && token != null;
     }
-    private async Task EditPassword() {
+    private Task EditPassword() {
         using (var dialog = new Form { Text = "密码设置", ClientSize = new Size(440, 292), Font = Font, StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false, ShowInTaskbar = false }) {
             var automatic = new RadioButton { Text = "每次成功连接后自动换码（默认）", Bounds = new Rectangle(22, 22, 396, 30), Checked = Get("passwordMode") != "custom" };
             var custom = new RadioButton { Text = "自定义固定密码（8 至 64 位）", Bounds = new Rectangle(22, 61, 396, 30), Checked = Get("passwordMode") == "custom" };
@@ -529,16 +529,23 @@ internal sealed class CompanionForm : Form {
             var cancel = new Button { Text = "取消", Bounds = new Rectangle(204, 236, 100, 34), DialogResult = DialogResult.Cancel }; StyleButton(cancel);
             custom.CheckedChanged += (s, e) => { password.Enabled = custom.Checked; show.Enabled = custom.Checked; };
             show.CheckedChanged += (s, e) => { password.UseSystemPasswordChar = !show.Checked; };
-            save.Click += (s, e) => {
+            bool saving = false;
+            dialog.FormClosing += (s, e) => { if (saving) e.Cancel = true; };
+            save.Click += async (s, e) => {
+                if (saving || working || token == null) return;
                 if (custom.Checked && (password.Text.Length < 8 || password.Text.Length > 64 || String.IsNullOrWhiteSpace(password.Text))) { validation.Text = "密码需要 8 至 64 位。"; password.Focus(); return; }
-                dialog.DialogResult = DialogResult.OK;
-            };
-            dialog.Controls.AddRange(new Control[] { automatic, custom, password, show, length, validation, save, cancel }); dialog.AcceptButton = save; dialog.CancelButton = cancel;
-            if (dialog.ShowDialog(this) == DialogResult.OK) {
+                saving = true; save.Enabled = cancel.Enabled = automatic.Enabled = custom.Enabled = password.Enabled = show.Enabled = false;
                 object value = custom.Checked ? (object)new { mode = "custom", password = password.Text } : new { mode = "automatic" };
                 await Action("/local/password", value);
-            }
+                saving = false;
+                if (actionError == null) { dialog.DialogResult = DialogResult.OK; return; }
+                validation.Text = actionError;
+                save.Enabled = cancel.Enabled = automatic.Enabled = custom.Enabled = true; password.Enabled = show.Enabled = custom.Checked;
+            };
+            dialog.Controls.AddRange(new Control[] { automatic, custom, password, show, length, validation, save, cancel }); dialog.AcceptButton = save; dialog.CancelButton = cancel;
+            dialog.ShowDialog(this);
         }
+        return Task.FromResult(0);
     }
     private async Task Action(string url, object body) {
         if (token == null || working) return; working = true; actionRevision++; actionError = null; SetControlsEnabled();

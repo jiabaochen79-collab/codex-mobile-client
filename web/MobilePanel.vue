@@ -17,7 +17,7 @@ import QueuedMessages from './QueuedMessages.vue';
 import PlanRequest from './PlanRequest.vue';
 import NotificationCenter from './NotificationCenter.vue';
 import type { Subscription } from '../src/shared/subscription';
-import type { Conversation, Snapshot, Command, Interaction, Project, ModelOption, Activity, ThreadSettings, QueuedMessage, PermissionMode, Attachment } from '../src/shared/protocol';
+import type { Conversation, Snapshot, Command, Interaction, Project, ModelOption, Activity, ThreadSettings, QueuedMessage, PermissionMode, Attachment, Message } from '../src/shared/protocol';
 import { commandSchema, readMethods } from '../src/shared/protocol';
 
 const props = defineProps<{ deviceId: string; deviceName: string }>();
@@ -34,6 +34,8 @@ const status = ref<any>({ online: false }); const connected = ref(false); const 
 const selected = ref<Conversation | null>(null); const snapshot = ref<Snapshot | null>(null); const draft = ref(''); const limit = ref(100);
 const readError = ref(''); const navigationError = ref(''); const searchError = ref(''); const connectionError = ref('');
 const readRecovering = ref(false);
+const historyLoading = ref(false); const historyError = ref('');
+let historyCursor: string | undefined; let historyMore = false; let historyLoaded = false;
 const readRetryDelays = [1000, 2000, 4000];
 const retryableReadErrors = new Set(['CLIENT_REJECTED', 'CLIENT_UNAVAILABLE', 'READ_TIMEOUT', 'READ_DISCONNECTED', 'OUTCOME_UNKNOWN', 'OFFLINE', 'UNAVAILABLE', 'BUSY']);
 let readFailures = 0; let readRetry: ReturnType<typeof setTimeout> | undefined;
@@ -85,6 +87,7 @@ try {
   if (/^[a-f0-9-]{36}$/.test(saved?.requestId) && command.success && command.data.method === 'create') pendingCreate.value = { requestId: saved.requestId, command: command.data };
 } catch {}
 const answers = ref<Record<string, string>>({}); const answerModes = reactive<Record<string, string>>({});
+const customAnswers: Record<string, string> = {};
 const shell = ref<HTMLElement>(); const scroll = ref<HTMLElement>(); const content = ref<HTMLElement>(); const input = ref<HTMLTextAreaElement>(); const navigation = ref<HTMLElement>();
 const chatScroll = useChatScroll(scroll, content); const turns = computed(() => conversationTurns(snapshot.value));
 const viewportHeight = ref('100dvh'); const viewportTop = ref('0px'); const keyboardOpen = ref(false);
@@ -180,7 +183,7 @@ async function refreshNotificationBadge() {
   } catch {} finally { refreshingNotifications = false; incomingDuringBadge.clear(); }
 }
 async function suppressVisibleNotification(item: any) {
-  const viewed = () => active.value && document.visibilityState === 'visible' && !resultObscured.value && !chatScroll.awayFromBottom.value && selected.value?.id === item.taskId && snapshot.value && !snapshot.value.busy && snapshot.value.lastTurnId === item.turnId;
+  const viewed = () => active.value && document.visibilityState === 'visible' && !resultObscured.value && !document.querySelector('dialog[open]') && !chatScroll.awayFromBottom.value && selected.value?.id === item.taskId && snapshot.value && !snapshot.value.busy && snapshot.value.lastTurnId === item.turnId;
   if (!viewed()) return;
   const incoming = new Map<string, any>(); notificationReads.add(incoming);
   try {
@@ -436,10 +439,11 @@ function cancelNotificationNavigation() {
 }
 function showConversation(conversation: Conversation, activate = false) {
   resetReadRecovery();
+  historyCursor = undefined; historyMore = false; historyLoaded = false; historyError.value = '';
   modelModal.value = false; editingTask = undefined; permissionPicker.value = false; fullAccessConfirm.value = false;
   activateSelected = activate; pendingActivations.clear();
   attachmentPicker.value = false;
-  for (const key of Object.keys(answers.value)) delete answers.value[key]; for (const key of Object.keys(answerModes)) delete answerModes[key];
+  for (const key of Object.keys(answers.value)) delete answers.value[key]; for (const key of Object.keys(answerModes)) delete answerModes[key]; for (const key of Object.keys(customAnswers)) delete customAnswers[key];
   invalidateMode();
   queuedMessages.value = []; sendMenu.value = false;
   if(selected.value)drafts.set(selected.value.id,draft.value);
@@ -454,8 +458,8 @@ async function read(activate = false) {
   if (!canReach.value) { void readQueue(); return; }
   if (!serviceActive.value) {
     if (reading || !hasCapability('safety-status')) return; reading = true;
-    const id = selected.value.id;
-    try { const state = await request({ method: 'safety.status', params: { id } }); if (state.id === id && selected.value?.id === id) { if (!snapshot.value) snapshot.value = { id, title: selected.value.title, epoch: state.epoch, busy: state.busy, turnId: state.turnId, messages: [], requests: [], hasMore: false }; else { snapshot.value.busy = state.busy; snapshot.value.turnId = state.turnId; snapshot.value.epoch = state.epoch; } } }
+    const id = selected.value.id; const cycle = modeSyncCycle;
+    try { const state = await request({ method: 'safety.status', params: { id } }); if (active.value && cycle === modeSyncCycle && state.id === id && selected.value?.id === id) { if (!snapshot.value) snapshot.value = { id, title: selected.value.title, epoch: state.epoch, busy: state.busy, turnId: state.turnId, messages: [], requests: [], hasMore: false }; else { snapshot.value.busy = state.busy; snapshot.value.turnId = state.turnId; snapshot.value.epoch = state.epoch; } } }
     catch { /* Keep the last known stop target if the desktop is unavailable. */ }
     finally { reading = false; }
     return;
@@ -464,7 +468,7 @@ async function read(activate = false) {
   if (reading) { dirty = true; return; } reading = true;
   const id = selected.value.id; const initial = !snapshot.value; const cycle = modeSyncCycle;
   const activateTask=pendingActivations.has(id) && canControl.value;
-  try { const next = await request({ method: 'read', params: { id, limit: limit.value, ...(hasCapability('multi-terminal') ? {activate:activateTask} : {}), ...(hasCapability('conditional-read') && modeSynced.value && snapshot.value?.revision ? { ifRevision: snapshot.value.revision } : {}) } }); if (next.id !== id) throw new Error('会话状态不匹配，已保留当前会话，请稍后重试。'); if (selected.value?.id === id && cycle === modeSyncCycle) { pendingActivations.delete(id); resetReadRecovery(); readError.value = ''; if (!next.notModified) await chatScroll.change(() => { snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } void markSeen(); void reconcileSends(); } }
+  try { const next = await request({ method: 'read', params: { id, limit: limit.value, ...(hasCapability('multi-terminal') ? {activate:activateTask} : {}), ...(hasCapability('conditional-read') && modeSynced.value && snapshot.value?.revision ? { ifRevision: snapshot.value.revision } : {}) } }); if (next.id !== id) throw new Error('会话状态不匹配，已保留当前会话，请稍后重试。'); if (selected.value?.id === id && cycle === modeSyncCycle) { pendingActivations.delete(id); resetReadRecovery(); readError.value = ''; if (!next.notModified) await chatScroll.change(() => { if (hasCapability('history-pages')) { if (!historyLoaded) { historyCursor = next.historyCursor; historyMore = next.hasMore; } next.messages = mergeMessages(snapshot.value?.messages ?? [], next.messages); next.hasMore = historyMore; } snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } void markSeen(); void reconcileSends(); } }
   catch (e: any) {
     if (selected.value?.id !== id || cycle !== modeSyncCycle) return;
     if (e.code === 'NOT_FOUND') {
@@ -487,6 +491,27 @@ async function read(activate = false) {
       } else readError.value = e.code === 'CLIENT_REJECTED' ? '会话暂时读取失败，稍后会自动重试。' : e.message;
     }
   } finally { reading = false; if (dirty) { dirty = false; void read(); } }
+}
+function mergeMessages(previous: Message[], incoming: Message[]) {
+  const updates = new Map(incoming.map(message => [message.id, message]));
+  const ids = new Set(previous.map(message => message.id));
+  return previous.map(message => updates.get(message.id) ?? message).concat(incoming.filter(message => !ids.has(message.id)));
+}
+async function loadHistory() {
+  const id = selected.value?.id; if (!id || !canRead.value || historyLoading.value) return;
+  if (!hasCapability('history-pages')) {
+    if (limit.value >= 500) { historyError.value = '请升级电脑助手以继续加载历史消息。'; return; }
+    limit.value += 100; await read(); return;
+  }
+  const before = historyCursor; if (!before) return;
+  const cycle = modeSyncCycle; historyLoading.value = true; historyError.value = '';
+  try {
+    const page = await request({ method: 'read', params: { id, limit: 100, before } });
+    if (!active.value || cycle !== modeSyncCycle || snapshot.value?.id !== id || historyCursor !== before) return;
+    if (page.id !== id || page.hasMore && (!page.messages.length || page.historyCursor === before)) throw new Error('历史消息未能继续加载，请重试。');
+    await chatScroll.change(() => { snapshot.value!.messages = mergeMessages(page.messages, snapshot.value!.messages); snapshot.value!.hasMore = page.hasMore; historyCursor = page.historyCursor; historyMore = page.hasMore; historyLoaded = true; }, 'preserve');
+  } catch (e: any) { if (cycle === modeSyncCycle && selected.value?.id === id) historyError.value = e.message; }
+  finally { historyLoading.value = false; }
 }
 async function readQueue() {
   const id = selected.value?.id; if (!id || readingQueue || !hasCapability('queued-send') || !connected.value || !status.value.online || !status.value.enabled || !serviceActive.value) return;
@@ -582,9 +607,11 @@ function answerKey(request: Interaction, question: NonNullable<Interaction['ques
 function questionId(request: Interaction, question: NonNullable<Interaction['questions']>[number]) { return `question-${encodeURIComponent(answerKey(request, question))}`; }
 function chooseAnswer(request: Interaction, question: NonNullable<Interaction['questions']>[number], event: Event) {
   const key = answerKey(request, question);
-  const select = event.currentTarget as HTMLSelectElement; const mode = select.value; answerModes[key] = mode;
+  const select = event.currentTarget as HTMLSelectElement; const mode = select.value;
+  if (answerModes[key] === customAnswerMode) customAnswers[key] = answers.value[key] ?? '';
+  answerModes[key] = mode;
   if (mode === customAnswerMode) {
-    answers.value[key] = '';
+    answers.value[key] = customAnswers[key] ?? '';
     void nextTick(() => { const field = select.nextElementSibling; if (field instanceof HTMLInputElement) field.focus(); });
     return;
   }
@@ -686,18 +713,19 @@ let activityLoading=false;let seenKey='';
 const resultObscured = computed(() => drawer.value || moreMenu.value || subscriptionOpen.value || notificationOpen.value || projectModal.value || modelModal.value || takeoverModal.value || permissionPicker.value || fullAccessConfirm.value || attachmentPicker.value);
 async function refreshActivity(){
   if(!canRead.value||!hasCapability('activity')||activityLoading)return;activityLoading=true;
-  try{const ids=[...new Set([...Object.values(groups).flatMap(g=>g.rows.map(c=>c.id)),...searchRows.value.map(c=>c.id),...(selected.value?[selected.value.id]:[])])].slice(0,150);if(ids.length){const r=await request({method:'activity',params:{ids}});for(const a of r.activities)activities[a.id]=a;}}
+  const cycle = modeSyncCycle, navigation = navigationEpoch;
+  try{const ids=[...new Set([...Object.values(groups).flatMap(g=>g.rows.map(c=>c.id)),...searchRows.value.map(c=>c.id),...(selected.value?[selected.value.id]:[])])].slice(0,150);if(ids.length){const r=await request({method:'activity',params:{ids}});if(active.value && cycle === modeSyncCycle && navigation === navigationEpoch)for(const a of r.activities)activities[a.id]=a;}}
   catch{}finally{activityLoading=false;}
 }
 async function markSeen() {
   const s = snapshot.value;
-  if (!active.value || !s || s.busy || !s.completionId || resultObscured.value || document.visibilityState !== 'visible' || chatScroll.awayFromBottom.value || !hasCapability('activity')) return;
+  if (!active.value || !s || s.busy || !s.completionId || resultObscured.value || document.querySelector('dialog[open]') || document.visibilityState !== 'visible' || chatScroll.awayFromBottom.value || !hasCapability('activity')) return;
   const id = s.id, completionId = s.completionId, lastTurnId = s.lastTurnId, cycle = modeSyncCycle;
   const key = id + ':' + completionId; if (seenKey === key) return; seenKey = key;
   try {
     const turnId = lastTurnId && completionId.startsWith(`${lastTurnId}:`) ? lastTurnId : undefined;
     const result = await request({ method: 'seen', params: { id, completionId, ...(turnId ? { turnId } : {}) } });
-    if (result.seen !== true || !active.value || resultObscured.value || cycle !== modeSyncCycle || snapshot.value?.id !== id || snapshot.value.busy || snapshot.value.completionId !== completionId || snapshot.value.lastTurnId !== lastTurnId) {
+    if (result.seen !== true || !active.value || resultObscured.value || document.querySelector('dialog[open]') || cycle !== modeSyncCycle || snapshot.value?.id !== id || snapshot.value.busy || snapshot.value.completionId !== completionId || snapshot.value.lastTurnId !== lastTurnId) {
       if (seenKey === key) seenKey = ''; return;
     }
     if (activities[id]?.completionId === completionId) activities[id].unread = false;
@@ -880,7 +908,8 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
       </div>
       <template v-if="selected">
         <div class="transcript-area"><div ref="scroll" class="messages" @scroll.passive="chatScroll.onScroll"><div ref="content" class="messages-content">
-          <button v-if="snapshot?.hasMore && limit < 500" class="text-button history-button" @click="limit += 100; read()">较早的消息</button>
+          <button v-if="snapshot?.hasMore" class="text-button history-button" :disabled="historyLoading || !canRead" @click="loadHistory"><RefreshCw v-if="historyLoading" :size="14" class="spin"/>{{ historyLoading ? '正在读取历史消息' : '加载更早的消息' }}</button>
+          <p v-if="historyError" class="alert" role="alert">{{ historyError }}</p>
           <div v-if="!snapshot && readError" class="empty-state" role="alert"><p>{{ readError }}</p><button class="text-button" @click="retryRead(true)">重新读取</button></div>
           <div v-else-if="!snapshot" class="empty-state" role="status"><RefreshCw :size="22" class="spin"/><p>{{ readRecovering ? '正在同步会话' : '正在读取原会话' }}</p></div>
           <section v-for="turn in turns" :key="`${selected.id}:${turn.id}`" class="conversation-turn">

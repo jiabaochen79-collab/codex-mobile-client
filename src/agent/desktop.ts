@@ -27,16 +27,17 @@ const permissionSettings: Record<PermissionMode, { permissions: string; approval
   full: { permissions: ':danger-full-access', approvalPolicy: 'never', approvalsReviewer: 'user' }
 };
 
-export function normalizeSnapshot(state: any, epoch: string, limit = 100, images?: ConversationImages): Snapshot {
+export function normalizeSnapshot(state: any, epoch: string, limit = 100, images?: ConversationImages, before?: string): Snapshot {
   const idle = runtimeRunning(state.threadRuntimeStatus) === false;
   const turnStatus = (turn: any) => idle && turn?.status === 'inProgress' ? 'interrupted' : turn?.status;
   const failureReason = (turn: any) => {
     const raw = turn?.status === 'failed' ? (typeof turn.error === 'string' ? turn.error : turn.error?.message) : undefined;
     return typeof raw === 'string' ? raw.split(/[\r\n]/, 1)[0].replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 400) : '';
   };
-  images?.begin(state.id);
+  images?.begin(state.id, true);
+  const imageReferences = new Map<string, { source: string; alt: string }>();
   const projectImages = (references: { source: string; alt: string }[]) => references.slice(0, 20).flatMap(reference => {
-    const image = images?.register(state.id, reference.source, reference.alt); return image ? [image] : [];
+    const image = images?.register(state.id, reference.source, reference.alt); if (image) imageReferences.set(image.id, reference); return image ? [image] : [];
   }).filter((image, index, all) => all.findIndex(other => other.id === image.id) === index);
   const turns: any[] = state.turnHistory?.history?.entitiesByKey
     ? Object.values(state.turnHistory.history?.entitiesByKey ?? {})
@@ -44,13 +45,15 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
   turns.sort((a, b) => (a.turnStartedAtMs ?? 0) - (b.turnStartedAtMs ?? 0));
   const messages: Message[] = [];
   const seen = new Set<string>();
-  for (let index = turns.length - 1; index >= 0; index--) {
+  let reached = before === undefined;
+  history: for (let index = turns.length - 1; index >= 0; index--) {
     const turn = turns[index];
     const turnReason = failureReason(turn);
     const turnMeta = { turnId: turn.turnId ?? `pending:${turn.turnStartedAtMs ?? index}`, turnStatus: turnStatus(turn) ?? 'completed', ...(turnReason ? { turnReason } : {}) };
     for (const item of [...(turn.items ?? [])].reverse()) {
       if (!item.id || seen.has(item.id)) continue;
       seen.add(item.id);
+      if (!reached) { if (item.id === before) reached = true; continue; }
       if (item.type === 'userMessage' || item.type === 'steeringUserMessage') {
         const content = userImageContent(item.type === 'steeringUserMessage' ? { ...item, content: item.input } : item); const media = projectImages(content.images);
         if (content.text || media.length) messages.push({ ...turnMeta, id: item.id, role: 'user', text: content.text.slice(0,64000), ...(media.length ? { images: media } : {}) });
@@ -71,9 +74,11 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
         const text = item.type === 'commandExecution' ? item.command : item.type === 'fileChange' ? (item.changes ?? []).map((c: any) => c.path).join('\n') : item.tool ?? item.query ?? item.type;
         messages.push({ ...turnMeta, id: item.id, role: 'tool', text: String(text ?? item.type).slice(0,8000), status: item.status });
       }
+      if (messages.length > limit) break history;
     }
   }
   messages.reverse();
+  if (!reached) throw new RemoteError('STALE', '历史位置已变化，请重新打开会话后重试。');
   const requests: Interaction[] = (state.requests ?? []).map((r: any) => {
     const method = r.method ?? r.request?.method;
     const p = r.params ?? r.request?.params ?? {};
@@ -96,7 +101,8 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
   let bytes = 0;
   const bounded: Message[] = [];
   for (const m of messages.slice(-limit).reverse()) { bytes += Buffer.byteLength(JSON.stringify(m)); if (bytes > 700000) break; bounded.unshift(m); }
-  return { id: state.id, title: state.title ?? state.generatedTitle ?? '未命名会话', epoch, turnId: active?.turnId ?? null, busy: !!active || state.threadRuntimeStatus?.type === 'active', lastTurnStatus: turnStatus(turns.at(-1)), lastTurnId: turns.at(-1)?.turnId ?? null, ...(failureReason(turns.at(-1)) ? { lastTurnReason: failureReason(turns.at(-1)) } : {}), messages: bounded, requests, hasMore: messages.length > bounded.length, settings: threadSettings(state) };
+  for (const message of bounded) for (const image of message.images ?? []) { const reference = imageReferences.get(image.id); if (reference) images?.register(state.id, reference.source, reference.alt); }
+  return { id: state.id, title: state.title ?? state.generatedTitle ?? '未命名会话', epoch, turnId: active?.turnId ?? null, busy: !!active || state.threadRuntimeStatus?.type === 'active', lastTurnStatus: turnStatus(turns.at(-1)), lastTurnId: turns.at(-1)?.turnId ?? null, ...(failureReason(turns.at(-1)) ? { lastTurnReason: failureReason(turns.at(-1)) } : {}), messages: bounded, requests, hasMore: messages.length > bounded.length, ...(bounded.length ? { historyCursor: bounded[0].id } : {}), settings: threadSettings(state) };
 }
 
 export class CodexDesktop extends EventEmitter implements DesktopAdapter {
@@ -386,8 +392,8 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     await waiting;
     if (this.followed.get(id) !== followed || !followed.state) throw new RemoteError('CLIENT_UNAVAILABLE', '任务连接正在恢复，请稍后重试。');
   }
-  private snapshot(limit = 100) {
-    const result = normalizeSnapshot(this.current!.state, `${this.discovery!.processId}:${this.current!.owner}`, limit, this.images);
+  private snapshot(limit = 100, before?: string) {
+    const result = normalizeSnapshot(this.current!.state, `${this.discovery!.processId}:${this.current!.owner}`, limit, this.images, before);
     result.nativeQueuedCount = this.nativeQueuedCount(result.id);
     const db = this.index(); try { result.completionId = this.taskActivity(result.id, db).completionId; } finally { db.close(); }
     return result;
@@ -464,7 +470,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (command.method === 'queue.list' || command.method === 'queue.remove' || command.method === 'queue.resume') throw new RemoteError('INVALID', '排队操作需要通过助手处理。');
     if (command.method === 'upload.begin' || command.method === 'upload.status' || command.method === 'upload.complete' || command.method === 'upload.remove') throw new RemoteError('INVALID', '操作无效。');
     await this.follow(command.params.id, command.method === 'read' && command.params.activate);
-    if (command.method === 'read') return snapshotResponse(this.snapshot(command.params.limit), command.params.ifRevision);
+    if (command.method === 'read') return snapshotResponse(this.snapshot(command.params.limit, command.params.before), command.params.ifRevision);
     const snap = this.snapshot();
     if (command.params.epoch !== snap.epoch) throw new RemoteError('STALE', '客户端已重新连接，请刷新会话。');
     if (command.method === 'permissions.update') {

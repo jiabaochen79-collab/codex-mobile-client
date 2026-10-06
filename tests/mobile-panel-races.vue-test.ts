@@ -55,7 +55,7 @@ beforeEach(() => {
   vi.stubGlobal('location', { href: 'http://127.0.0.1/', origin: 'http://127.0.0.1' });
   vi.stubGlobal('history', { replaceState() {} });
   vi.stubGlobal('window', { matchMedia: () => ({ matches: false }), addEventListener() {}, removeEventListener() {}, dispatchEvent() {} });
-  vi.stubGlobal('document', { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} });
+  vi.stubGlobal('document', { visibilityState: 'visible', querySelector: () => null, addEventListener() {}, removeEventListener() {} });
   vi.stubGlobal('cancelAnimationFrame', () => {});
 });
 afterEach(() => {

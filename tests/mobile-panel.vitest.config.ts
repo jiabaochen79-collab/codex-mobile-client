@@ -11,5 +11,5 @@ export default defineConfig({
       if (descriptor.scriptSetup) return `<script setup lang="ts">${descriptor.scriptSetup.content}</script>`;
     }
   }, vue()],
-  test: { include: ['tests/mobile-panel-races.vue-test.ts'], testTimeout: 15000, fileParallelism: false }
+  test: { include: ['tests/*.vue-test.ts'], testTimeout: 15000, fileParallelism: false }
 });

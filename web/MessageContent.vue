@@ -7,7 +7,7 @@ import MessageImages from './MessageImages.vue';
 import type { Message } from '../src/shared/protocol';
 import { presentUserMessage } from '../src/shared/user-message';
 const props = defineProps<{ message: Message; conversationId: string; deviceId?: string; live?: boolean }>();
-const html = computed(() => DOMPurify.sanitize(marked.parse(props.message.text, { async: false, breaks: true }) as string, { FORBID_TAGS: ['img', 'video', 'audio', 'iframe', 'style', 'form', 'input'], FORBID_ATTR: ['style'], ALLOW_DATA_ATTR: false }));
+const html = computed(() => DOMPurify.sanitize(marked.parse(props.message.text, { async: false, breaks: true }) as string, { FORBID_TAGS: ['img', 'video', 'audio', 'iframe', 'style', 'form', 'input', 'dialog'], FORBID_ATTR: ['style', 'class', 'id', 'name'], ALLOW_DATA_ATTR: false }));
 const userText = computed(() => presentUserMessage(props.message.text, props.message.images?.map(image => image.alt)));
 const toolSummary = computed(() => props.message.text.replace(/\s+/g, ' ').trim() || '执行操作');
 const expandableTool = computed(() => props.message.role === 'tool' && !props.message.images?.length);

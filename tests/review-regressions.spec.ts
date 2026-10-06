@@ -30,13 +30,13 @@ test('bounds unattended bootstrap retries and permits a fresh recovery attempt',
 test('does not report a browser subscription enabled until the current computer binding is verified',async({page})=>{
   let active=false;let writes=0;
   await page.addInitScript(()=>{
-    const subscription={endpoint:'https://fcm.googleapis.com/shared-browser',toJSON:()=>({endpoint:'https://fcm.googleapis.com/shared-browser',keys:{p256dh:'p'.repeat(32),auth:'a'.repeat(16)}})};
+    const subscription={options:{applicationServerKey:new Uint8Array([1,2,3]).buffer},endpoint:'https://fcm.googleapis.com/shared-browser',toJSON:()=>({endpoint:'https://fcm.googleapis.com/shared-browser',keys:{p256dh:'p'.repeat(32),auth:'a'.repeat(16)}})};
     const registration={active:{},pushManager:{getSubscription:async()=>subscription}};
     Object.defineProperty(navigator.serviceWorker,'getRegistration',{value:async()=>registration});
     Object.defineProperty(navigator.serviceWorker,'ready',{value:Promise.resolve(registration)});
     Object.defineProperty(Notification,'permission',{value:'granted'});
   });
-  await page.route('**/api/notifications/settings',route=>route.fulfill({json:{settings:{enabled:true,completed:true,failed:true},pushConfigured:true,vapidPublicKey:'fixture'}}));
+  await page.route('**/api/notifications/settings',route=>route.fulfill({json:{settings:{enabled:true,completed:true,failed:true},pushConfigured:true,vapidPublicKey:'AQID'}}));
   await page.route('**/api/notifications',route=>route.fulfill({json:{items:[],unread:0}}));
   await page.route('**/api/push/subscriptions/status',route=>{expect(route.request().headers()['x-remote-device']).toBe('123456789');return route.fulfill({json:{active,...(active?{id:'fixture'}:{})}});});
   await page.route('**/api/push/subscriptions',route=>{writes++;active=true;return route.fulfill({json:{id:'fixture',pushConfigured:true}});});

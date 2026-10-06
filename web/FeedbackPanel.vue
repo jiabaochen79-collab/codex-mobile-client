@@ -5,6 +5,7 @@ import { api } from './api';
 import { feedbackCategories, feedbackStates, type FeedbackCreate } from '../src/shared/feedback';
 import { preparePhoto } from './prepare-photo';
 import { feedbackDraft } from './feedback-drafts';
+import { uploadFeedbackPictures } from './feedback-upload';
 const props = defineProps<{ mode: 'desktop' | 'mobile'; deviceId: string; status?: any }>();
 const emit = defineEmits<{ close: []; changed: [] }>();
 const base = props.mode === 'desktop' ? '/local/feedback' : '/api/feedback';
@@ -37,7 +38,8 @@ async function photos(event: Event) { const selected = (event.target as HTMLInpu
 async function send() {
   busy.value = true; error.value = '';
   try { const id = detail.value?.ticket.id; pending.value ??= { requestId: requestId.value, text: text.value, images: images.value, diagnostics: diagnostics.value, ...(!id ? { category: category.value, occurredAt: new Date(occurredAt.value).getTime(), contact: contact.value } : {}) }; if (!await saveDraft()) { pending.value = undefined; return; }
-    const result = await request(id ? '/' + id + '/messages' : '', pending.value); const oldKey = draftKey.value; loaded.value = false; text.value = ''; images.value = []; pending.value = undefined; await feedbackDraft(oldKey, null); detail.value = result; writing.value = false; await restore(); emit('changed');
+    const uploaded = await uploadFeedbackPictures(base, pending.value.images, headers, saveDraft);
+    const result = await request(id ? '/' + id + '/messages' : '', { ...pending.value, images: uploaded }); const oldKey = draftKey.value; loaded.value = false; text.value = ''; images.value = []; pending.value = undefined; await feedbackDraft(oldKey, null); detail.value = result; writing.value = false; await restore(); emit('changed');
   } catch (e: any) {
     if (['INVALID', 'CAPACITY'].includes(e.code)) { pending.value = undefined; requestId.value = crypto.randomUUID(); error.value = e.message + ' 请修改反馈内容后重新提交。'; await saveDraft(); }
     else error.value = e.message + ' 草稿已保留，可重试原提交。';

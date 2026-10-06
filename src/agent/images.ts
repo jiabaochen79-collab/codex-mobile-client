@@ -51,14 +51,14 @@ export class ConversationImages {
   private cache = new Map<string, Buffer>();
   private cacheBytes = 0;
 
-  begin(id: string) { this.threads.set(id, new Map()); }
+  begin(id: string, retain = false) { if (!retain || !this.threads.has(id)) this.threads.set(id, new Map()); }
   clear(id?: string) {
     if (id) this.threads.delete(id); else this.threads.clear();
     this.cache.clear(); this.cacheBytes = 0;
   }
   register(threadId: string, value: string, alt: string): MessageImage | undefined {
     const entries = this.threads.get(threadId);
-    if (!entries || entries.size >= 500) return;
+    if (!entries) return;
     let source: Source;
     if (/^data:image\/(png|jpeg|webp|gif);base64,[a-z0-9+/=\r\n]+$/i.test(value) && value.length <= MAX_SOURCE_BYTES * 1.4) source = { value };
     else {
@@ -67,7 +67,8 @@ export class ConversationImages {
       try { source.realPath = realpathSync(path); source.stamp = stamp(statSync(path)); } catch { /* Missing references remain visible as retryable placeholders. */ }
     }
     const id = createHmac('sha256', this.secret).update(JSON.stringify([threadId, source])).digest('hex');
-    entries.set(id, source);
+    entries.delete(id); entries.set(id, source);
+    if (entries.size > 500) entries.delete(entries.keys().next().value!);
     return { id, alt: (alt || '照片').slice(0, 180) };
   }
   async read(threadId: string, imageId: string, variant: 'thumbnail' | 'full') {

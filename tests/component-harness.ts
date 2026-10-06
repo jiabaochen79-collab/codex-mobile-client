@@ -6,14 +6,15 @@ import OrdersPanel from '../web/OrdersPanel.vue';
 import PayApp from '../web/PayApp.vue';
 import UpdatePanel from '../web/UpdatePanel.vue';
 import DesktopPanel from '../web/DesktopPanel.vue';
+import MessageContent from '../web/MessageContent.vue';
 import '../web/style.css';
 import '../web/mobile-touch.css';
 import '../web/mobile-chat.css';
 
-const components = { feedback: FeedbackPanel, notifications: NotificationCenter, subscription: SubscriptionPanel, orders: OrdersPanel, pay: PayApp, update: UpdatePanel, desktop: DesktopPanel };
+const components = { feedback: FeedbackPanel, notifications: NotificationCenter, subscription: SubscriptionPanel, orders: OrdersPanel, pay: PayApp, update: UpdatePanel, desktop: DesktopPanel, message: MessageContent };
 const kind = new URL(location.href).searchParams.get('component') as keyof typeof components;
 const open = ref(true); const unread = ref(0);
 createApp({ setup: () => () => h('div', [
   h('output', { id:'unread' }, unread.value),
-  open.value ? h(components[kind], { mode:'mobile', deviceId:'123456789', taskLabels:{}, resolveTasks:async()=>{}, openTask:async()=>true, onUnread:(count:number)=>{unread.value=count;}, onClose:()=>{open.value=false;} }) : h('p', {id:'closed'}, 'closed')
+  open.value ? h(components[kind], { message: { id:'fixture', role:'assistant', text: '<div class="modal-backdrop" id="app" style="position:fixed">Fixture message</div>' }, conversationId:'fixture', mode:'mobile', deviceId:'123456789', taskLabels:{}, resolveTasks:async()=>{}, openTask:async()=>true, onUnread:(count:number)=>{unread.value=count;}, onClose:()=>{open.value=false;} }) : h('p', {id:'closed'}, 'closed')
 ]) }).mount('#app');

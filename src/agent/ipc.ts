@@ -5,7 +5,7 @@ import { RemoteError } from '../shared/protocol.js';
 
 function rejection(value: any) {
   const raw = typeof value === 'string' ? value : value?.message;
-  const reason = typeof raw === 'string' ? raw.split(/[\r\n]/, 1)[0].replace(/[\x00-\x1f\x7f]/g, '').replace(/\bBearer\s+\S+|\bsk-[A-Za-z0-9_-]+/gi, '[redacted]').replace(/\b(password|passwd|authorization|cookie|api[_-]?key|token|secret)\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1=[redacted]').trim().slice(0, 400) : '';
+  const reason = typeof raw === 'string' ? raw.split(/[\r\n]/, 1)[0].replace(/[\x00-\x1f\x7f]/g, '').replace(/\bBearer\s+\S+|\bsk-[A-Za-z0-9_-]+/gi, '[redacted]').replace(/["']?\b(password|passwd|authorization|cookie|api[_-]?key|token|secret)["']?\s*[:=]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)/gi, '$1=[redacted]').trim().slice(0, 400) : '';
   const code = ['NOT_FOUND', 'INVALID', 'UNSUPPORTED', 'CLIENT_UNAVAILABLE', 'BUSY'].includes(value?.code) ? value.code : value?.code === 'PERMISSION_DENIED' ? 'CLIENT_DENIED' : 'CLIENT_REJECTED';
   return new RemoteError(code, reason ? `电脑客户端拒绝操作：${reason}` : '原客户端未接受此操作，请检查目标会话。');
 }
@@ -22,27 +22,31 @@ export class NativeIpc extends EventEmitter {
   async connect(): Promise<void> {
     if (this.connecting) return this.connecting;
     if (this.socket && !this.socket.destroyed) return;
-    this.connecting = new Promise<void>((resolve, reject) => {
-      const socket = net.createConnection(this.pipe);
+    const socket = net.createConnection(this.pipe);
+    const connecting = new Promise<void>((resolve, reject) => {
+      this.socket = socket;
       const timer = setTimeout(() => socket.destroy(new Error('IPC connection timeout')), 4000);
-      socket.once('connect', () => { clearTimeout(timer); this.socket = socket; resolve(); });
+      socket.once('connect', () => { clearTimeout(timer); if (this.socket !== socket || socket.destroyed) { reject(new RemoteError('UNAVAILABLE', '连接已关闭。')); return; } resolve(); });
       socket.on('data', chunk => { if (this.socket === socket && !socket.destroyed) this.read(chunk); });
       socket.on('error', e => { clearTimeout(timer); reject(e); });
       socket.on('close', () => {
         clearTimeout(timer);
+        reject(new RemoteError('UNAVAILABLE', '连接已关闭。'));
         if (this.socket !== socket) return;
         this.socket = undefined; this.buffer = Buffer.alloc(0); this.clientId = 'initializing-client';
         for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new RemoteError('OUTCOME_UNKNOWN', '客户端连接中断，请核对操作结果，勿重复提交。')); }
         this.pending.clear(); this.emit('disconnected');
       });
     }).then(async () => {
+      if (this.socket !== socket || socket.destroyed) throw new RemoteError('UNAVAILABLE', '连接已关闭。');
       if (!this.tools) {
         const result = await this.request('initialize', { clientType: 'codex-mobile' }, 0);
         if (result.resultType !== 'success' || typeof result.result?.clientId !== 'string' || !result.result.clientId || result.result.clientId.length > 200 || result.result.clientId === 'initializing-client') throw new RemoteError('UNSUPPORTED', '客户端通讯握手格式不兼容，请更新助手。');
         this.clientId = result.result.clientId;
       }
-    }).catch(error => { this.close(); throw error; }).finally(() => { this.connecting = undefined; });
-    await this.connecting;
+    }).catch(error => { if (this.socket === socket) this.close(); throw error; }).finally(() => { if (this.connecting === connecting) this.connecting = undefined; });
+    this.connecting = connecting;
+    await connecting;
   }
   private send(message: unknown) {
     const payload = Buffer.from(JSON.stringify(message));
@@ -87,7 +91,7 @@ export class NativeIpc extends EventEmitter {
     }
   }
   close() {
-    const socket = this.socket; this.socket = undefined; this.clientId = 'initializing-client'; this.buffer = Buffer.alloc(0);
+    const socket = this.socket; this.socket = undefined; this.connecting = undefined; this.clientId = 'initializing-client'; this.buffer = Buffer.alloc(0);
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new RemoteError('OUTCOME_UNKNOWN', '连接已关闭，请核对原会话。')); }
     this.pending.clear(); socket?.destroy(); this.emit('disconnected');
   }

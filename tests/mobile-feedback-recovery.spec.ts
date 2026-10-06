@@ -5,10 +5,19 @@ import { mockPairedBrowser } from './paired-browser-fixture';
 const origin = process.env.PLAN_WEB_ORIGIN ?? 'http://127.0.0.1:18890';
 async function fixture(page: Page, rejectImage = false) {
   const submissions: any[] = [];
+  const uploads = new Map<string, { id: string; size: number; offset: number; ready: boolean }>();
   await mockPairedBrowser(page);
   await page.route('**/api/bootstrap', route => route.fulfill({ json: { mode: 'mobile' } }));
   await page.route('**/api/notifications', route => route.fulfill({ json: { items: [], unread: 0 } }));
   await page.route('**/api/feedback**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/feedback/uploads') {
+      const input = route.request().postDataJSON(); const status = { id: input.id, size: input.size, offset: 0, ready: false }; uploads.set(input.id, status); return route.fulfill({ json: status });
+    }
+    if (path.endsWith('/chunks')) {
+      const input = route.request().postDataJSON(), status = uploads.get(path.split('/').at(-2)!)!;
+      status.offset = input.offset + Buffer.from(input.data, 'base64').length; status.ready = status.offset === status.size; return route.fulfill({ json: status });
+    }
     if (route.request().method() !== 'POST') return route.fulfill({ json: { rows: [], total: 0 } });
     const payload = route.request().postDataJSON(); submissions.push(payload);
     if (rejectImage && payload.images.length) return route.fulfill({ status: 400, json: { error: { code: 'INVALID', message: '截图无法处理，请移除图片。' } } });

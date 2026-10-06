@@ -16,14 +16,16 @@ async function claimTrial() {
   catch (e: any) { error.value = e.message; } finally { busy.value = false; }
 }
 const code = ref(''); const accepted = ref(false); const showCode = ref(false); const busy = ref(false); const error = ref(''); const success = ref(false);
+let loadRevision = 0;
 const valid = computed(() => accepted.value && licenseCodeSchema.safeParse(code.value).success && !!catalog.value);
 const expiry = computed(() => subscription.value?.expiresAt ? new Date(subscription.value.expiresAt).toLocaleString('zh-CN', { hour12: false }) : null);
 async function load() {
+  const revision = ++loadRevision;
   busy.value = true; error.value = '';
   try {
-    if (props.mode === 'guest') catalog.value = await api('/api/plans');
-    else { const result = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription'); catalog.value = result.catalog; subscription.value = result.subscription; trial.value = result.trial; }
-  } catch (e: any) { error.value = e.message; } finally { busy.value = false; }
+    if (props.mode === 'guest') { const result = await api('/api/plans'); if (revision === loadRevision) catalog.value = result; }
+    else { const result = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription'); if (revision === loadRevision) { catalog.value = result.catalog; subscription.value = result.subscription; trial.value = result.trial; } }
+  } catch (e: any) { if (revision === loadRevision) error.value = e.message; } finally { if (revision === loadRevision) busy.value = false; }
 }
 async function activate() {
   if (!valid.value || busy.value) return; busy.value = true; error.value = ''; success.value = false;

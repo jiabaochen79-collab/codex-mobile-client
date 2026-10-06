@@ -12,7 +12,7 @@ export const diagnosticSchema = z.object({
 }).strict();
 export const feedbackMessageSchema = z.object({
   requestId: z.string().uuid(), text: z.string().trim().min(1).max(8000),
-  images: z.array(z.object({ data: z.string().max(6990510).regex(/^[A-Za-z0-9+/]+={0,2}$/) }).strict()).max(3).default([]),
+  images: z.array(z.union([z.object({ data: z.string().max(6990510).regex(/^[A-Za-z0-9+/]+={0,2}$/) }).strict(), z.object({ uploadId: z.string().uuid() }).strict()])).max(3).default([]),
   diagnostics: z.array(diagnosticSchema).max(2).default([])
 }).strict();
 export const feedbackCreateSchema = feedbackMessageSchema.extend({ category: z.enum(['connection', 'chat', 'files', 'compatibility', 'update', 'billing', 'other']), occurredAt: z.number().int().min(0), contact: z.string().trim().max(200).default('') }).strict();

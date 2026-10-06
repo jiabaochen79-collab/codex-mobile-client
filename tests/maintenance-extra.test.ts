@@ -1,0 +1,41 @@
+import { afterEach, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { useAttachments } from '../web/use-attachments.js';
+import { Agent } from '../src/agent/agent.js';
+import { AgentStore } from '../src/agent/store.js';
+const cleanups: (() => any)[] = [];
+afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
+it('retry of an expired upload never restarts it despite retaining the original file', async () => {
+  const request = vi.fn().mockImplementation(async command => { if (command.method === 'upload.status') throw Object.assign(new Error('Upload not found'), { code: 'NOT_FOUND' }); if (command.method === 'upload.begin') return { id: crypto.randomUUID(), size: 7, offset: 7, ready: true }; return { id: crypto.randomUUID(), size: 7, offset: 7, ready: true }; });
+  const threadId = randomUUID(), id = randomUUID();
+  const attachments = useAttachments({ request, thread: () => threadId, control: () => ({ allowed: true, epoch: randomUUID(), clientId: randomUUID() }) });
+  const item = { key: randomUUID(), file: new File(['fixture'], 'fixture.txt'), threadId, photosOnly: false, prepared: true, preparing: false, attachment: { id, name: 'fixture.txt', size: 7, offset: 0, ready: false, mediaType: 'text/plain' }, progress: 0, error: '', uploading: false, cancelled: false };
+  await attachments.upload(item);
+  expect(request.mock.calls.map(([command]) => command.method)).toEqual(['upload.status', 'upload.begin', 'upload.complete']);
+  expect(item.error).toBe(''); expect(item.attachment!.ready).toBe(true);
+});
+it('continuous slow read polling prevents a durable queued message from entering dispatch', async () => {
+  vi.useFakeTimers(); const dir = mkdtempSync(join(process.cwd(), '.runtime/queue-'));
+  const execute = vi.fn(async () => { await new Promise(resolve => setTimeout(resolve, 4000)); return { activities: [] }; });
+  const agent: any = new Agent({ dir, origin: 'https://fixture.invalid', adapter: { execute, status: async () => ({ available: true, version: null, reason: null }), close() {} } });
+  cleanups.push(async () => { await agent.close(); rmSync(dir, { recursive: true, force: true }); });
+  vi.spyOn(agent.store, 'protect').mockImplementation((value: any) => value);
+  agent.enabled = true; agent.connection = 'online'; agent.client = { available: true }; const sessionId = randomUUID(); agent.grants.set(sessionId, Date.now() + 3600000);
+  agent.sends.add(randomUUID(), randomUUID(), sessionId, randomUUID(), { text: 'durable queued fixture', attachments: [] });
+  const dispatch = vi.spyOn(agent, 'dispatchQueued').mockResolvedValue(undefined);
+  await agent.message(JSON.stringify({ type: 'command', id: randomUUID(), sessionId, command: { method: 'activity', params: { ids: [] } } }));
+  const poll = setInterval(() => { void agent.message(JSON.stringify({ type: 'command', id: randomUUID(), sessionId, command: { method: 'activity', params: { ids: [] } } })); }, 3000);
+  const pump = setInterval(() => agent.pumpQueue(), 1000);
+  await vi.advanceTimersByTimeAsync(30000); expect(dispatch).toHaveBeenCalled(); expect(agent.sends.entries()).toHaveLength(1);
+  clearInterval(poll); await vi.advanceTimersByTimeAsync(60000); expect(dispatch).toHaveBeenCalled(); clearInterval(pump);
+});
+it('an offline completion is mapped with a later clock offset rather than its capture-time offset', () => {
+  const dir = mkdtempSync(join(process.cwd(), '.runtime/clock-')); const store = new AgentStore(dir); cleanups.push(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+  const origin = 'https://fixture.invalid', at = Date.now(), eventId = 'a'.repeat(64);
+  store.syncNotificationClock(origin, at, at);
+  store.recordNotification({ eventId, taskId: randomUUID(), turnId: 'fixture', status: 'completed', occurredAt: at, protocolVersion: 1 }, { path: 'fixture.jsonl', offset: 10, mtime: at, size: 10, fileId: 'fixture', baselineAt: at - 1000, remainder: '' });
+  store.syncNotificationClock(origin, at + 10000, at + 3610000);
+  expect(store.notificationTime(eventId, origin)).toBe(at);
+});
