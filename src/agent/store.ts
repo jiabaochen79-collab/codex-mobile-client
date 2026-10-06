@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { hash, privateDirectory } from '../shared/security.js';
 import { RemoteError, readMethods, passwordSettingsSchema, type PasswordSettings, type Command } from '../shared/protocol.js';
 import type { LocalNotificationEvent } from '../shared/notifications.js';
+import { REMEMBERED_SESSION_MS } from '../shared/session.js';
 
 export class AgentStore {
   db: DatabaseSync;
@@ -127,7 +128,7 @@ export class AgentStore {
       if (saved.error) throw new RemoteError(saved.error.code, saved.error.message);
       return saved.result;
     }
-    this.db.prepare("DELETE FROM commands WHERE created < ? AND id NOT LIKE 'plan:%'").run(Date.now() - 7 * 86400000);
+    this.db.prepare("DELETE FROM commands WHERE created < ? AND result IS NOT NULL AND id NOT LIKE 'plan:%'").run(Date.now() - REMEMBERED_SESSION_MS);
     this.db.prepare('INSERT INTO commands(id,digest,created,session,conversation) VALUES(?,?,?,?,?)').run(id, digest, Date.now(), session ?? null, 'id' in command.params ? command.params.id : null);
     this.runningCommands.add(id);
     try {

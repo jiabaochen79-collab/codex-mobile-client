@@ -39,6 +39,7 @@ export class Agent {
   private changeTimer?: NodeJS.Timeout;
   private changed = new Set<string>();
   private control?: ControlLease;
+  private controlDeadline?: number;
   private uploads: UploadStore;
   private failures = 0;
   private lastPong = 0;
@@ -173,7 +174,10 @@ export class Agent {
     if (m.type === 'control') {
       const lease = z.object({ sessionId: uid, clientId: uid, epoch: uid, expires: z.number().int() }).nullable().safeParse(m.lease);
       if (!lease.success || lease.data && (this.grants.get(lease.data.sessionId) ?? 0) <= Date.now()) { this.send({ type: 'control-result', id: m.id, ok: false }); return; }
-      this.control = lease.data ?? undefined; this.send({ type: 'control-result', id: m.id, ok: true }); return;
+      const serverTime = Number.isSafeInteger(m.serverTime) ? m.serverTime : Date.now() + Number(this.store.get(`notification:clock:${hash(this.origin)}`) ?? 0);
+      this.control = lease.data ?? undefined;
+      this.controlDeadline = lease.data ? performance.now() + Math.max(0, Math.min(90000, lease.data.expires - serverTime)) : undefined;
+      this.send({ type: 'control-result', id: m.id, ok: true }); return;
     }
     if (m.type === 'subscriptions') { const ids = z.array(uid).max(6).safeParse(m.ids); if (ids.success) { this.subscriptions = ids.data; this.updateSubscriptions(); } return; }
     if (m.type === 'pair') {
@@ -206,7 +210,7 @@ export class Agent {
     const safety = isSafetyCommand(frame.command);
     if (image ? this.mediaQueued >= 6 : safety ? this.safetyQueued >= 6 : this.queued >= 16) { this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, error: { code: 'BUSY', message: '请求过多，请稍后重试。' } }); return; }
     if (image) this.mediaQueued++; else if (safety) this.safetyQueued++; else this.queued++;
-    if (frame.command.method === 'stop') { try { this.authorizeControl(sessionId, m.clientId, frame.controlEpoch); this.stopping.add(frame.command.params.id); for (const id of this.sends.pause('任务已停止，待发送消息已暂停。', frame.command.params.id)) this.notifyQueue(id); } catch {} }
+    if (frame.command.method === 'stop') { try { this.authorizeControl(sessionId, m.clientId, frame.controlEpoch); this.stopping.add(frame.command.params.id); } catch {} }
     const work = async () => {
       try {
         if (!this.enabled || (this.grants.get(sessionId) ?? 0) <= Date.now()) throw new RemoteError('AUTH', '远控授权已失效。');
@@ -248,7 +252,11 @@ export class Agent {
           if (command.method === 'send' && command.params.mode !== 'steer' && this.sends.entries(command.params.id).length) throw new RemoteError('QUEUE_PENDING', '当前任务已有待发送消息，请使用排队发送或先处理队列。');
           const startedAt = Date.now();
           if (command.method === 'send' || command.method === 'plan.respond') await this.completionMonitor.watch(command.params.id, startedAt);
-          const executed = command.method === 'send' ? await this.executeSend(command, frame.id, authorize, attachments) : await this.options.adapter.execute(command, frame.id, authorize, attachments);
+          let executed: unknown;
+          const pauseStoppedQueue = () => { if (command.method === 'stop') for (const id of this.sends.pause('任务已停止，待发送消息已暂停。', command.params.id)) this.notifyQueue(id); };
+          try { executed = command.method === 'send' ? await this.executeSend(command, frame.id, authorize, attachments) : await this.options.adapter.execute(command, frame.id, authorize, attachments); }
+          catch (error) { if (error instanceof RemoteError && ['OUTCOME_UNKNOWN', 'INTERNAL'].includes(error.code)) pauseStoppedQueue(); throw error; }
+          pauseStoppedQueue();
           if (command.method === 'create' && typeof (executed as { threadId?: unknown })?.threadId === 'string') this.completionMonitor.watch((executed as { threadId: string }).threadId, startedAt);
           return executed;
         }, sessionId);
@@ -349,7 +357,7 @@ export class Agent {
   }
   private authorizeControl(sessionId: string, clientId: string, epoch?: string) {
     if (!this.enabled || this.closing || (this.grants.get(sessionId) ?? 0) <= Date.now()) throw new RemoteError('AUTH', '远控授权已失效。');
-    if (!this.control || this.control.sessionId !== sessionId || this.control.clientId !== clientId || this.control.epoch !== epoch || this.control.expires <= Date.now()) throw new RemoteError('CONTROL_LOST', '当前为查看模式，请先接管控制权。');
+    if (!this.control || this.control.sessionId !== sessionId || this.control.clientId !== clientId || this.control.epoch !== epoch || (this.controlDeadline === undefined ? this.control.expires <= Date.now() : this.controlDeadline <= performance.now())) throw new RemoteError('CONTROL_LOST', '当前为查看模式，请先接管控制权。');
   }
   private uploadChunk(frame: Buffer) {
     let header: ReturnType<typeof parseUploadFrame>['header'] | undefined;

@@ -137,6 +137,12 @@ describe('M02: notification badge snapshot boundaries', () => {
 });
 
 describe('M03: seen receipt completion identity', () => {
+  it.each(['subscriptionOpen', 'notificationOpen', 'modelModal', 'permissionPicker', 'moreMenu', 'projectModal', 'attachmentPicker', 'takeoverModal'])('does not acknowledge an obscured result under %s', async overlay => {
+    const p = setup(), a = task(); p.selected.value = a;
+    p.snapshot.value = { id: a.id, busy: false, completionId: 'round:complete', lastTurnId: 'round' };
+    p[overlay].value = true; await p.markSeen(); await p.suppressVisibleNotification({ id: 'notice', taskId: a.id, turnId: 'round' });
+    expect(FakeSocket.latest.frames).toHaveLength(0); expect(state.api).not.toHaveBeenCalled();
+  });
   it('does not clear a newer completion on the same mutable snapshot', async () => {
     const p = setup(), a = task();
     p.selected.value = a; p.snapshot.value = { id: a.id, busy: false, completionId: 'old:complete', lastTurnId: 'old' };

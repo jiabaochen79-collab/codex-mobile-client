@@ -28,9 +28,10 @@ function setup(name: string) {
     if (id === 'lucide-vue-next' || id.endsWith('.vue')) return {};
     throw new Error('Unexpected setup import: ' + id);
   }, module, module.exports);
-  const page = scope.run(() => module.exports.default.setup({ mode: 'mobile', deviceId: '123456789' }, { expose() {}, emit() {} }));
+  const emit = vi.fn();
+  const page = scope.run(() => module.exports.default.setup({ mode: 'mobile', deviceId: '123456789' }, { expose() {}, emit }));
   let stopped = false;
-  const instance = { page, mount: async () => { for (const fn of mounted) await fn(); }, unmount: () => { if (stopped) return; stopped = true; for (const fn of unmounted) fn(); scope.stop(); } };
+  const instance = { page, emit, mount: async () => { for (const fn of mounted) await fn(); }, unmount: () => { if (stopped) return; stopped = true; for (const fn of unmounted) fn(); scope.stop(); } };
   instances.push(instance); return instance;
 }
 function deferred() {
@@ -49,10 +50,10 @@ beforeEach(() => {
 afterEach(() => { for (const instance of instances.splice(0)) instance.unmount(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('U01 polling lifecycle', () => {
-  it('stops update polling during installation and ignores a delayed pre-install state', async () => {
-    const wait = deferred(); let reads = 0;
+  it('ignores pre-install reads but monitors installation and recovers after failure', async () => {
+    const wait = deferred(); let reads = 0, recovered = false;
     api.mockImplementation(async path => {
-      if (path === '/local/update/state') return ++reads === 1 ? { phase: 'ready' } : wait.promise;
+      if (path === '/local/update/state') return ++reads === 1 ? { phase: 'ready' } : reads === 2 ? wait.promise : { phase: recovered ? 'ready' : 'installing', message: recovered ? 'installation failed' : '' };
       return path === '/local/state' ? { authorizedCount: 0 } : { accepted: true };
     });
     const instance = setup('UpdatePanel'); await instance.mount();
@@ -60,8 +61,9 @@ describe('U01 polling lifecycle', () => {
     await vi.advanceTimersByTimeAsync(2000); expect(reads).toBe(2);
     await instance.page.act('install'); expect(instance.page.state.value.phase).toBe('installing');
     wait.resolve({ phase: 'ready' }); await vi.advanceTimersByTimeAsync(12000);
-    expect(instance.page.state.value.phase).toBe('installing'); expect(reads).toBe(2);
-    expect(api.mock.calls.filter(([path]) => path === '/local/state')).toHaveLength(1);
+    expect(instance.page.state.value.phase).toBe('installing'); expect(reads).toBeGreaterThan(2);
+    recovered = true; await vi.advanceTimersByTimeAsync(2000);
+    expect(instance.page.state.value.phase).toBe('ready'); expect(instance.page.state.value.message).toBe('installation failed');
     instance.unmount(); expect(vi.getTimerCount()).toBe(0);
   });
   it('does not make a secondary update read after unmounting during the first request', async () => {
@@ -103,4 +105,12 @@ describe('U01 polling lifecycle', () => {
     }
     if (name === 'DevicesPanel') { expect(dispose).toHaveBeenCalledTimes(3); expect(navigator.serviceWorker.removeEventListener).toHaveBeenCalledTimes(3); expect(history.scrollRestoration).toBe('auto'); }
   });
+});
+
+it('refreshes subscription when a list order becomes paid after returning from payment', async () => {
+  let status = 'pending';
+  api.mockImplementation(async path => path.includes('subscription') ? { catalog: { plans: [] } } : { orders: [{ id: 'order', status }], readiness: { channels: [] } });
+  const instance = setup('OrdersPanel') as any; instance.page.active.value = { id: 'order', status: 'pending' };
+  await instance.page.load(); instance.page.returnToOrders(); status = 'paid'; await instance.page.load();
+  expect(instance.emit).toHaveBeenCalledWith('changed'); instance.emit.mockClear(); await instance.page.load(); expect(instance.emit).not.toHaveBeenCalledWith('changed');
 });

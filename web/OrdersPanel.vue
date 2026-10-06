@@ -27,9 +27,12 @@ async function load(force = false) {
   const revision = ++readRevision; reading = true;
   try { const orders = await api(base); if (disposed || revision !== readRevision) return; const info = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription');
     if (revision !== readRevision) return;
+    const previous = new Map<string, string>((data.value?.orders ?? (active.value ? [active.value] : [])).map((order: PaymentOrder) => [order.id, order.status]));
+    const entitlementChanged = orders.orders.some((order: PaymentOrder) => ['paid','refunded'].includes(order.status) && previous.get(order.id) !== order.status);
     data.value = orders; catalog.value = info.catalog;
     if (!channels.value.includes(channel.value)) channel.value = channels.value[0] ?? '';
-    if (active.value) { const next = data.value.orders.find((o: PaymentOrder) => o.id === active.value!.id); if (next) { const previous = active.value.status; active.value = next; if (next.status === 'paid' && previous !== 'paid') emit('changed'); } }
+    if (active.value) { const next = data.value.orders.find((o: PaymentOrder) => o.id === active.value!.id); if (next) active.value = next; }
+    if (entitlementChanged) emit('changed');
     readError.value = '';
   } catch (e: any) { if (revision === readRevision) readError.value = e.message; }
   finally { if (revision === readRevision) reading = false; }

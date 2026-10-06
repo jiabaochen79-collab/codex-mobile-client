@@ -176,6 +176,8 @@ internal sealed class CompanionForm : Form {
     private bool exiting;
     private readonly string root;
     private string agentError;
+    private string actionError;
+    private int actionRevision;
     private string lastConnectionFailure;
     private int agentFailures;
     private int failedPolls;
@@ -439,18 +441,19 @@ internal sealed class CompanionForm : Form {
     }
     private static Dictionary<string, object> JsonObject(string text) { return Program.Json.Deserialize<Dictionary<string, object>>(text); }
     private async Task Poll() {
-        if (polling || exiting || IsDisposed) return; polling = true;
+        if (polling || working || exiting || IsDisposed) return; polling = true;
+        int revision = actionRevision;
         try {
             if (agent != null && agent.HasExited) ScheduleAgentRecovery("exit:" + agent.ExitCode);
             if (agent == null && DateTime.UtcNow >= nextAgentStart) await StartAgent();
             if (token == null || exiting || IsDisposed) return;
-            state = JsonObject(await http.GetStringAsync("http://127.0.0.1:" + port + "/local/state"));
-            if (exiting || IsDisposed) return;
-            failedPolls = 0; error.Text = "";
+            var next = JsonObject(await http.GetStringAsync("http://127.0.0.1:" + port + "/local/state"));
+            if (exiting || IsDisposed || revision != actionRevision) return;
+            state = next; failedPolls = 0;
             if (DateTime.UtcNow - agentReadyAt > TimeSpan.FromMinutes(5)) agentFailures = 0;
             Render();
         }
-        catch { if (!exiting && !IsDisposed) { error.Text = agentError ?? "连接进程未响应，正在重试。"; if (++failedPolls >= 3) ScheduleAgentRecovery("health-timeout"); } }
+        catch { if (!exiting && !IsDisposed && revision == actionRevision) { error.Text = actionError ?? agentError ?? "连接进程未响应，正在重试。"; if (++failedPolls >= 3) ScheduleAgentRecovery("health-timeout"); } }
         finally { polling = false; }
     }
     private void Render() {
@@ -479,8 +482,8 @@ internal sealed class CompanionForm : Form {
         var connectionError = state.ContainsKey("connectionError") ? state["connectionError"] as Dictionary<string, object> : null;
         string failure = connectionError == null ? "" : Convert.ToString(connectionError["stage"]) + "/" + Convert.ToString(connectionError["code"]);
         if (failure != lastConnectionFailure) { if (!String.IsNullOrEmpty(failure)) LogAgent("server-connection", failure); lastConnectionFailure = failure; }
-        error.Text = connectionError == null ? UpdateStatusText(update) : Convert.ToString(connectionError["message"]) + " [" + failure + "]";
-        error.ForeColor = connectionError == null && updatePhase != "error" ? Color.FromArgb(116, 126, 137) : Color.FromArgb(169, 61, 65);
+        error.Text = actionError ?? (connectionError == null ? UpdateStatusText(update) : Convert.ToString(connectionError["message"]) + " [" + failure + "]");
+        error.ForeColor = actionError == null && connectionError == null && updatePhase != "error" ? Color.FromArgb(116, 126, 137) : Color.FromArgb(169, 61, 65);
         tooltips.SetToolTip(relayStatus, error.Text); tooltips.SetToolTip(error, error.Text);
         var client = state["client"] as Dictionary<string, object>;
         bool available = client != null && Convert.ToBoolean(client["available"]);
@@ -491,7 +494,8 @@ internal sealed class CompanionForm : Form {
         authorization.Text = Get("authorizedCount") + " 个有效授权"; serverAddress.Text = Get("url");
         var subscription = state.ContainsKey("subscription") ? state["subscription"] as Dictionary<string, object> : null;
         string subscriptionState = subscription != null && subscription.ContainsKey("status") ? Convert.ToString(subscription["status"]) : "";
-        subscriptionStatus.Text = subscriptionState == "free" ? "免费试运行" : subscriptionState == "trial" ? "邀请试用中" : subscriptionState == "active" ? "订阅有效" : subscriptionState == "expired" ? "订阅已到期" : subscriptionState == "unlicensed" ? "未开通订阅" : "订阅状态待同步";
+        bool banned = subscription != null && subscription.ContainsKey("disabled") && Convert.ToBoolean(subscription["disabled"]);
+        subscriptionStatus.Text = banned ? "设备已被封禁" : subscriptionState == "free" ? "免费试运行" : subscriptionState == "trial" ? "邀请试用中" : subscriptionState == "active" ? "订阅有效" : subscriptionState == "expired" ? "订阅已到期" : subscriptionState == "unlicensed" ? "未开通订阅" : "订阅状态待同步";
         if (subscription != null && subscription.ContainsKey("expiresAt") && subscription["expiresAt"] != null) subscriptionStatus.Text += "  " + new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(Convert.ToDouble(subscription["expiresAt"])).ToLocalTime().ToString("yyyy-MM-dd");
         SetControlsEnabled();
         RenderPowerSettings();
@@ -537,9 +541,20 @@ internal sealed class CompanionForm : Form {
         }
     }
     private async Task Action(string url, object body) {
-        if (token == null || working) return; working = true; SetControlsEnabled();
-        try { var result = await http.PostAsync("http://127.0.0.1:" + port + url, new StringContent(Program.Json.Serialize(body), Encoding.UTF8, "application/json")); if (!result.IsSuccessStatusCode) throw new Exception(); var response = await result.Content.ReadAsStringAsync(); if (url == "/local/update/install") { error.Text = "更新已开始，助手将重启。"; return; } if (ApplyActionResponse(url, response)) { error.Text = ""; Render(); } }
-        catch { error.Text = "操作未完成，请稍后重试。"; }
+        if (token == null || working) return; working = true; actionRevision++; actionError = null; SetControlsEnabled();
+        try {
+            using (var result = await http.PostAsync("http://127.0.0.1:" + port + url, new StringContent(Program.Json.Serialize(body), Encoding.UTF8, "application/json"))) {
+                var response = await result.Content.ReadAsStringAsync();
+                if (!result.IsSuccessStatusCode) {
+                    var failure = JsonObject(response); var detail = failure.ContainsKey("error") ? failure["error"] as Dictionary<string, object> : null;
+                    actionError = detail != null && detail.ContainsKey("message") ? Convert.ToString(detail["message"]) : "操作未完成，请稍后重试。";
+                    error.Text = actionError; error.ForeColor = Color.FromArgb(169, 61, 65); return;
+                }
+                if (url == "/local/update/install") { error.Text = "更新已开始，助手将重启。"; return; }
+                if (ApplyActionResponse(url, response)) { error.Text = ""; Render(); }
+            }
+        }
+        catch { actionError = "未收到操作确认，请先核对当前状态，再重试。"; error.Text = actionError; error.ForeColor = Color.FromArgb(169, 61, 65); }
         finally { working = false; SetControlsEnabled(); }
     }
     private bool ApplyActionResponse(string url, string response) {

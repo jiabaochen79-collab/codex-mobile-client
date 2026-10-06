@@ -71,9 +71,10 @@ test('requests a fresh ticket for each payment-button click and permits popup fa
   expect(await page.evaluate(() => (window as any).paymentUrls)).toEqual([origin + '/pay/#ticket=fixture-2', origin + '/pay/#ticket=fixture-3']);
 });
 
-test('serializes update polls and ignores stale readiness after installation', async ({ page }) => {
+test('serializes update polls, ignores stale readiness and observes installation recovery', async ({ page }) => {
   await page.clock.install(); let calls = 0; let installs = 0; let held: Route | undefined;
-  await page.route('**/local/update/state', route => { if (++calls === 2) { held = route; return; } return route.fulfill({ json: update('ready') }); });
+  let recovered = false;
+  await page.route('**/local/update/state', route => { if (++calls === 2) { held = route; return; } return route.fulfill({ json: update(installs && !recovered ? 'installing' : 'ready') }); });
   await page.route('**/local/state', route => route.fulfill({ json: { authorizedCount: 0 } }));
   await page.route('**/local/update/install', route => { installs++; return route.fulfill({ json: { accepted: true } }); });
   await page.goto(mount('update')); await expect(page.getByRole('button', { name: '安装更新', exact: true })).toBeVisible();
@@ -81,7 +82,18 @@ test('serializes update polls and ignores stale readiness after installation', a
   await page.getByRole('button', { name: '安装更新', exact: true }).click(); await page.getByRole('button', { name: '安装并重启助手', exact: true }).click();
   await expect(page.locator('.update-panel')).toContainText('正在安装并重启助手');
   await held!.fulfill({ json: update('ready') }); await page.clock.runFor(4001);
-  await expect(page.getByRole('button', { name: '安装更新', exact: true })).toHaveCount(0); expect(installs).toBe(1); expect(calls).toBe(2);
+  await expect(page.getByRole('button', { name: '安装更新', exact: true })).toHaveCount(0); expect(installs).toBe(1); expect(calls).toBeGreaterThan(2);
+  recovered = true; await page.clock.runFor(2001); await expect(page.getByRole('button', { name: '安装更新', exact: true })).toBeEnabled();
+});
+
+for (const kind of ['notifications', 'update']) test(`restores ${kind} checkbox after a rejected setting save`, async ({ page }) => {
+  await page.route('**/api/notifications/settings', route => route.fulfill(route.request().method() === 'GET' ? { json: { settings: { enabled: true, completed: true, failed: true }, pushConfigured: false } } : { status: 409, json: { error: { message: 'setting rejected' } } }));
+  await page.route('**/api/notifications', route => route.fulfill({ json: { items: [], unread: 0 } }));
+  await page.route('**/local/update/state', route => route.fulfill({ json: update('idle') }));
+  await page.route('**/local/state', route => route.fulfill({ json: { authorizedCount: 0 } }));
+  await page.route('**/local/update/settings', route => route.fulfill({ status: 409, json: { error: { message: 'setting rejected' } } }));
+  await page.goto(mount(kind)); const checkbox = page.getByRole('checkbox').first(); await expect(checkbox).toBeChecked();
+  await checkbox.uncheck(); await expect(page.getByRole('alert')).toHaveText('setting rejected'); await expect(checkbox).toBeChecked();
 });
 
 test('clears recovered update read errors but retains installation errors', async ({ page }) => {

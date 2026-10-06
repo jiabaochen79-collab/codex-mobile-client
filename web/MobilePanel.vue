@@ -180,7 +180,7 @@ async function refreshNotificationBadge() {
   } catch {} finally { refreshingNotifications = false; incomingDuringBadge.clear(); }
 }
 async function suppressVisibleNotification(item: any) {
-  const viewed = () => document.visibilityState === 'visible' && !drawer.value && !notificationOpen.value && !chatScroll.awayFromBottom.value && selected.value?.id === item.taskId && snapshot.value && !snapshot.value.busy && snapshot.value.lastTurnId === item.turnId;
+  const viewed = () => active.value && document.visibilityState === 'visible' && !resultObscured.value && !chatScroll.awayFromBottom.value && selected.value?.id === item.taskId && snapshot.value && !snapshot.value.busy && snapshot.value.lastTurnId === item.turnId;
   if (!viewed()) return;
   const incoming = new Map<string, any>(); notificationReads.add(incoming);
   try {
@@ -683,6 +683,7 @@ function releasePendingCreate() {
 }
 function taskState(c:Conversation){const state=activities[c.id]??c;return{...state,running:hasCapability('live-activity')&&state.running};}
 let activityLoading=false;let seenKey='';
+const resultObscured = computed(() => drawer.value || moreMenu.value || subscriptionOpen.value || notificationOpen.value || projectModal.value || modelModal.value || takeoverModal.value || permissionPicker.value || fullAccessConfirm.value || attachmentPicker.value);
 async function refreshActivity(){
   if(!canRead.value||!hasCapability('activity')||activityLoading)return;activityLoading=true;
   try{const ids=[...new Set([...Object.values(groups).flatMap(g=>g.rows.map(c=>c.id)),...searchRows.value.map(c=>c.id),...(selected.value?[selected.value.id]:[])])].slice(0,150);if(ids.length){const r=await request({method:'activity',params:{ids}});for(const a of r.activities)activities[a.id]=a;}}
@@ -690,20 +691,20 @@ async function refreshActivity(){
 }
 async function markSeen() {
   const s = snapshot.value;
-  if (!active.value || !s || s.busy || !s.completionId || drawer.value || document.visibilityState !== 'visible' || chatScroll.awayFromBottom.value || !hasCapability('activity')) return;
+  if (!active.value || !s || s.busy || !s.completionId || resultObscured.value || document.visibilityState !== 'visible' || chatScroll.awayFromBottom.value || !hasCapability('activity')) return;
   const id = s.id, completionId = s.completionId, lastTurnId = s.lastTurnId, cycle = modeSyncCycle;
   const key = id + ':' + completionId; if (seenKey === key) return; seenKey = key;
   try {
     const turnId = lastTurnId && completionId.startsWith(`${lastTurnId}:`) ? lastTurnId : undefined;
     const result = await request({ method: 'seen', params: { id, completionId, ...(turnId ? { turnId } : {}) } });
-    if (result.seen !== true || !active.value || cycle !== modeSyncCycle || snapshot.value?.id !== id || snapshot.value.busy || snapshot.value.completionId !== completionId || snapshot.value.lastTurnId !== lastTurnId) {
+    if (result.seen !== true || !active.value || resultObscured.value || cycle !== modeSyncCycle || snapshot.value?.id !== id || snapshot.value.busy || snapshot.value.completionId !== completionId || snapshot.value.lastTurnId !== lastTurnId) {
       if (seenKey === key) seenKey = ''; return;
     }
     if (activities[id]?.completionId === completionId) activities[id].unread = false;
     for (const g of Object.values(groups)) for (const c of g.rows) if (c.id === id && (!c.completionId || c.completionId === completionId)) c.unread = false;
   } catch { if (seenKey === key) seenKey = ''; }
 }
-watch([()=>chatScroll.awayFromBottom.value,drawer],()=>{void markSeen();});
+watch([()=>chatScroll.awayFromBottom.value,resultObscured],()=>{void markSeen();});
 function chooseAttachmentSource(source:'photos'|'camera'|'files') {
   if(attachmentReason.value)return;
   attachmentPicker.value=false;

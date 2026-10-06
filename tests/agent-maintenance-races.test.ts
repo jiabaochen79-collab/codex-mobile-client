@@ -1,0 +1,36 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Agent } from '../src/agent/agent.js';
+import { RemoteError } from '../src/shared/protocol.js';
+let agent: Agent, dir: string;
+afterEach(async () => { await agent?.close(); if (dir) rmSync(dir, { recursive: true, force: true }); vi.restoreAllMocks(); });
+it.each(['STALE', 'OUTCOME_UNKNOWN', 'INTERNAL', 'accepted'])('handles durable queued messages after a stop result: %s', async outcome => {
+  dir = mkdtempSync(join(tmpdir(), 'audit-current-agent-'));
+  const execute = vi.fn(async () => { if (outcome !== 'accepted') throw new RemoteError(outcome, 'Fixture stop result'); return { stopped: true }; });
+  agent = new Agent({ origin: 'http://127.0.0.1:8790', dir, adapter: { execute, close() {}, status: async () => ({ available: true, version: null, reason: null }) } });
+  const a = agent as any, sessionId = randomUUID(), clientId = randomUUID(), epoch = randomUUID(), taskId = randomUUID();
+  vi.spyOn(a.store, 'protect').mockImplementation(value => value);
+  a.enabled = true; a.connection = 'online'; a.client = { available: true };
+  a.grants.set(sessionId, Date.now() + 60000); a.control = { sessionId, clientId, epoch, expires: Date.now() + 60000 };
+  a.notifyQueue = vi.fn(); a.updateSubscriptions = vi.fn(); const frames: any[] = []; a.send = (f: any) => frames.push(f);
+  const row = a.sends.add(randomUUID(), taskId, sessionId, 'fixture', { text: 'Do not discard', attachments: [] });
+  await a.message(JSON.stringify({ type: 'command', id: randomUUID(), sessionId, clientId, controlEpoch: epoch, command: { method: 'stop', params: { id: taskId, epoch: 'fixture', turnId: 'old-turn' } } }));
+  await a.queue;
+  expect(frames.some(f => outcome === 'accepted' ? f.result?.stopped : f.error?.code === outcome)).toBe(true);
+  expect(a.sends.get(row.id, taskId).state).toBe(outcome === 'STALE' ? 'pending' : 'paused');
+});
+it('accepts a server control lease independently of the computer wall clock', async () => {
+  dir = mkdtempSync(join(tmpdir(), 'audit-current-agent-'));
+  agent = new Agent({ origin: 'http://127.0.0.1:8790', dir, adapter: { execute: vi.fn(), close() {}, status: async () => ({ available: true, version: null, reason: null }) } });
+  const a = agent as any, sessionId = randomUUID(), clientId = randomUUID(), epoch = randomUUID();
+  const serverNow = Date.now(); vi.spyOn(Date, 'now').mockReturnValue(serverNow + 120000);
+  a.enabled = true; a.grants.set(sessionId, Date.now() + 60000); a.send = vi.fn();
+  await a.message(JSON.stringify({ type: 'control', id: randomUUID(), lease: { sessionId, clientId, epoch, expires: serverNow + 90000 }, serverTime: serverNow }));
+  expect(a.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'control-result', ok: true }));
+  expect(() => a.authorizeControl(sessionId, clientId, epoch)).not.toThrow();
+  a.controlDeadline = performance.now() - 1;
+  expect(() => a.authorizeControl(sessionId, clientId, epoch)).toThrow('当前为查看模式');
+});

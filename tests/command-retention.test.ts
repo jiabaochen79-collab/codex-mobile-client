@@ -1,0 +1,21 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { AgentStore } from '../src/agent/store.js';
+import { RemoteError } from '../src/shared/protocol.js';
+let store: AgentStore | undefined, raw: DatabaseSync | undefined, dir: string;
+afterEach(() => { store?.close(); raw?.close(); store = undefined; raw = undefined; if (dir) rmSync(dir, { recursive: true, force: true }); vi.restoreAllMocks(); });
+it('retains uncertain create deduplication beyond seven days', async () => {
+  dir = mkdtempSync(join(tmpdir(), 'audit-current-store-')); store = new AgentStore(dir);
+  const initial = Date.now(); const clock = vi.spyOn(Date, 'now').mockReturnValue(initial);
+  const command = { method: 'create' as const, params: { projectId: 'fixture', text: 'create once' } };
+  const execute = vi.fn(async () => { throw new RemoteError('OUTCOME_UNKNOWN', 'Lost reply'); });
+  await expect(store.once('uncertain', command, execute, 'remembered')).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+  clock.mockReturnValue(initial + 8 * 86400000);
+  await store.once('another', { method: 'stop', params: { id: randomUUID(), epoch: 'fixture', turnId: 'round' } }, async () => ({}), 'remembered');
+  await expect(store.once('uncertain', command, execute, 'remembered')).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+  expect(execute).toHaveBeenCalledTimes(1);
+});

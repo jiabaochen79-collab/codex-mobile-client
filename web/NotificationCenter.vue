@@ -141,12 +141,12 @@ async function disable() {
   } catch (e: any) { error.value = e.message; }
   finally { busy.value = false; }
 }
-async function changeKind(kind: 'completed' | 'failed', value: boolean) {
-  if (busy.value || !settings.value.enabled) return;
+async function changeKind(kind: 'completed' | 'failed', value: boolean, input?: HTMLInputElement) {
+  if (busy.value || !settings.value.enabled) { if (input) input.checked = settings.value[kind]; return; }
   busy.value = true; error.value = '';
   try { await save({ ...settings.value, [kind]: value }); }
   catch (e: any) { error.value = e.message; }
-  finally { busy.value = false; }
+  finally { busy.value = false; if (input) input.checked = settings.value[kind]; }
 }
 async function readOne(item: NotificationItem) {
   if (busy.value) return; busy.value = true; error.value = '';
@@ -214,7 +214,7 @@ onUnmounted(() => window.removeEventListener('remote-notification', onIncoming))
       <div v-if="loading" class="notification-loading" role="status"><RefreshCw class="spin" :size="18"/>正在读取提醒设置</div>
       <template v-else>
         <div class="notification-toggle-row"><div><strong>{{ settings.enabled ? '提醒已开启' : '提醒未开启' }}</strong><small>每台电脑分别保存提醒设置</small></div><button v-if="!settings.enabled && canEnableReminders" class="button primary" :disabled="busy" @click="enable"><Bell :size="16"/>开启提醒</button><button v-else-if="!settings.enabled" class="button" disabled>请先添加到主屏幕</button><button v-else class="button" :disabled="busy" @click="disable">关闭提醒</button></div>
-        <div class="notification-kinds"><label><input type="checkbox" :checked="settings.completed" :disabled="busy || !settings.enabled" @change="changeKind('completed', ($event.target as HTMLInputElement).checked)"><span>任务完成</span></label><label><input type="checkbox" :checked="settings.failed" :disabled="busy || !settings.enabled" @change="changeKind('failed', ($event.target as HTMLInputElement).checked)"><span>失败或异常中断</span></label></div>
+        <div class="notification-kinds"><label><input type="checkbox" :checked="settings.completed" :disabled="busy || !settings.enabled" @change="changeKind('completed', ($event.target as HTMLInputElement).checked, $event.target as HTMLInputElement)"><span>任务完成</span></label><label><input type="checkbox" :checked="settings.failed" :disabled="busy || !settings.enabled" @change="changeKind('failed', ($event.target as HTMLInputElement).checked, $event.target as HTMLInputElement)"><span>失败或异常中断</span></label></div>
         <button v-if="settings.enabled && pushConfigured && pushAvailable && systemPushState === 'needed'" class="button notification-browser-push" :disabled="busy" @click="enableBrowserPush"><Bell :size="16"/>开启系统通知</button>
         <p v-if="browserMessage" class="notification-info"><Smartphone v-if="isIos" :size="16"/><ShieldAlert v-else :size="16"/><span>{{ browserMessage }}</span></p>
         <p v-if="info || systemPushState === 'enabled'" class="notification-success" role="status"><Check :size="16"/>{{ info || '系统推送已开启。' }}</p>
