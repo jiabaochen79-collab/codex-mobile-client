@@ -15,6 +15,7 @@ Dates describe development baselines, not a guarantee that a public binary relea
 - Preserve drafts and attachments and explain when browser storage prevents a safe send.
 - Clear polling and listeners when a page is closed before its initial load finishes.
 - Stop update-panel polling once installation begins and ignore pre-install responses.
+- Update the source-map-js indirect dependency to 1.2.2 for GHSA-68fv-2mgg-jv7q.
 
 ## Unreleased
 
