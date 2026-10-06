@@ -37,7 +37,11 @@ export function useAttachments(options: { request: (command: Command, id?: strin
         const timeout = setTimeout(()=>item.controller?.abort(),60000); const started = Date.now();
         try {
           const response = await fetch(`/api/uploads/${item.attachment!.id}/${offset}`,{method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/octet-stream','X-Client-Id':control.clientId,'X-Control-Epoch':control.epoch,...(options.deviceId?{'X-Remote-Device':options.deviceId}:{})},body:item.file.slice(offset,offset+Math.min(MAX_UPLOAD_CHUNK,chunkSize)),signal:item.controller.signal});
-          const result=await response.json(); if(!response.ok)throw Object.assign(new Error(result.error?.message??'上传失败，请重试。'),{code:result.error?.code,status:response.status});item.attachment=result;
+          if (!response.ok) {
+            const result = await response.json().catch(() => undefined);
+            throw Object.assign(new Error(result?.error?.message ?? '上传失败，请重试。'), { code: result?.error?.code, status: response.status });
+          }
+          item.attachment = await response.json();
           if (item.attachment!.offset <= offset) throw new Error('电脑未确认上传进度，请重试。');
           failures = 0; const elapsed = Date.now() - started;
           if (elapsed < 2000) chunkSize = Math.min(64 * 1024, chunkSize * 2);

@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { AgentStore } from './store.js';
-import { MAX_FRAME, RemoteError, codeSchema, passwordSettingsSchema, commandFrame, publicError, readMethods, isSafetyCommand, supportsDesktopCommand, uid, type ControlLease, type PasswordSettings, type ClientStatus, type DesktopAdapter, type Snapshot } from '../shared/protocol.js';
+import { MAX_FRAME, RemoteError, codeSchema, passwordSettingsSchema, commandFrame, publicError, readMethods, isSafetyCommand, supportsDesktopCommand, uid, type ControlLease, type PasswordSettings, type ClientStatus, type DesktopAdapter, type Snapshot, type Command, type LocalAttachment } from '../shared/protocol.js';
 import { redeemSchema, subscriptionSchema, type Subscription } from '../shared/subscription.js';
 import { parseUploadFrame } from '../shared/upload-frame.js';
 import { UploadStore } from './uploads.js';
@@ -52,6 +52,7 @@ export class Agent {
   private queue = Promise.resolve();
   private commandWork: { priority: number; work: () => Promise<void> }[] = [];
   private queued = 0;
+  private safetyQueued = 0;
   private mediaQueue = Promise.resolve();
   private mediaQueued = 0;
   private subscription?: Subscription;
@@ -159,7 +160,15 @@ export class Agent {
     if (this.closing) return;
     let m: any; try { m = JSON.parse(text); } catch { return; }
     if (m.type === 'queue-authorization') { const parsed = z.object({ id: uid, allowed: z.boolean(), validForMs: z.number().int().min(0).max(10000) }).safeParse(m); if (parsed.success) { const pending = this.queueAuthorizations.get(parsed.data.id); if (pending) { clearTimeout(pending.timer); this.queueAuthorizations.delete(parsed.data.id); pending.resolve(parsed.data); } } return; }
-    if (m.type === 'notification-ack') { const parsed = z.object({ type: z.literal('notification-ack'), eventId: z.string().regex(/^[a-f0-9]{64}$/), accepted: z.boolean() }).safeParse(m); if (parsed.success && parsed.data.accepted) this.store.ackNotification(parsed.data.eventId); return; }
+    if (m.type === 'notification-ack') {
+      const parsed = z.object({ type: z.literal('notification-ack'), eventId: z.string().regex(/^[a-f0-9]{64}$/), accepted: z.boolean(), errorCode: z.string().optional(), occurredAt: z.number().int().positive().optional(), serverTime: z.number().int().positive().optional() }).safeParse(m);
+      if (parsed.success) {
+        const ack = parsed.data;
+        if (ack.accepted) this.store.ackNotification(ack.eventId);
+        else if (ack.errorCode === 'NOTIFICATION_TIME' && ack.occurredAt !== undefined && ack.serverTime !== undefined && this.store.rejectNotificationTime(ack.eventId, ack.occurredAt)) this.store.syncNotificationClock(this.origin, ack.serverTime);
+      }
+      return;
+    }
     if (m.type === 'subscription') { const parsed = subscriptionSchema.safeParse(m.subscription); if (parsed.success) { this.subscription = parsed.data; this.store.syncNotificationClock(this.origin, parsed.data.serverTime); void this.flushNotifications(); } return; }
     if (m.type === 'control') {
       const lease = z.object({ sessionId: uid, clientId: uid, epoch: uid, expires: z.number().int() }).nullable().safeParse(m.lease);
@@ -194,8 +203,9 @@ export class Agent {
     const frame = parsed.data;
     if (this.updateFrozen) { this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, error: { code: 'UPDATING', message: '助手正在准备更新，请稍后重试。' } }); return; }
     const image = frame.command.method === 'image.read';
-    if (image ? this.mediaQueued >= 6 : this.queued >= 16) { this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, error: { code: 'BUSY', message: '请求过多，请稍后重试。' } }); return; }
-    if (image) this.mediaQueued++; else this.queued++;
+    const safety = isSafetyCommand(frame.command);
+    if (image ? this.mediaQueued >= 6 : safety ? this.safetyQueued >= 6 : this.queued >= 16) { this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, error: { code: 'BUSY', message: '请求过多，请稍后重试。' } }); return; }
+    if (image) this.mediaQueued++; else if (safety) this.safetyQueued++; else this.queued++;
     if (frame.command.method === 'stop') { try { this.authorizeControl(sessionId, m.clientId, frame.controlEpoch); this.stopping.add(frame.command.params.id); for (const id of this.sends.pause('任务已停止，待发送消息已暂停。', frame.command.params.id)) this.notifyQueue(id); } catch {} }
     const work = async () => {
       try {
@@ -236,10 +246,9 @@ export class Agent {
             this.sends.add(frame.id, current.id, sessionId, current.epoch, { text: command.params.text, attachments: attachments.map(a => ({ id: a.id, name: a.name })) }); this.updateSubscriptions(); this.notifyQueue(current.id); return { accepted: true, queued: true, messageId: frame.id };
           }
           if (command.method === 'send' && command.params.mode !== 'steer' && this.sends.entries(command.params.id).length) throw new RemoteError('QUEUE_PENDING', '当前任务已有待发送消息，请使用排队发送或先处理队列。');
-          const dispatch = () => { authorize(); this.uploads.commit(attachments.map(a => a.id)); };
           const startedAt = Date.now();
           if (command.method === 'send' || command.method === 'plan.respond') await this.completionMonitor.watch(command.params.id, startedAt);
-          const executed = await this.options.adapter.execute(command, frame.id, dispatch, attachments);
+          const executed = command.method === 'send' ? await this.executeSend(command, frame.id, authorize, attachments) : await this.options.adapter.execute(command, frame.id, authorize, attachments);
           if (command.method === 'create' && typeof (executed as { threadId?: unknown })?.threadId === 'string') this.completionMonitor.watch((executed as { threadId: string }).threadId, startedAt);
           return executed;
         }, sessionId);
@@ -248,14 +257,35 @@ export class Agent {
           this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, result });
         }
       } catch (error) { this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, error: publicError(error) }); }
-      finally { if (image) this.mediaQueued--; else this.queued--; if (frame.command.method === 'stop') this.stopping.delete(frame.command.params.id); }
+      finally { if (image) this.mediaQueued--; else if (safety) this.safetyQueued--; else this.queued--; if (frame.command.method === 'stop') this.stopping.delete(frame.command.params.id); }
     };
     if (frame.command.method === 'queue.remove' || frame.command.method === 'command.status') void work();
     else if (image) this.mediaQueue = this.mediaQueue.then(work);
     else {
-      this.commandWork.push({ priority: isSafetyCommand(frame.command) ? 0 : readMethods.has(frame.command.method) ? 2 : 1, work });
+      this.commandWork.push({ priority: safety ? 0 : readMethods.has(frame.command.method) ? 2 : 1, work });
       this.commandWork.sort((a, b) => a.priority - b.priority);
       this.queue = this.queue.then(async () => { await this.commandWork.shift()?.work(); });
+    }
+  }
+  private async executeSend(command: Extract<Command, { method: 'send' }>, commandId: string, authorize: () => void, attachments: LocalAttachment[], onDispatch?: (dispatched: boolean) => void) {
+    const ids = attachments.map(a => a.id), holdId = `dispatch:${commandId}`;
+    let dispatched = false, retain = false;
+    try {
+      const result = await this.options.adapter.execute(command, commandId, () => {
+        authorize();
+        // Protect files during IPC and across a crash without declaring an unaccepted send committed.
+        for (const id of ids) this.store.db.prepare('INSERT OR IGNORE INTO upload_holds VALUES(?,?)').run(holdId, id);
+        dispatched = true; onDispatch?.(true);
+      }, attachments);
+      retain = true;
+      return result;
+    } catch (error) {
+      retain = dispatched && (!(error instanceof RemoteError) || ['OUTCOME_UNKNOWN', 'INTERNAL'].includes(error.code));
+      if (!retain) onDispatch?.(false);
+      throw error;
+    } finally {
+      if (retain) this.uploads.commit(ids);
+      this.store.db.prepare('DELETE FROM upload_holds WHERE queue_id=?').run(holdId);
     }
   }
   private async flushNotifications() {
@@ -278,7 +308,7 @@ export class Agent {
     });
   }
   private pumpQueue() {
-    if (this.updateFrozen || this.pumping || this.closing || !this.enabled || this.connection !== 'online' || !this.client.available || this.queued) return;
+    if (this.updateFrozen || this.pumping || this.closing || !this.enabled || this.connection !== 'online' || !this.client.available || this.queued || this.safetyQueued) return;
     const first = new Map<string, QueueEntry>(); for (const row of this.sends.entries()) if (!first.has(row.conversation)) first.set(row.conversation, row);
     const heads = [...first.values()];
     if (!heads.length) return; const entry = heads[this.queueCursor++ % heads.length]; this.pumping = true; this.queued++;
@@ -306,7 +336,7 @@ export class Agent {
       };
       authorize(); this.sends.mark(current, 'sending'); this.notifyQueue(current.conversation);
       await this.completionMonitor.watch(current.conversation);
-      await this.options.adapter.execute({ method: 'send', params: { id: current.conversation, epoch: current.epoch, text: value.text, attachmentIds: value.attachments.map(a => a.id) } }, current.attempt, () => { authorize(); this.uploads.commit(attachments.map(a => a.id)); dispatched = true; }, attachments);
+      await this.executeSend({ method: 'send', params: { id: current.conversation, epoch: current.epoch, text: value.text, attachmentIds: value.attachments.map(a => a.id) } }, current.attempt, authorize, attachments, value => { dispatched = value; });
       this.sends.finish(current); this.notifyQueue(current.conversation); this.updateSubscriptions();
     } catch (e) {
       const row = this.sends.entries(entry.conversation).find(r => r.id === entry.id); if (!row) return;
@@ -375,7 +405,7 @@ export class Agent {
   private async updateBlockers() {
     const reasons: string[] = [];
     this.uploads.cleanup();
-    if (this.queued || this.mediaQueued || this.pumping) reasons.push('有正在处理的远程操作');
+    if (this.queued || this.safetyQueued || this.mediaQueued || this.pumping) reasons.push('有正在处理的远程操作');
     if (this.sends.entries().length) reasons.push('有尚未发送的队列消息');
     if (this.store.db.prepare('SELECT 1 FROM uploads WHERE committed=0 AND ready=0').get()) reasons.push('有尚未完成的附件上传');
     if (this.options.adapter.updateBlockers) reasons.push(...await this.options.adapter.updateBlockers());

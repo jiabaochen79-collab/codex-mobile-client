@@ -2,6 +2,20 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.33 - 2026-10-06
+
+### Fixed
+
+- Reserve bounded capacity for authorized safety commands when ordinary requests are full.
+- Release unsent attachments after an explicit native rejection; retain files and prevent replay when the outcome is unknown.
+- Keep completion identities separate across installations and correct timestamps only after a definite server rejection.
+- Revalidate the completed task round before applying desktop or mobile read receipts.
+- Preserve new notifications, current queues and deliberate navigation when older asynchronous responses arrive.
+- Retry uploads after HTML gateway errors using confirmed upload offsets.
+- Preserve drafts and attachments and explain when browser storage prevents a safe send.
+- Clear polling and listeners when a page is closed before its initial load finishes.
+- Stop update-panel polling once installation begins and ignore pre-install responses.
+
 ## Unreleased
 
 ### Fixed

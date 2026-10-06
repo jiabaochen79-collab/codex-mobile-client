@@ -138,6 +138,7 @@ async function restoreConnection() {
       else if (target || linkedDevice) { deviceId.value = target?.deviceId ?? linkedDevice; adding.value = true; }
     }
   } catch (e: any) {
+    if (disposed) return;
     restorePending = ['NETWORK', 'OUTCOME_UNKNOWN'].includes(e.code) || [502, 503, 504].includes(e.status);
     if (!error.value || error.value === restoreError) error.value = restoreError = e.message;
     if (restorePending && restoreAttempts < 3) restoreRetry = setTimeout(() => { if (document.visibilityState === 'visible') void restoreConnection(); }, [1000, 3000, 10000][restoreAttempts++]);
@@ -181,6 +182,7 @@ function closeOverlay(event: KeyboardEvent) { if (event.key !== 'Escape' || work
 onMounted(async () => {
   navigator.serviceWorker?.addEventListener('message', notificationMessage);
   await restoreConnection();
+  if (disposed) return;
   if (new URL(location.href).searchParams.has('notification')) void openNotificationDevice();
   resumeReload.ready();
   document.addEventListener('visibilitychange', foreground); window.addEventListener('pageshow', foreground); window.addEventListener('online', online); window.addEventListener('keydown', closeOverlay);

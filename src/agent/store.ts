@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { hash, privateDirectory } from '../shared/security.js';
@@ -61,6 +62,10 @@ export class AgentStore {
   saveGrant(origin: string, id: string, expires: number) { this.db.prepare('INSERT INTO remembered_grants VALUES(?,?,?)').run(origin, id, expires); }
   deleteGrant(origin: string, id: string) { this.db.prepare('DELETE FROM remembered_grants WHERE origin=? AND id=?').run(origin, id); }
   clearGrants(origin: string) { this.db.prepare('DELETE FROM remembered_grants WHERE origin=?').run(origin); }
+  notificationNamespace() {
+    const prior = this.get('notification:namespace'); if (prior) return prior;
+    const namespace = randomUUID(); this.set('notification:namespace', namespace); return namespace;
+  }
   notificationCursor(path: string) {
     return this.db.prepare('SELECT path,offset,mtime,size,fileId,baselineAt,remainder FROM notification_cursors WHERE path=?').get(path) as { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; remainder: string } | undefined;
   }
@@ -98,6 +103,9 @@ export class AgentStore {
     return at;
   }
   ackNotification(eventId: string) { this.db.prepare('UPDATE notification_outbox SET ackedAt=? WHERE eventId=?').run(Date.now(), eventId); }
+  rejectNotificationTime(eventId: string, occurredAt: number) {
+    return this.db.prepare('UPDATE notification_outbox SET serverOccurredAt=NULL WHERE eventId=? AND serverOccurredAt=? AND ackedAt IS NULL').run(eventId, occurredAt).changes > 0;
+  }
   pruneNotifications(before = Date.now() - 30 * 86400000) { this.db.prepare('DELETE FROM notification_outbox WHERE ackedAt IS NOT NULL AND createdAt<?').run(before); this.db.prepare('DELETE FROM notification_watches WHERE lastWatchedAt<?').run(before); }
   commandStatus(id: string, session: string, conversation: string) {
     const row = this.db.prepare('SELECT result FROM commands WHERE id=? AND session=? AND conversation=?').get(id, session, conversation);

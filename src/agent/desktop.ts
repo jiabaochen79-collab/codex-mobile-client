@@ -426,8 +426,9 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       const db = this.index();
       try {
         if (command.method === 'activity') return { activities: await this.withRuntimeActivity(command.params.ids.flatMap(id => { try { return [this.taskActivity(id, db)]; } catch { return []; } })) };
-        const current = this.taskActivity(command.params.id, db);
+        let current = this.taskActivity(command.params.id, db);
         const statuses = await this.runtimeActivity.read([current.id]);
+        current = this.taskActivity(command.params.id, db);
         const running = runtimeRunning(this.followed.get(current.id)?.state?.threadRuntimeStatus) ?? statuses.get(current.id);
         const seen = running === false && !!current.completionId && current.completionId === command.params.completionId
           && (!command.params.turnId || current.completionId.startsWith(`${command.params.turnId}:`));

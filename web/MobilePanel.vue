@@ -170,6 +170,7 @@ function request(command: Command, id: string = crypto.randomUUID()): Promise<an
 const notificationHeaders = () => ({ 'X-Remote-Device': props.deviceId });
 let refreshingNotifications = false;
 const incomingDuringBadge = new Map<string, any>();
+const notificationReads = new Set<Map<string, any>>();
 async function refreshNotificationBadge() {
   if (refreshingNotifications) return; refreshingNotifications = true; incomingDuringBadge.clear();
   try {
@@ -181,13 +182,26 @@ async function refreshNotificationBadge() {
 async function suppressVisibleNotification(item: any) {
   const viewed = () => document.visibilityState === 'visible' && !drawer.value && !notificationOpen.value && !chatScroll.awayFromBottom.value && selected.value?.id === item.taskId && snapshot.value && !snapshot.value.busy && snapshot.value.lastTurnId === item.turnId;
   if (!viewed()) return;
+  const incoming = new Map<string, any>(); notificationReads.add(incoming);
   try {
     const result = await api('/api/notifications', undefined, notificationHeaders());
     const row = (result.items ?? []).find((entry: any) => entry.id === item.id);
     if (!viewed()) return;
-    const readResult = row && !row.readAt ? await api(`/api/notifications/${encodeURIComponent(item.id)}/read`, undefined, notificationHeaders(), 'POST') : undefined;
-    notificationUnread.value = typeof readResult?.unread === 'number' ? readResult.unread : Math.max(0, (Number(result.unread) || 0) - (row && !row.readAt ? 1 : 0));
-  } catch {}
+    if (row && !row.readAt) await readNotification(item.id);
+    else {
+      const ids = new Set((result.items ?? []).map((entry: any) => entry.id));
+      notificationUnread.value = (Number(result.unread) || 0) + [...incoming.values()].filter(entry => !entry.readAt && (typeof result.throughSequence === 'number' && typeof entry.sequence === 'number' ? entry.sequence > result.throughSequence : !ids.has(entry.id))).length;
+    }
+  } catch {} finally { notificationReads.delete(incoming); }
+}
+async function readNotification(id: string) {
+  const incoming = new Map<string, any>(); notificationReads.add(incoming);
+  try {
+    const result = await api(`/api/notifications/${encodeURIComponent(id)}/read`, undefined, notificationHeaders(), 'POST');
+    notificationUnread.value = typeof result.throughSequence === 'number'
+      ? (Number(result.unread) || 0) + [...incoming.values()].filter(item => item.id !== id && !item.readAt && typeof item.sequence === 'number' && item.sequence > result.throughSequence).length
+      : Math.max(0, notificationUnread.value - 1);
+  } finally { notificationReads.delete(incoming); }
 }
 function knownNotificationTask(taskId: string) {
   return Object.values(groups).flatMap(group => group.rows).find(row => row.id === taskId) ?? searchRows.value.find(row => row.id === taskId) ?? notificationTasks[taskId];
@@ -200,16 +214,22 @@ async function resolveNotificationTasks(ids: string[]) {
   if (!active.value || !canRead.value || resolvingNotificationTasks || ids.every(id => notificationTasks[id])) return resolvingNotificationTasks;
   const epoch = navigationEpoch;
   resolvingNotificationTasks = (async () => {
-    let offset = 0; let cursor = hasCapability('task-list-cursor') ? 'new' : undefined;
+    const attempted = new Set<string>();
     try {
-      // The "recent" group excludes project tasks, so resolve names from the unfiltered list.
       for (;;) {
-        const result = await request({ method: 'list', params: { offset, ...(cursor ? { cursor } : {}) } }); cursor = result.cursor;
-        if (!active.value || !canRead.value || epoch !== navigationEpoch) return;
-        for (const task of result.conversations as Conversation[]) if (notificationTaskIds.has(task.id)) notificationTasks[task.id] = task;
-        const next = result.nextOffset ?? offset + result.conversations.length;
-        if (!result.hasMore || next <= offset || [...notificationTaskIds].every(id => notificationTasks[id])) return;
-        offset = next;
+        const wanted = [...notificationTaskIds].filter(id => !notificationTasks[id] && !attempted.has(id));
+        if (!wanted.length) return;
+        for (const id of wanted) attempted.add(id);
+        let offset = 0; let cursor = hasCapability('task-list-cursor') ? 'new' : undefined;
+        // IDs added behind the cursor get one further pass; missing tasks never loop.
+        for (;;) {
+          const result = await request({ method: 'list', params: { offset, ...(cursor ? { cursor } : {}) } }); cursor = result.cursor;
+          if (!active.value || !canRead.value || epoch !== navigationEpoch) return;
+          for (const task of result.conversations as Conversation[]) if (notificationTaskIds.has(task.id)) notificationTasks[task.id] = task;
+          const next = result.nextOffset ?? offset + result.conversations.length;
+          if (!result.hasMore || next <= offset || wanted.every(id => notificationTasks[id])) break;
+          offset = next;
+        }
       }
     } catch { /* Offline and deleted tasks retain their task-number fallback. */ }
   })();
@@ -248,8 +268,7 @@ async function openNotificationFromUrl() {
     const { item } = await api(`/api/notifications/${encodeURIComponent(id)}`, undefined, notificationHeaders());
     if (!stillRequested() || !active.value || !canRead.value) return;
     if (!await openNotificationTask(item.taskId, stillRequested)) return;
-    const readResult = !item.readAt ? await api(`/api/notifications/${encodeURIComponent(id)}/read`, undefined, notificationHeaders(), 'POST') : undefined;
-    notificationUnread.value = typeof readResult?.unread === 'number' ? readResult.unread : Math.max(0, notificationUnread.value - (item.readAt ? 0 : 1));
+    if (!item.readAt) await readNotification(id);
     notificationOpen.value = false;
     if (stillRequested()) {
       const current = new URL(location.href); current.searchParams.delete('notification'); current.searchParams.delete('notificationDevice');
@@ -298,6 +317,7 @@ function openSocket() {
       const item = m.notification;
       if (item?.deviceId === props.deviceId) {
         if (refreshingNotifications) incomingDuringBadge.set(item.id, item);
+        for (const incoming of notificationReads) incoming.set(item.id, item);
         notificationUnread.value = Math.max(1, notificationUnread.value + (item.readAt ? 0 : 1));
         window.dispatchEvent(new CustomEvent('remote-notification', { detail: item }));
         setTimeout(() => { void suppressVisibleNotification(item); }, 200);
@@ -470,7 +490,8 @@ async function read(activate = false) {
 }
 async function readQueue() {
   const id = selected.value?.id; if (!id || readingQueue || !hasCapability('queued-send') || !connected.value || !status.value.online || !status.value.enabled || !serviceActive.value) return;
-  readingQueue = true; try { const result = await request({ method: 'queue.list', params: { id } }); if (selected.value?.id === id && JSON.stringify(result.queued) !== JSON.stringify(queuedMessages.value)) await chatScroll.change(() => { queuedMessages.value = result.queued; }); } catch {} finally { readingQueue = false; }
+  const cycle = modeSyncCycle;
+  readingQueue = true; try { const result = await request({ method: 'queue.list', params: { id } }); if (active.value && selected.value?.id === id && cycle === modeSyncCycle && JSON.stringify(result.queued) !== JSON.stringify(queuedMessages.value)) await chatScroll.change(() => { queuedMessages.value = result.queued; }); } catch {} finally { readingQueue = false; }
 }
 async function queueAction(queuedId: string, action: 'remove' | 'resume') {
   const id = selected.value?.id; if (!id) return;
@@ -517,7 +538,11 @@ async function perform(command: Command) {
   busy.value = true; error.value = '';
   const requestId = crypto.randomUUID();
   try {
-    if (command.method === 'send') { pendingSends[command.params.id] = { requestId, text: draft.value, message: '正在等待电脑确认发送，内容已保留。', attachments: attachments.current.value.flatMap(item => item.attachment ? [item.attachment] : []) }; savePendingSends(); }
+    if (command.method === 'send') {
+      pendingSends[command.params.id] = { requestId, text: draft.value, message: '正在等待电脑确认发送，内容已保留。', attachments: attachments.current.value.flatMap(item => item.attachment ? [item.attachment] : []) };
+      try { savePendingSends(); }
+      catch { throw new Error('无法保存发送确认记录，本次未发送。草稿和附件已保留，请检查浏览器存储权限或释放空间，恢复后再次点击发送。'); }
+    }
     await request(command, requestId);
     if (command.method === 'send') settleSend(command.params.id, pendingSends[command.params.id]);
     return true;
@@ -626,9 +651,12 @@ async function logout() {
 }
 async function newConversation(project?: string) {
   if (!canControl.value || !canUse('create-tasks')) return;
+  cancelNotificationNavigation();
+  const revision = notificationNavigationRevision; const cycle = modeSyncCycle;
+  const stillPreparing = () => active.value && canControl.value && revision === notificationNavigationRevision && cycle === modeSyncCycle;
   moreMenu.value = false; error.value = '';
-  try { const r = await request({ method: 'projects', params: {} }); projects.value = r.projects; projectId.value = pendingCreate.value?.command.params.projectId ?? project ?? selected.value?.projectId ?? r.projects[0]?.id ?? ''; if (pendingCreate.value) newText.value = pendingCreate.value.command.params.text; projectModal.value = true; }
-  catch (e: any) { error.value = e.message; }
+  try { const r = await request({ method: 'projects', params: {} }); if (!stillPreparing()) return; projects.value = r.projects; projectId.value = pendingCreate.value?.command.params.projectId ?? project ?? selected.value?.projectId ?? r.projects[0]?.id ?? ''; if (pendingCreate.value) newText.value = pendingCreate.value.command.params.text; projectModal.value = true; }
+  catch (e: any) { if (stillPreparing()) error.value = e.message; }
 }
 async function create() {
   if (busy.value || !canControl.value || !canUse('create-tasks') || !projectId.value || !newText.value.trim()) return; cancelNotificationNavigation(); busy.value = true;
@@ -660,7 +688,21 @@ async function refreshActivity(){
   try{const ids=[...new Set([...Object.values(groups).flatMap(g=>g.rows.map(c=>c.id)),...searchRows.value.map(c=>c.id),...(selected.value?[selected.value.id]:[])])].slice(0,150);if(ids.length){const r=await request({method:'activity',params:{ids}});for(const a of r.activities)activities[a.id]=a;}}
   catch{}finally{activityLoading=false;}
 }
-async function markSeen(){const s=snapshot.value;if(!active.value||!s||s.busy||!s.completionId||drawer.value||document.visibilityState!=='visible'||chatScroll.awayFromBottom.value||!hasCapability('activity'))return;const key=s.id+':'+s.completionId;if(seenKey===key)return;seenKey=key;try{const turnId=s.lastTurnId&&s.completionId.startsWith(`${s.lastTurnId}:`)?s.lastTurnId:undefined;const result=await request({method:'seen',params:{id:s.id,completionId:s.completionId,...(turnId?{turnId}:{})}});if(result.seen!==true){seenKey='';return;}if(activities[s.id])activities[s.id].unread=false;for(const g of Object.values(groups))for(const c of g.rows)if(c.id===s.id)c.unread=false;}catch{seenKey='';}}
+async function markSeen() {
+  const s = snapshot.value;
+  if (!active.value || !s || s.busy || !s.completionId || drawer.value || document.visibilityState !== 'visible' || chatScroll.awayFromBottom.value || !hasCapability('activity')) return;
+  const id = s.id, completionId = s.completionId, lastTurnId = s.lastTurnId, cycle = modeSyncCycle;
+  const key = id + ':' + completionId; if (seenKey === key) return; seenKey = key;
+  try {
+    const turnId = lastTurnId && completionId.startsWith(`${lastTurnId}:`) ? lastTurnId : undefined;
+    const result = await request({ method: 'seen', params: { id, completionId, ...(turnId ? { turnId } : {}) } });
+    if (result.seen !== true || !active.value || cycle !== modeSyncCycle || snapshot.value?.id !== id || snapshot.value.busy || snapshot.value.completionId !== completionId || snapshot.value.lastTurnId !== lastTurnId) {
+      if (seenKey === key) seenKey = ''; return;
+    }
+    if (activities[id]?.completionId === completionId) activities[id].unread = false;
+    for (const g of Object.values(groups)) for (const c of g.rows) if (c.id === id && (!c.completionId || c.completionId === completionId)) c.unread = false;
+  } catch { if (seenKey === key) seenKey = ''; }
+}
 watch([()=>chatScroll.awayFromBottom.value,drawer],()=>{void markSeen();});
 function chooseAttachmentSource(source:'photos'|'camera'|'files') {
   if(attachmentReason.value)return;

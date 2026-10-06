@@ -9,7 +9,7 @@ const tasks = {
   build: [...check, ts('scripts/assets.ts'), ['node_modules/vite/bin/vite.js', 'build'], ts('scripts/build.ts')],
   native: [ts('scripts/native.ts')],
   installer: [ts('scripts/installer-windows.ts')],
-  test: [['node_modules/vitest/vitest.mjs', 'run']],
+  test: [['node_modules/vitest/vitest.mjs', 'run'], ['node_modules/vitest/vitest.mjs', 'run', '--config', 'tests/mobile-panel.vitest.config.ts', '--passWithNoTests']],
   agent: [ts('src/agent/main.ts')],
   package: [ts('scripts/package-windows.ts')], probe: [ts('scripts/probe-desktop.ts')]
 };

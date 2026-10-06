@@ -19,13 +19,13 @@ const canBuy = computed(() => data.value?.readiness.ready && plan.value?.availab
 function changedChoice() { accepted.value = false; key.value = crypto.randomUUID(); }
 const date = (value: number | null) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-';
 let polling: ReturnType<typeof setInterval> | undefined;
-let readRevision = 0, reading = false;
+let readRevision = 0, reading = false, disposed = false;
 let paymentRevision = 0;
 function returnToOrders() { paymentRevision++; active.value = undefined; payUrl.value = ''; qr.value = ''; view.value = 'orders'; }
 async function load(force = false) {
-  if (reading && !force) return;
+  if (disposed || reading && !force) return;
   const revision = ++readRevision; reading = true;
-  try { const orders = await api(base); const info = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription');
+  try { const orders = await api(base); if (disposed || revision !== readRevision) return; const info = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription');
     if (revision !== readRevision) return;
     data.value = orders; catalog.value = info.catalog;
     if (!channels.value.includes(channel.value)) channel.value = channels.value[0] ?? '';
@@ -67,8 +67,8 @@ async function copyLink() {
   finally { await link.catch(() => {}); loading.value = false; }
 }
 async function refund() { loading.value = true; error.value = ''; readRevision++; reading = false; try { await api(`${base}/${refundTarget.value.id}/refund`, { reason: refundReason.value, explanation: explanation.value }); refundTarget.value = undefined; explanation.value = ''; await load(true); } catch (e: any) { error.value = e.message; } finally { loading.value = false; } }
-onMounted(async () => { loading.value = true; await load(); loading.value = false; polling = setInterval(() => { if (!loading.value && document.visibilityState === 'visible') void load(); }, 5000); });
-onUnmounted(() => { readRevision++; paymentRevision++; clearInterval(polling); });
+onMounted(async () => { loading.value = true; await load(); if (disposed) return; loading.value = false; polling = setInterval(() => { if (!loading.value && document.visibilityState === 'visible') void load(); }, 5000); });
+onUnmounted(() => { disposed = true; readRevision++; paymentRevision++; clearInterval(polling); });
 </script>
 <template>
   <div class="modal-backdrop purchase-backdrop">

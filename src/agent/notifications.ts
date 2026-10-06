@@ -29,11 +29,12 @@ function timestamp(value: unknown, fallback: number) {
 }
 
 export class CompletionMonitor {
+  private namespace: string;
   private timer?: NodeJS.Timeout;
   private polling = false;
   private closed = false;
   private startedAt = Date.now();
-  constructor(private store: AgentStore, private sources: (taskIds?: string[]) => Promise<NotificationSource[]> | NotificationSource[]) {}
+  constructor(private store: AgentStore, private sources: (taskIds?: string[]) => Promise<NotificationSource[]> | NotificationSource[]) { this.namespace = store.notificationNamespace(); }
   start(intervalMs = 2000) {
     if (this.timer) return;
     void this.poll();
@@ -101,7 +102,7 @@ export class CompletionMonitor {
       if (!status || !turnId || turnId.length > 200) continue;
       const occurredAt = timestamp(event.timestamp, 0);
       if (occurredAt < baselineAt) continue;
-      const eventId = createHash('sha256').update(`${source.id}\0${turnId}\0${status}`).digest('hex');
+      const eventId = createHash('sha256').update(`${this.namespace}\0${source.id}\0${turnId}\0${status}`).digest('hex');
       events.push({ eventId, taskId: source.id, turnId, status, occurredAt, protocolVersion: 1 });
     }
     this.store.recordNotifications(events, next);

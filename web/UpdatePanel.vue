@@ -5,8 +5,8 @@ import { api } from './api';
 const emit = defineEmits<{ close: [] }>(); const state = ref<any>(); const actionError = ref(''); const readError = ref(''); const busy = ref(false); const authorized = ref(0); const confirm = ref(false); let timer: ReturnType<typeof setInterval>;
 let revision = 0; let reading = false; let closed = false;
 async function load() {
-  if (reading || closed) return; reading = true; const rev = revision;
-  try { const next = await api('/local/update/state'); const local = await api('/local/state'); if (rev !== revision || closed) return; state.value = next; authorized.value = local.authorizedCount; readError.value = ''; }
+  if (reading || closed || state.value?.phase === 'installing') return; reading = true; const rev = revision;
+  try { const next = await api('/local/update/state'); if (rev !== revision || closed) return; const local = await api('/local/state'); if (rev !== revision || closed) return; state.value = next; authorized.value = local.authorizedCount; readError.value = ''; }
   catch (e: any) { if (rev === revision && !closed) readError.value = e.message; }
   finally { reading = false; }
 }
