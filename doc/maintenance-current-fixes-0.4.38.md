@@ -16,6 +16,7 @@
 - Acquire notification permission within the enabling click; handle synchronous permission failures without leaving the form busy.
 - Do not dismiss unsaved model settings on an outside tap.
 - Identify iPad desktop-mode diagnostics consistently as iOS.
+- Upgrade sharp to the patched release for the high-severity librsvg advisory GHSA-wq5f-xc86-pv6w found during packaging.
 
 ## Boundaries
 
