@@ -5,6 +5,41 @@ const mount = (kind: string) => origin + '/@fs/' + fileURLToPath(new URL('./comp
 const notification = (id: string) => ({ id, deviceId: '123456789', taskId: id, turnId: id, status: 'completed', occurredAt: Date.now(), createdAt: Date.now(), readAt: null, delivery: 'accepted' });
 const update = (phase: string) => ({ phase, progress: 100, version: '0.4.28', autoDownload: true });
 
+for (const newer of [false, true]) test(`reconciles arrivals against the persisted read-all watermark (${newer})`, async ({ page }) => {
+  let held: Route | undefined;
+  await page.route('**/api/notifications/settings', route => route.fulfill({ json: { settings: { enabled: true }, pushConfigured: false } }));
+  await page.route('**/api/notifications', route => route.fulfill({ json: { items: [{ ...notification('old'), sequence: 1 }], unread: 1, throughSequence: 1 } }));
+  await page.route('**/api/notifications/read-all', route => { held = route; });
+  await page.goto(mount('notifications')); await expect(page.locator('#unread')).toHaveText('1');
+  await page.getByRole('button', { name: '全部标为已读', exact: true }).click(); await expect.poll(() => !!held).toBe(true);
+  await page.evaluate(detail => window.dispatchEvent(new CustomEvent('remote-notification', { detail })), { ...notification('during'), sequence: 2 });
+  await held!.fulfill({ json: { ok: true, readAt: Date.now(), throughSequence: newer ? 1 : 2, unread: 0 } });
+  await expect(page.locator('#unread')).toHaveText(newer ? '1' : '0'); await expect(page.locator('.notification-item.unread')).toHaveCount(newer ? 1 : 0);
+});
+test('preserves a payment ticket after exchange failure and removes it only after successful retry', async ({ page }) => {
+  let exchanges = 0; let starts = 0; let healthy = false; const order = { id: 'order-fixture', deviceId: '123456789', planName: 'Monthly', priceFen: 600, days: 30, channel: 'alipay', status: 'pending', serviceStatus: '未开通', expires: Date.now() + 900000 };
+  await page.route('**/api/payments/session**', route => {
+    if (route.request().method() === 'POST') { exchanges++; return route.fulfill(!healthy ? { status: 503, json: { error: { message: 'temporary exchange failure' } } } : { json: { orderId: order.id } }); }
+    return route.fulfill({ json: { order, readiness: { ready: true } } });
+  });
+  await page.route('**/api/payments/start', route => { starts++; return route.fulfill({ json: {} }); });
+  await page.goto(mount('pay') + '#ticket=fixture-ticket'); await expect(page.getByRole('alert')).toHaveText('temporary exchange failure');
+  expect(new URL(page.url()).hash).toBe('#ticket=fixture-ticket'); expect(exchanges).toBe(1);
+  await page.reload(); await expect(page.getByRole('alert')).toHaveText('temporary exchange failure'); expect(new URL(page.url()).hash).toBe('#ticket=fixture-ticket'); healthy = true;
+  await page.getByRole('button', { name: '重新读取订单', exact: true }).click(); await expect(page.getByRole('button', { name: '支付宝付款', exact: true })).toBeEnabled();
+  expect(new URL(page.url()).hash).toBe(''); expect(new URL(page.url()).searchParams.get('order')).toBe(order.id); expect(starts).toBe(0); expect(exchanges).toBe(3);
+  await page.goto(mount('pay') + '&order=' + order.id); await expect(page.getByRole('button', { name: '支付宝付款', exact: true })).toBeEnabled(); expect(exchanges).toBe(3);
+});
+test('clears desktop read errors on recovery without erasing mutation errors', async ({ page }) => {
+  await page.clock.install(); let healthy = false;
+  await page.route('**/local/state', route => route.fulfill(healthy ? { json: { deviceId: '123456789', enabled: true, connection: 'online', client: {}, url: 'https://example.invalid' } } : { status: 400, json: { error: { message: 'temporary desktop read failure' } } }));
+  await page.route('**/local/enabled', route => route.fulfill({ status: 400, json: { error: { message: 'desktop mutation rejected' } } }));
+  await page.goto(mount('desktop')); await expect(page.getByRole('alert')).toHaveText('temporary desktop read failure');
+  healthy = true; await page.clock.runFor(3001); await expect(page.getByText('服务器已连接', { exact: true })).toBeVisible(); await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.getByRole('checkbox', { name: '允许远程连接', exact: true }).uncheck(); await expect(page.getByRole('alert')).toHaveText('desktop mutation rejected');
+  await page.clock.runFor(6001); await expect(page.getByRole('alert')).toHaveText('desktop mutation rejected');
+});
+
 for (const included of [false, true]) test(`keeps a notification received during initial load without double counting (${included})`, async ({ page }) => {
   let held: Route | undefined;
   await page.route('**/api/notifications/settings', route => route.fulfill({ json: { settings: { enabled: false }, pushConfigured: false } }));

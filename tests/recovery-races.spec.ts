@@ -1,7 +1,7 @@
 import { expect, test, type Route } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
 
-const origin = 'http://127.0.0.1:18890';
+const origin = process.env.PLAN_WEB_ORIGIN ?? 'http://127.0.0.1:18890';
 const mount = (kind: string) => origin + '/@fs/' + fileURLToPath(new URL('./component-harness.html', import.meta.url)).replaceAll('\\', '/') + '?component=' + kind;
 const device = { deviceId: '123456789', name: 'Saved computer', authorized: true, remembered: true, online: true, enabled: true, expires: Date.now() + 3600000, lastUsed: 1 };
 const row = (id: string, readAt: number | null = null) => ({ id, deviceId: device.deviceId, taskId: id, turnId: id, status: 'completed', occurredAt: Date.now(), createdAt: Date.now(), readAt, delivery: 'accepted' });

@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 test.use({ viewport: { width: 900, height: 780 }, launchOptions: process.env.TEST_BROWSER === 'webkit' ? {} : { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
-const origin = 'http://127.0.0.1:18890';
+const origin = process.env.PLAN_WEB_ORIGIN ?? 'http://127.0.0.1:18890';
 
 for (const mode of ['custom', 'automatic']) {
   test(`${mode} desktop credentials use distinct refresh and revoke controls with confirmation`, async ({ page }, info) => {

@@ -32,7 +32,7 @@ let notificationNavigationRevision = 0;
 const session = ref({ deviceId: props.deviceId }); const active = ref(false);
 const status = ref<any>({ online: false }); const connected = ref(false); const error = ref(''); const busy = ref(false);
 const selected = ref<Conversation | null>(null); const snapshot = ref<Snapshot | null>(null); const draft = ref(''); const limit = ref(100);
-const readError = ref(''); const navigationError = ref(''); const searchError = ref('');
+const readError = ref(''); const navigationError = ref(''); const searchError = ref(''); const connectionError = ref('');
 const readRecovering = ref(false);
 const readRetryDelays = [1000, 2000, 4000];
 const retryableReadErrors = new Set(['CLIENT_REJECTED', 'CLIENT_UNAVAILABLE', 'READ_TIMEOUT', 'READ_DISCONNECTED', 'OUTCOME_UNKNOWN', 'OFFLINE', 'UNAVAILABLE', 'BUSY']);
@@ -66,9 +66,10 @@ let navigationEpoch = 0; let focusedNavigationEpoch = -1; let projectInteraction
 type Group = { rows: Conversation[]; loading: boolean; loaded: boolean; hasMore: boolean; error?: string };
 const groups = reactive<Record<string, Group>>({});
 const visibleErrorGroup = computed(() => [groups.recent, ...projects.value.filter(p => expandedProjects.has(p.id)).map(p => groups[p.id])].find(g => g?.error));
-const visibleError = computed(() => error.value || (listVisible.value ? search.value.trim() ? searchError.value : navigationError.value || visibleErrorGroup.value?.error : snapshot.value ? readError.value : ''));
+const visibleError = computed(() => error.value || connectionError.value || (listVisible.value ? search.value.trim() ? searchError.value : navigationError.value || visibleErrorGroup.value?.error : snapshot.value ? readError.value : ''));
 function dismissError() {
   if (error.value) error.value = '';
+  else if (connectionError.value) connectionError.value = '';
   else if (listVisible.value) {
     if (search.value.trim()) searchError.value = '';
     else if (navigationError.value) navigationError.value = '';
@@ -168,12 +169,14 @@ function request(command: Command, id: string = crypto.randomUUID()): Promise<an
 }
 const notificationHeaders = () => ({ 'X-Remote-Device': props.deviceId });
 let refreshingNotifications = false;
+const incomingDuringBadge = new Map<string, any>();
 async function refreshNotificationBadge() {
-  if (refreshingNotifications) return; refreshingNotifications = true;
+  if (refreshingNotifications) return; refreshingNotifications = true; incomingDuringBadge.clear();
   try {
     const result = await api('/api/notifications', undefined, notificationHeaders());
-    notificationUnread.value = Number(result.unread) || 0;
-  } catch {} finally { refreshingNotifications = false; }
+    const ids = new Set((result.items ?? []).map((item: any) => item.id));
+    notificationUnread.value = (Number(result.unread) || 0) + [...incomingDuringBadge.values()].filter(item => !item.readAt && (typeof result.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence > result.throughSequence : !ids.has(item.id))).length;
+  } catch {} finally { refreshingNotifications = false; incomingDuringBadge.clear(); }
 }
 async function suppressVisibleNotification(item: any) {
   const viewed = () => document.visibilityState === 'visible' && !drawer.value && !notificationOpen.value && !chatScroll.awayFromBottom.value && selected.value?.id === item.taskId && snapshot.value && !snapshot.value.busy && snapshot.value.lastTurnId === item.turnId;
@@ -281,6 +284,7 @@ function openSocket() {
     if (m.type === 'status') {
       const becameReady = !status.value.client?.available || !status.value.online || status.value.subscription?.access === false && m.subscription?.access === true;
       status.value = m;
+      connectionError.value = '';
       if (firstStatus || becameReady || !canReach.value) invalidateMode();
       reconnectFailures = 0;
       if (m.enabled && m.client?.available && (firstStatus || becameReady || !groups.recent?.loaded)) { if (selected.value) void read(activateSelected && canControl.value); if (listVisible.value) void loadNavigation(); }
@@ -292,6 +296,7 @@ function openSocket() {
     } else if (m.type === 'notification') {
       const item = m.notification;
       if (item?.deviceId === props.deviceId) {
+        if (refreshingNotifications) incomingDuringBadge.set(item.id, item);
         notificationUnread.value = Math.max(1, notificationUnread.value + (item.readAt ? 0 : 1));
         window.dispatchEvent(new CustomEvent('remote-notification', { detail: item }));
         setTimeout(() => { void suppressVisibleNotification(item); }, 200);
@@ -308,8 +313,9 @@ function openSocket() {
     for (const p of pending.values()) { clearTimeout(p.timer); p.reject(Object.assign(new Error(p.readOnly ? '连接已中断，正在重新同步。' : '连接已中断，请核对原会话，勿重复提交。'), { code: p.readOnly ? 'READ_DISCONNECTED' : 'OUTCOME_UNKNOWN' })); } pending.clear();
     if (disposed.value || !active.value) return;
     if (event.code === 4002) { clientId.value=crypto.randomUUID();try { sessionStorage.setItem(clientKey,clientId.value); } catch {} reconnect=setTimeout(openSocket,500);return; }
-    if ([4001, 4003, 4004, 4005].includes(event.code)) {
-      error.value = event.code === 4005 ? '该设备已被管理员封禁，请联系运营方。' : event.code === 4004 ? '已达到 3 个在线终端，请关闭一个页面后重试。' : event.code === 4003 ? '设备正由另一台手机控制，请更新电脑助手。' : '授权已失效，请使用当前连接密码重新连接。';
+    if (event.code === 4004) connectionError.value = '已达到 3 个在线终端，请关闭一个页面；正在自动重试连接。';
+    if ([4001, 4003, 4005].includes(event.code)) {
+      error.value = event.code === 4005 ? '该设备已被管理员封禁，请联系运营方。' : event.code === 4003 ? '设备正由另一台手机控制，请更新电脑助手。' : '授权已失效，请使用当前连接密码重新连接。';
       if (event.code === 4001 || event.code === 4005) { clearNavigation(true); emit('expired', props.deviceId, error.value); } return;
     }
     reconnect = setTimeout(openSocket, Math.min(15000, 1000 * 2 ** Math.min(++reconnectFailures, 4)) + Math.floor(Math.random() * 500));
@@ -539,20 +545,23 @@ function composerPointerdown(event: PointerEvent) {
 async function stop() { sendMenu.value = false; const s = snapshot.value; if (s?.turnId) await perform({ method: 'stop', params: { id: s.id, turnId: s.turnId, epoch: s.epoch } }); }
 async function respond(r: Interaction, decision?: 'accept' | 'decline') {
   const s = snapshot.value; if (!s) return;
-  const accepted = await perform({ method: 'respond', params: { id: s.id, requestId: r.id, epoch: s.epoch, ...(decision ? { decision } : { answers: Object.fromEntries((r.questions ?? []).map(q => [q.id, [answers.value[q.id] ?? '']])) }) } });
-  if (accepted && !decision && selected.value?.id === s.id) for (const question of r.questions ?? []) { delete answers.value[question.id]; delete answerModes[question.id]; }
+  const accepted = await perform({ method: 'respond', params: { id: s.id, requestId: r.id, epoch: s.epoch, ...(decision ? { decision } : { answers: Object.fromEntries((r.questions ?? []).map(q => [q.id, [answers.value[answerKey(r, q)] ?? '']])) }) } });
+  if (accepted && !decision && selected.value?.id === s.id) for (const question of r.questions ?? []) { delete answers.value[answerKey(r, question)]; delete answerModes[answerKey(r, question)]; }
 }
 const customAnswerMode = 'custom';
-function chooseAnswer(question: NonNullable<Interaction['questions']>[number], event: Event) {
-  const select = event.currentTarget as HTMLSelectElement; const mode = select.value; answerModes[question.id] = mode;
+function answerKey(request: Interaction, question: NonNullable<Interaction['questions']>[number]) { return JSON.stringify([request.id, question.id]); }
+function questionId(request: Interaction, question: NonNullable<Interaction['questions']>[number]) { return `question-${encodeURIComponent(answerKey(request, question))}`; }
+function chooseAnswer(request: Interaction, question: NonNullable<Interaction['questions']>[number], event: Event) {
+  const key = answerKey(request, question);
+  const select = event.currentTarget as HTMLSelectElement; const mode = select.value; answerModes[key] = mode;
   if (mode === customAnswerMode) {
-    answers.value[question.id] = '';
+    answers.value[key] = '';
     void nextTick(() => { const field = select.nextElementSibling; if (field instanceof HTMLInputElement) field.focus(); });
     return;
   }
-  const index = Number(mode); answers.value[question.id] = Number.isInteger(index) ? question.options[index]?.label ?? '' : '';
+  const index = Number(mode); answers.value[key] = Number.isInteger(index) ? question.options[index]?.label ?? '' : '';
 }
-function answersComplete(r: Interaction) { return (r.questions ?? []).every(question => !!answers.value[question.id]?.trim()); }
+function answersComplete(r: Interaction) { return (r.questions ?? []).every(question => !!answers.value[answerKey(r, question)]?.trim()); }
 function invalidateMode() { modeSyncCycle++; modeSynced.value = false; taskSynced.value = false; }
 async function setPlanMode(mode: 'plan'|'default') {
   const s = snapshot.value; const settings = s?.settings;
@@ -837,7 +846,7 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
           <section v-for="r in snapshot?.requests ?? []" :key="r.id" class="approval" :data-scroll-key="`approval:${r.id}`">
             <h2>{{ r.title }}</h2><pre v-if="r.detail && r.kind !== 'plan'">{{ r.detail }}</pre>
             <PlanRequest v-if="r.kind === 'plan'" :key="`${selected.id}:${r.plan?.revision}`" :request="r" :conversation-id="selected.id" :device-id="deviceId" :supported="hasCapability('plan-implementation')" :disabled="busy || !modeReady || !canControl || !hasCapability('plan-implementation') || !!snapshot?.busy || !!queuedMessages.length || snapshot?.settings?.mode !== 'plan'" @submit="(action, feedback) => respondPlan(r, action, feedback)" @resized="queueResized"/>
-            <div v-else-if="r.kind === 'input'" class="questions"><div v-for="q in r.questions" :key="q.id"><label :for="`question-${q.id}`">{{ q.question }}</label><select v-if="q.options.length" :id="`question-${q.id}`" :value="answerModes[q.id] ?? ''" @change="chooseAnswer(q, $event)"><option value="">请选择</option><option v-for="(o, index) in q.options" :key="o.label" :value="String(index)">{{ o.label }}</option><option :value="customAnswerMode">其他（手动输入）</option></select><input v-if="!q.options.length || answerModes[q.id] === customAnswerMode" :id="q.options.length ? `question-${q.id}-custom` : `question-${q.id}`" v-model="answers[q.id]" class="custom-answer" :aria-label="q.options.length ? `${q.question}：其他` : undefined" :placeholder="q.options.length ? '请输入其他回答' : '请输入回答'" maxlength="4000"></div><button class="button primary" :disabled="busy || !canApprove || !answersComplete(r)" @click="respond(r)">提交</button></div><div v-else-if="r.kind !== 'unsupported'" class="approval-actions"><button class="button" :disabled="busy || !canDecline" @click="respond(r, 'decline')"><X :size="16"/>拒绝</button><button class="button primary" :disabled="busy || !canApprove" @click="respond(r, 'accept')"><Check :size="16"/>允许本次</button></div>
+            <div v-else-if="r.kind === 'input'" class="questions"><div v-for="q in r.questions" :key="q.id"><label :for="questionId(r, q)">{{ q.question }}</label><select v-if="q.options.length" :id="questionId(r, q)" :value="answerModes[answerKey(r, q)] ?? ''" @change="chooseAnswer(r, q, $event)"><option value="">请选择</option><option v-for="(o, index) in q.options" :key="o.label" :value="String(index)">{{ o.label }}</option><option :value="customAnswerMode">其他（手动输入）</option></select><input v-if="!q.options.length || answerModes[answerKey(r, q)] === customAnswerMode" :id="q.options.length ? `${questionId(r, q)}-custom` : questionId(r, q)" v-model="answers[answerKey(r, q)]" class="custom-answer" :aria-label="q.options.length ? `${q.question}：其他` : undefined" :placeholder="q.options.length ? '请输入其他回答' : '请输入回答'" maxlength="4000"></div><button class="button primary" :disabled="busy || !canApprove || !answersComplete(r)" @click="respond(r)">提交</button></div><div v-else-if="r.kind !== 'unsupported'" class="approval-actions"><button class="button" :disabled="busy || !canDecline" @click="respond(r, 'decline')"><X :size="16"/>拒绝</button><button class="button primary" :disabled="busy || !canApprove" @click="respond(r, 'accept')"><Check :size="16"/>允许本次</button></div>
           </section>
         </div></div><button v-if="chatScroll.awayFromBottom.value" class="jump-to-bottom" title="回到最新消息" @click="chatScroll.toBottom"><ArrowDown :size="19"/></button></div>
         <form class="composer compact-composer" @submit.prevent="sendFromButton()">

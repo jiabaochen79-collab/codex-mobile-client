@@ -24,6 +24,8 @@ const info = ref('');
 const standalone = ref(false);
 let listRevision = 0;
 const incomingDuringLoad = new Map<string, NotificationItem>();
+let markingAll = false;
+const incomingDuringReadAll = new Map<string, NotificationItem>();
 
 const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
 const isIos = /iPhone|iPad|iPod/i.test(userAgent) || typeof navigator !== 'undefined' && navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
@@ -159,13 +161,20 @@ async function readAll() {
   if (busy.value || !unread.value) return; busy.value = true; error.value = '';
   listRevision++;
   const ids = new Set(items.value.map(item => item.id));
-  try { await api('/api/notifications/read-all', {}, headers()); for (const item of items.value) if (ids.has(item.id)) item.readAt ??= Date.now(); updateUnread(items.value.filter(item => !item.readAt).length); }
+  markingAll = true; incomingDuringReadAll.clear();
+  try {
+    const result = await api('/api/notifications/read-all', {}, headers());
+    const covered = (item: NotificationItem) => typeof result.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence <= result.throughSequence : ids.has(item.id);
+    for (const item of items.value) if (covered(item)) item.readAt ??= result.readAt ?? Date.now();
+    updateUnread(typeof result.throughSequence === 'number' ? (Number(result.unread) || 0) + [...incomingDuringReadAll.values()].filter(item => !item.readAt && !covered(item)).length : items.value.filter(item => !item.readAt).length);
+  }
   catch (e: any) { error.value = e.message; }
-  finally { busy.value = false; }
+  finally { markingAll = false; incomingDuringReadAll.clear(); busy.value = false; }
 }
 function onIncoming(event: Event) {
   const item = (event as CustomEvent<NotificationItem>).detail;
   if (!item || item.deviceId !== props.deviceId) return;
+  if (markingAll) incomingDuringReadAll.set(item.id, item);
   if (loading.value) incomingDuringLoad.set(item.id, item);
   listRevision++;
   const index = items.value.findIndex(row => row.id === item.id);

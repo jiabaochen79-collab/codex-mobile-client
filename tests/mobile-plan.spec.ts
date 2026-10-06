@@ -72,6 +72,19 @@ test('clears a recovered read error without losing the draft or allowing stale s
   await expect(page.getByTitle('发送消息', { exact: true })).toBeEnabled();
   await expect(page.getByLabel('消息', { exact: true })).toHaveValue('弱网草稿');
 });
+test('isolates answers and field IDs between requests with the same question ID', async ({ page }) => {
+  const f = await fixture(page, { inputRequest: true });
+  f.snapshot.requests = ['first', 'second'].map(id => ({ id, kind: 'input', title: id, detail: '', questions: [{ id: 'choice', question: id + ' question', options: [{ label: id + ' answer' }] }] })); f.update();
+  await expect(page.locator('.questions')).toHaveCount(2);
+  await page.getByLabel('first question', { exact: true }).selectOption('0');
+  await expect(page.locator('.questions').nth(0).getByRole('button', { name: '提交', exact: true })).toBeEnabled();
+  await expect(page.locator('.questions').nth(1).getByRole('button', { name: '提交', exact: true })).toBeDisabled();
+  const ids = await page.locator('.questions select').evaluateAll(fields => fields.map(field => field.id)); expect(new Set(ids).size).toBe(2);
+  await page.getByLabel('second question', { exact: true }).selectOption('custom'); await page.getByLabel('second question：其他', { exact: true }).fill('second custom');
+  await page.locator('.questions').nth(1).getByRole('button', { name: '提交', exact: true }).click();
+  await expect.poll(() => f.commands.filter(command => command.method === 'respond').length).toBe(1);
+  expect(f.commands.find(command => command.method === 'respond').params).toMatchObject({ requestId: 'second', answers: { choice: ['second custom'] } });
+});
 test('closes task-bound model and permission dialogs when a notification opens another task', async ({ page }) => {
   const f = await fixture(page, { mode: 'default', secondTask: true });
   const notification = '12345678-1234-4234-8234-123456789abf'; const second = '12345678-1234-4234-8234-123456789abe';

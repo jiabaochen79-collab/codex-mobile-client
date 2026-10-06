@@ -8,17 +8,17 @@ import UpdatePanel from './UpdatePanel.vue';
 import { subscriptionLabel } from '../src/shared/subscription';
 const subscriptionOpen = ref(false);
 const updateOpen = ref(false); const feedbackInitiallyOpen = ref(false);
-const state = ref<any>(null); const error = ref(''); const busy = ref(false); const visible = ref(false); const copied = ref('');
+const state = ref<any>(null); const operationError = ref(''); const readError = ref(''); const error = computed(() => operationError.value || readError.value); const busy = ref(false); const visible = ref(false); const copied = ref('');
 const editingPassword = ref(false); const passwordMode = ref('automatic'); const password = ref(''); const showPassword = ref(false);
 const disconnect = ref<'refresh' | 'revoke' | null>(null); const cancelDisconnect = ref<HTMLButtonElement>();
 const deviceId = computed(() => state.value?.deviceId?.replace(/(\d{3})(?=\d)/g, '$1 ') ?? '--- --- ---');
 let timer: ReturnType<typeof setInterval> | undefined;
-async function refresh() { try { state.value = await api('/local/state'); if (state.value?.subscription?.disabled) { subscriptionOpen.value = false; updateOpen.value = false; editingPassword.value = false; disconnect.value = null; } } catch (e: any) { error.value = e.message; } }
-async function action(path: string, body = {}) { busy.value = true; error.value = ''; try { state.value = await api(path, body); } catch (e: any) { error.value = e.message; } finally { busy.value = false; } }
-async function copy(key: string, text: string) { try { await navigator.clipboard.writeText(text); copied.value = key; setTimeout(() => copied.value = '', 1800); } catch { error.value = '复制失败，请检查浏览器剪贴板权限。'; } }
+async function refresh() { try { state.value = await api('/local/state'); readError.value = ''; if (state.value?.subscription?.disabled) { subscriptionOpen.value = false; updateOpen.value = false; editingPassword.value = false; disconnect.value = null; } } catch (e: any) { readError.value = e.message; } }
+async function action(path: string, body = {}) { busy.value = true; operationError.value = ''; try { state.value = await api(path, body); } catch (e: any) { operationError.value = e.message; } finally { busy.value = false; } }
+async function copy(key: string, text: string) { try { await navigator.clipboard.writeText(text); copied.value = key; setTimeout(() => copied.value = '', 1800); } catch { operationError.value = '复制失败，请检查浏览器剪贴板权限。'; } }
 function editPassword() { passwordMode.value = state.value.passwordMode ?? 'automatic'; password.value = passwordMode.value === 'custom' ? state.value.code : ''; showPassword.value = false; editingPassword.value = true; }
-async function savePassword() { await action('/local/password', passwordMode.value === 'custom' ? { mode: 'custom', password: password.value } : { mode: 'automatic' }); if (!error.value) { editingPassword.value = false; password.value = ''; } }
-async function confirmDisconnect() { await action('/local/rotate'); if (!error.value) disconnect.value = null; }
+async function savePassword() { await action('/local/password', passwordMode.value === 'custom' ? { mode: 'custom', password: password.value } : { mode: 'automatic' }); if (!operationError.value) { editingPassword.value = false; password.value = ''; } }
+async function confirmDisconnect() { await action('/local/rotate'); if (!operationError.value) disconnect.value = null; }
 watch(disconnect, async value => { if (value) { await nextTick(); cancelDisconnect.value?.focus(); } });
 onMounted(async () => {
   const showSubscription = new URLSearchParams(location.search).get('panel') === 'subscription';
@@ -26,7 +26,7 @@ onMounted(async () => {
   feedbackInitiallyOpen.value = new URLSearchParams(location.search).get('panel') === 'feedback';
   const secret = new URLSearchParams(location.hash.slice(1)).get('token');
   history.replaceState(null, '', location.pathname);
-  if (secret) { try { await api('/local/session', {}, { Authorization: `Bearer ${secret}` }); } catch (e: any) { error.value = e.message; } }
+  if (secret) { try { await api('/local/session', {}, { Authorization: `Bearer ${secret}` }); } catch (e: any) { operationError.value = e.message; } }
   await refresh(); subscriptionOpen.value = showSubscription; timer = setInterval(refresh, 3000);
 });
 onUnmounted(() => clearInterval(timer));

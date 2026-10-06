@@ -195,7 +195,7 @@ onUnmounted(() => { disposed = true; clearTimeout(restoreRetry); navigator.servi
   <KeepAlive :key="generation" :max="MAX_PAIRED_DEVICES">
     <MobilePanel v-if="activeId && current?.authorized" :key="activeId + ':' + (revisions[activeId] ?? 0)" :ref="recordPanel" :device-id="activeId" :device-name="label(current)" @devices="openDirectory" @expired="expired" @logout="loggedOut"/>
   </KeepAlive>
-  <div v-if="loginVisible" :class="activeId ? 'modal-backdrop pairing-backdrop' : 'mobile-shell'" @click.self="activeId && closePairing()">
+  <div v-if="loginVisible" :class="activeId ? 'modal-backdrop pairing-backdrop' : 'mobile-shell'">
     <header v-if="!activeId" class="app-header"><div class="brand"><img src="/brand.png" alt="" width="28" height="28"><span>ChatGPT 远程助手</span></div><button v-if="devices.length" class="icon-button" title="我的电脑" @click="adding = false; directoryOpen = true"><Monitor :size="20"/></button></header>
     <main class="connect-page" :class="{ modal: activeId }" :role="activeId ? 'dialog' : undefined" :aria-modal="activeId ? true : undefined" aria-labelledby="connect-title">
       <div class="connect-title"><div v-if="!activeId" class="connect-symbol"><Smartphone :size="30"/></div><div class="pairing-title"><h1 id="connect-title">{{ activeId ? '添加电脑' : '连接电脑' }}</h1><button v-if="activeId" class="icon-button" title="关闭添加电脑" :disabled="connecting" @click="closePairing"><X :size="20"/></button></div></div>

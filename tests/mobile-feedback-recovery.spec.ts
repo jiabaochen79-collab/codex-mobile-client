@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import sharp from 'sharp';
 import { mockPairedBrowser } from './paired-browser-fixture';
 
-const origin = 'http://127.0.0.1:18890';
+const origin = process.env.PLAN_WEB_ORIGIN ?? 'http://127.0.0.1:18890';
 async function fixture(page: Page, rejectImage = false) {
   const submissions: any[] = [];
   await mockPairedBrowser(page);

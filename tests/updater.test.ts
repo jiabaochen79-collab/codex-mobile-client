@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { generateKeyPairSync, sign, createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { Writable } from 'node:stream';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
@@ -8,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { HelperUpdater } from '../src/agent/updater.js';
 
 vi.mock('node:child_process', () => ({ spawn: vi.fn(() => { throw new Error('Unexpected native process'); }) }));
-vi.mock('node:fs', async importOriginal => ({ ...await importOriginal<typeof import('node:fs')>(), copyFileSync: vi.fn() }));
+vi.mock('node:fs', async importOriginal => { const fs = await importOriginal<typeof import('node:fs')>(); return { ...fs, copyFileSync: vi.fn(), createWriteStream: vi.fn(fs.createWriteStream) }; });
 
 describe('helper updater', () => {
   const directories: string[] = [];
@@ -25,6 +26,22 @@ describe('helper updater', () => {
     updaters.push(updater); return updater;
   };
   const latest = () => Response.json({ current: null, release: null });
+  it.each([1, 65536])('finishes a disk-write failure with highWaterMark %s and permits a new check', async highWaterMark => {
+    const previous = release('0.4.16', 16); const bytes = Buffer.from('0.4.17'); const candidate = release('0.4.17', 17, bytes);
+    const request = vi.fn(async (path: string) => {
+      if (path.includes('/check?')) return Response.json({ current: previous, release: candidate });
+      let timer: ReturnType<typeof setTimeout>;
+      return new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes); timer = setTimeout(() => controller.close(), 30); }, cancel() { clearTimeout(timer); } }), { headers: { 'content-length': String(bytes.length) } });
+    });
+    const updater = fixture(request); const sha = JSON.parse(Buffer.from(previous.payload, 'base64').toString()).sha256;
+    writeFileSync(join(directories.at(-1)!, 'updates', sha + '.exe'), '0.4.16');
+    const output = new Writable({ highWaterMark, write(_chunk, _encoding, callback) { setTimeout(() => callback(Object.assign(new Error('disk full'), { code: 'ENOSPC' })), 5); } });
+    vi.mocked(createWriteStream).mockImplementationOnce(() => output as ReturnType<typeof createWriteStream>);
+    let settled = false; const checking = updater.check().finally(() => { settled = true; });
+    await vi.waitFor(() => expect(settled).toBe(true), { timeout: 1000 }); await checking;
+    expect(updater.state.phase).toBe('error'); expect(output.destroyed).toBe(true);
+    request.mockImplementation(async () => latest()); await updater.check(); expect(updater.state.phase).toBe('idle');
+  });
   it('does not download or mutate the release after a cancelled check receives a late response', async () => {
     let finish!: (response: Response) => void;
     let signal: AbortSignal | undefined;

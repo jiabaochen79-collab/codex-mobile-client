@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
 import { mockPairedBrowser } from './paired-browser-fixture';
 
-const origin='http://127.0.0.1:18890';
+const origin=process.env.PLAN_WEB_ORIGIN ?? 'http://127.0.0.1:18890';
 const mount=(kind:string)=>origin+'/@fs/'+fileURLToPath(new URL('./component-harness.html',import.meta.url)).replaceAll('\\','/')+'?component='+kind;
 const catalog={plans:[],salesOpen:false,termsVersion:'fixture',supportContact:'fixture'};
 

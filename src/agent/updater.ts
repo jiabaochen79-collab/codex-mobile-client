@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameS
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { pipeline } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { verifyRelease, fileDigest } from '../shared/release-signature.js';
@@ -126,17 +127,16 @@ export class HelperUpdater {
       if (offset && response.status === 200) offset = 0;
       else if (offset && (response.status !== 206 || response.headers.get('content-range') !== `bytes ${offset}-${m.size - 1}/${m.size}`)) { await response.body?.cancel(); throw new Error('Invalid range response'); }
       if (!response.body || Number(response.headers.get('content-length')) !== m.size - offset) { await response.body?.cancel(); throw new Error('Invalid response size'); }
-      const output = createWriteStream(part, { flags: offset ? 'a' : 'w', mode: 0o600 }); let outputError: Error | undefined; output.on('error', e => { outputError = e; });
-      try {
+      const output = createWriteStream(part, { flags: offset ? 'a' : 'w', mode: 0o600 });
+      const signal = this.abort!.signal;
+      await pipeline(async function* () {
         for await (const chunk of response.body as any) {
-          if (this.abort!.signal.aborted) throw new Error('Cancelled'); offset += chunk.length;
+          if (signal.aborted) throw new Error('Cancelled'); offset += chunk.length;
           if (offset > m.size) throw new Error('Response exceeds release size');
-          if (outputError) throw outputError;
-          if (!output.write(chunk)) await once(output, 'drain');
+          yield chunk;
           onProgress(offset);
         }
-        output.end(); await once(output, 'finish');
-      } finally { output.destroy(); }
+      }, output, { signal });
     }
     if (offset !== m.size || await fileDigest(part) !== m.sha256) { if (existsSync(part)) unlinkSync(part); throw new RemoteError('UPDATE_PACKAGE_INVALID', '更新包校验失败，已阻止安装，请重试下载。'); }
     renameSync(part, file);
