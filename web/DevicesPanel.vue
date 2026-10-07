@@ -28,6 +28,7 @@ watch(() => !!activeId.value && !!current.value?.authorized, locked => {
 onUnmounted(() => { document.documentElement.classList.remove('mobile-viewport-locked'); history.scrollRestoration = previousScrollRestoration; });
 const directoryVisible = computed(() => directoryOpen.value || !activeId.value && !adding.value && devices.value.length > 0);
 const loginVisible = computed(() => !restoring.value && (adding.value || !activeId.value && !devices.value.length));
+const chatObscured = computed(() => directoryVisible.value || loginVisible.value || subscriptionOpen.value || !!editingId.value || !!removeTarget.value || confirmLogout.value || !!pendingSwitch.value);
 const label = (device: PairedDevice) => device.name || device.deviceId.replace(/(\d{3})(?=\d)/g, '$1 ');
 const deviceIdDigits = computed(() => deviceId.value.replace(/\D/g, ''));
 const deviceIdHint = computed(() => deviceId.value && deviceIdDigits.value.length !== 9 ? `设备 ID 需要 9 位数字，当前 ${deviceIdDigits.value.length} 位` : '');
@@ -197,7 +198,7 @@ onUnmounted(() => { disposed = true; clearTimeout(restoreRetry); navigator.servi
 <template>
   <div v-if="restoring" class="startup" role="status"><RefreshCw class="spin" :size="20"/>正在恢复连接</div>
   <KeepAlive :key="generation" :max="MAX_PAIRED_DEVICES">
-    <MobilePanel v-if="activeId && current?.authorized" :key="activeId + ':' + (revisions[activeId] ?? 0)" :ref="recordPanel" :device-id="activeId" :device-name="label(current)" @devices="openDirectory" @expired="expired" @logout="loggedOut"/>
+    <MobilePanel v-if="activeId && current?.authorized" :key="activeId + ':' + (revisions[activeId] ?? 0)" :ref="recordPanel" :device-id="activeId" :device-name="label(current)" :obscured="chatObscured" @devices="openDirectory" @expired="expired" @logout="loggedOut"/>
   </KeepAlive>
   <div v-if="loginVisible" :class="activeId ? 'modal-backdrop pairing-backdrop' : 'mobile-shell'">
     <header v-if="!activeId" class="app-header"><div class="brand"><img src="/brand.png" alt="" width="28" height="28"><span>ChatGPT 远程助手</span></div><button v-if="devices.length" class="icon-button" title="我的电脑" @click="adding = false; directoryOpen = true"><Monitor :size="20"/></button></header>

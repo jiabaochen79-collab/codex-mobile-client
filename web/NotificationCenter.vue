@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { Bell, Check, ExternalLink, RefreshCw, ShieldAlert, Smartphone, X } from 'lucide-vue-next';
 import { api } from './api';
 import { pushRegistration } from './push-registration';
+import { mergeNotificationCount } from './notification-count';
 import type { NotificationItem, NotificationSettings } from '../src/shared/notifications';
 
 const props = defineProps<{ deviceId: string; taskLabels: Record<string, { title: string; project?: string }>; resolveTasks: (ids: string[]) => Promise<void>; openTask: (taskId: string) => Promise<boolean> }>();
@@ -38,8 +39,8 @@ function applyReceipt(item: NotificationItem) {
   const readAt = readReceipts.get(item.id) ?? (allReadReceipt && typeof item.sequence === 'number' && item.sequence <= allReadReceipt.through ? allReadReceipt.at : undefined);
   return readAt && !item.readAt ? { ...item, readAt } : item;
 }
-function snapshotUnread(value: number, rows: NotificationItem[], priorReceipt: typeof latestReceipt) {
-  return latestReceipt && latestReceipt !== priorReceipt ? latestReceipt.unread + rows.filter(item => !item.readAt && typeof item.sequence === 'number' && item.sequence > latestReceipt!.through).length : value;
+function snapshotUnread(value: number, rows: NotificationItem[]) {
+  return latestReceipt ? latestReceipt.unread + rows.filter(item => !item.readAt && typeof item.sequence === 'number' && item.sequence > latestReceipt!.through).length : value;
 }
 
 const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
@@ -69,7 +70,6 @@ function localSubscriptionId() {
 async function load() {
   if (disposed || busy.value) return;
   const revision = ++loadRevision;
-  const priorReceipt = latestReceipt;
   listRevision++;
   loading.value = true; error.value = '';
   standalone.value = window.matchMedia?.('(display-mode: standalone)').matches || (navigator as any).standalone === true;
@@ -90,7 +90,8 @@ async function load() {
       return incoming ? { ...incoming, readAt: incoming.readAt ?? item.readAt } : item;
     })).sort((a, b) => b.createdAt - a.createdAt);
     nextCursor.value = listResult.nextCursor ?? null;
-    updateUnread(snapshotUnread((Number(listResult.unread) || 0) + [...incomingDuringLoad.values()].filter(item => !item.readAt && (typeof listResult.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence > listResult.throughSequence : !snapshotIds.has(item.id))).length, items.value, priorReceipt));
+    latestReceipt = mergeNotificationCount(latestReceipt, listResult);
+    updateUnread(snapshotUnread((Number(listResult.unread) || 0) + [...incomingDuringLoad.values()].filter(item => !item.readAt && (typeof listResult.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence > listResult.throughSequence : !snapshotIds.has(item.id))).length, items.value));
     incomingDuringLoad.clear();
     void props.resolveTasks(items.value.map(item => item.taskId));
     await refreshSystemPushState();
@@ -194,13 +195,13 @@ async function readOne(item: NotificationItem) {
   if (busy.value) return; busy.value = true; error.value = '';
   listRevision++;
   readingOne = true; incomingDuringReadOne.clear();
-  const priorReceipt = latestReceipt;
   try {
     if (!await props.openTask(item.taskId)) return;
     const result = await api(`/api/notifications/${encodeURIComponent(item.id)}/read`, undefined, headers(), 'POST');
+    latestReceipt = mergeNotificationCount(latestReceipt, result);
     const wasUnread = item.readAt === null;
     item.readAt ??= Date.now();
-    updateUnread(snapshotUnread(typeof result.throughSequence === 'number' ? (Number(result.unread) || 0) + [...incomingDuringReadOne.values()].filter(row => row.id !== item.id && !row.readAt && typeof row.sequence === 'number' && row.sequence > result.throughSequence).length : unread.value - Number(wasUnread), items.value, priorReceipt)); emit('close');
+    updateUnread(snapshotUnread(typeof result.throughSequence === 'number' ? (Number(result.unread) || 0) + [...incomingDuringReadOne.values()].filter(row => row.id !== item.id && !row.readAt && typeof row.sequence === 'number' && row.sequence > result.throughSequence).length : unread.value - Number(wasUnread), items.value)); emit('close');
   } catch (e: any) { error.value = e.message; }
   finally { readingOne = false; incomingDuringReadOne.clear(); busy.value = false; }
 }
@@ -209,12 +210,12 @@ async function readAll() {
   listRevision++;
   const ids = new Set(items.value.map(item => item.id));
   markingAll = true; incomingDuringReadAll.clear();
-  const priorReceipt = latestReceipt;
   try {
     const result = await api('/api/notifications/read-all', {}, headers());
+    latestReceipt = mergeNotificationCount(latestReceipt, result);
     const covered = (item: NotificationItem) => typeof result.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence <= result.throughSequence : ids.has(item.id);
     for (const item of items.value) if (covered(item)) item.readAt ??= result.readAt ?? Date.now();
-    updateUnread(snapshotUnread(typeof result.throughSequence === 'number' ? (Number(result.unread) || 0) + [...incomingDuringReadAll.values()].filter(item => !item.readAt && !covered(item)).length : items.value.filter(item => !item.readAt).length, items.value, priorReceipt));
+    updateUnread(snapshotUnread(typeof result.throughSequence === 'number' ? (Number(result.unread) || 0) + [...incomingDuringReadAll.values()].filter(item => !item.readAt && !covered(item)).length : items.value.filter(item => !item.readAt).length, items.value));
   }
   catch (e: any) { error.value = e.message; }
   finally { markingAll = false; incomingDuringReadAll.clear(); busy.value = false; }
@@ -229,7 +230,7 @@ function onIncoming(event: Event) {
   if (loadingMore.value) incomingDuringPage.set(item.id, item);
   const index = items.value.findIndex(row => row.id === item.id);
   if (index >= 0) { if (items.value[index].readAt) item.readAt ??= items.value[index].readAt; items.value[index] = item; }
-  else { items.value.unshift(item); if (!item.readAt) updateUnread(unread.value + 1); }
+  else { items.value.unshift(item); if (!item.readAt && (!latestReceipt || typeof item.sequence !== 'number' || item.sequence > latestReceipt.through)) updateUnread(unread.value + 1); }
   void props.resolveTasks([item.taskId]);
 }
 function onRead(event: Event) {
@@ -238,17 +239,16 @@ function onRead(event: Event) {
   listRevision++;
   if (typeof receipt.id === 'string') readReceipts.set(receipt.id, receipt.readAt);
   if (receipt.all === true && (!allReadReceipt || receipt.throughSequence >= allReadReceipt.through)) allReadReceipt = { through: receipt.throughSequence, at: receipt.readAt };
-  latestReceipt = { through: receipt.throughSequence, unread: Math.max(0, Number(receipt.unread) || 0) };
+  latestReceipt = mergeNotificationCount(latestReceipt, receipt);
   const covered = (item: NotificationItem) => item.id === receipt.id || receipt.all === true && typeof item.sequence === 'number' && item.sequence <= receipt.throughSequence;
   for (const item of [...items.value, ...incomingDuringLoad.values()]) if (covered(item)) item.readAt ??= receipt.readAt;
-  updateUnread((Number(receipt.unread) || 0) + items.value.filter(item => !item.readAt && typeof item.sequence === 'number' && item.sequence > receipt.throughSequence).length);
+  if (latestReceipt) updateUnread(latestReceipt.unread + items.value.filter(item => !item.readAt && typeof item.sequence === 'number' && item.sequence > latestReceipt!.through).length);
 }
 async function loadMore() {
   if (disposed || loadingMore.value || busy.value || !nextCursor.value) return;
   loadingMore.value = true; error.value = '';
   incomingDuringPage.clear();
   const revision = listRevision; const cursor = nextCursor.value;
-  const priorReceipt = latestReceipt;
   try {
     const result = await api(`/api/notifications?cursor=${encodeURIComponent(cursor)}`, undefined, headers());
     if (disposed || revision !== listRevision || cursor !== nextCursor.value) return;
@@ -256,7 +256,8 @@ async function loadMore() {
     const ids = new Set(items.value.map(item => item.id));
     items.value.push(...page.filter(item => !ids.has(item.id)));
     nextCursor.value = result.nextCursor ?? null;
-    if (revision === listRevision) updateUnread(snapshotUnread((Number(result.unread) || 0) + [...incomingDuringPage.values()].filter(item => !item.readAt && typeof item.sequence === 'number' && item.sequence > result.throughSequence).length, items.value, priorReceipt));
+    latestReceipt = mergeNotificationCount(latestReceipt, result);
+    if (revision === listRevision) updateUnread(snapshotUnread((Number(result.unread) || 0) + [...incomingDuringPage.values()].filter(item => !item.readAt && typeof item.sequence === 'number' && item.sequence > result.throughSequence).length, items.value));
     void props.resolveTasks(page.map(item => item.taskId));
   } catch (e: any) { if (!disposed && revision === listRevision) error.value = e.message; }
   finally { loadingMore.value = false; incomingDuringPage.clear(); }

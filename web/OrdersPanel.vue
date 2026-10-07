@@ -38,7 +38,14 @@ async function load(force = false) {
     const ownerChanged = data.value?.ownerRevision !== undefined && orders.ownerRevision !== data.value.ownerRevision;
     if (ownerChanged) { historyPage.value = 1; returnToOrders(); refundTarget.value = undefined; }
     const refreshHistory = force || data.value?.historyRevision !== undefined && data.value.historyRevision !== orders.historyRevision;
-    if (refreshHistory) for (let page = 2; page <= historyPage.value; page++) { const next = await api(`${base}?page=${page}`); if (disposed || revision !== readRevision) return; for (const key of ['orders', 'licenses', 'refunds']) orders[key].push(...next[key]); orders.hasMore = next.hasMore; }
+    if (refreshHistory) {
+      const head = { orders: [...orders.orders], licenses: [...orders.licenses], refunds: [...orders.refunds], hasMore: orders.hasMore };
+      for (let page = 2; page <= historyPage.value; page++) {
+        const next = await api(`${base}?page=${page}`); if (disposed || revision !== readRevision) return;
+        if (next.ownerRevision !== orders.ownerRevision || next.historyRevision !== orders.historyRevision) { Object.assign(orders, head); historyPage.value = 1; break; }
+        for (const key of ['orders', 'licenses', 'refunds']) orders[key].push(...next[key]); orders.hasMore = next.hasMore;
+      }
+    }
     const info = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription');
     if (revision !== readRevision) return;
     const previous = new Map<string, string>((data.value?.orders ?? (active.value ? [active.value] : [])).map((order: PaymentOrder) => [order.id, order.status]));

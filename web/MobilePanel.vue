@@ -5,6 +5,7 @@ import { api } from './api';
 import MessageContent from './MessageContent.vue';
 import TurnProcess from './TurnProcess.vue';
 import { conversationTurns } from './conversation-model';
+import { mergeNotificationCount, type NotificationCount } from './notification-count';
 import { useChatScroll } from './use-chat-scroll';
 import { measureViewport, viewportSize, viewportOriginCorrection, viewportOriginHorizontalCorrection } from './mobile-viewport';
 import { useAttachments } from './use-attachments';
@@ -20,7 +21,7 @@ import type { Subscription } from '../src/shared/subscription';
 import type { Conversation, Snapshot, Command, Interaction, Project, ModelOption, Activity, ThreadSettings, QueuedMessage, PermissionMode, Attachment, Message } from '../src/shared/protocol';
 import { commandSchema, readMethods } from '../src/shared/protocol';
 
-const props = defineProps<{ deviceId: string; deviceName: string }>();
+const props = defineProps<{ deviceId: string; deviceName: string; obscured?: boolean }>();
 const emit = defineEmits<{ devices: []; expired: [deviceId: string, message: string]; logout: [deviceId: string] }>();
 const subscriptionOpen = ref(false);
 const notificationOpen = ref(false); const notificationUnread = ref(0);
@@ -176,6 +177,14 @@ function request(command: Command, id: string = crypto.randomUUID()): Promise<an
 const notificationHeaders = () => ({ 'X-Remote-Device': props.deviceId });
 let refreshingNotifications = false;
 let notificationReadRevision = 0;
+let notificationReceipt: NotificationCount | undefined;
+const notificationEvents = new Map<string, any>();
+function updateNotificationCount(result: any, fallback: number) {
+  notificationReceipt = mergeNotificationCount(notificationReceipt, result);
+  if (!notificationReceipt) { notificationUnread.value = fallback; return; }
+  for (const [id, item] of notificationEvents) if (item.sequence <= notificationReceipt.through) notificationEvents.delete(id);
+  notificationUnread.value = notificationReceipt.unread + [...notificationEvents.values()].filter(item => !item.readAt).length;
+}
 const incomingDuringBadge = new Map<string, any>();
 const notificationReads = new Set<Map<string, any>>();
 async function refreshNotificationBadge() {
@@ -185,7 +194,7 @@ async function refreshNotificationBadge() {
     const result = await api('/api/notifications', undefined, notificationHeaders());
     if (revision !== notificationReadRevision) return;
     const ids = new Set((result.items ?? []).map((item: any) => item.id));
-    notificationUnread.value = (Number(result.unread) || 0) + [...incomingDuringBadge.values()].filter(item => !item.readAt && (typeof result.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence > result.throughSequence : !ids.has(item.id))).length;
+    updateNotificationCount(result, (Number(result.unread) || 0) + [...incomingDuringBadge.values()].filter(item => !item.readAt && (typeof result.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence > result.throughSequence : !ids.has(item.id))).length);
   } catch {} finally { refreshingNotifications = false; incomingDuringBadge.clear(); }
 }
 async function suppressVisibleNotification(item: any) {
@@ -200,7 +209,7 @@ async function suppressVisibleNotification(item: any) {
     if (row && !row.readAt) await readNotification(item.id);
     else {
       const ids = new Set((result.items ?? []).map((entry: any) => entry.id));
-      notificationUnread.value = (Number(result.unread) || 0) + [...incoming.values()].filter(entry => !entry.readAt && (typeof result.throughSequence === 'number' && typeof entry.sequence === 'number' ? entry.sequence > result.throughSequence : !ids.has(entry.id))).length;
+      updateNotificationCount(result, (Number(result.unread) || 0) + [...incoming.values()].filter(entry => !entry.readAt && (typeof result.throughSequence === 'number' && typeof entry.sequence === 'number' ? entry.sequence > result.throughSequence : !ids.has(entry.id))).length);
     }
   } catch {} finally { notificationReads.delete(incoming); }
 }
@@ -210,9 +219,9 @@ async function readNotification(id: string) {
   try {
     const result = await api(`/api/notifications/${encodeURIComponent(id)}/read`, undefined, notificationHeaders(), 'POST');
     if (revision !== notificationReadRevision) return;
-    notificationUnread.value = typeof result.throughSequence === 'number'
+    updateNotificationCount(result, typeof result.throughSequence === 'number'
       ? (Number(result.unread) || 0) + [...incoming.values()].filter(item => item.id !== id && !item.readAt && typeof item.sequence === 'number' && item.sequence > result.throughSequence).length
-      : Math.max(0, notificationUnread.value - 1);
+      : Math.max(0, notificationUnread.value - 1));
   } finally { notificationReads.delete(incoming); }
 }
 function knownNotificationTask(taskId: string) {
@@ -335,14 +344,14 @@ function openSocket() {
       if (m.error) p.reject(Object.assign(new Error(m.error.message), { code: m.error.code })); else p.resolve(m.result);
     } else if (m.type === 'notification-read' && m.deviceId === props.deviceId) {
       notificationReadRevision++;
-      notificationUnread.value = Math.max(0, Number(m.unread) || 0);
+      updateNotificationCount(m, Math.max(0, Number(m.unread) || 0));
       window.dispatchEvent(new CustomEvent('remote-notification-read', { detail: m }));
     } else if (m.type === 'notification') {
       const item = m.notification;
       if (item?.deviceId === props.deviceId) {
         if (refreshingNotifications) incomingDuringBadge.set(item.id, item);
         for (const incoming of notificationReads) incoming.set(item.id, item);
-        notificationUnread.value = Math.max(1, notificationUnread.value + (item.readAt ? 0 : 1));
+        if (!notificationEvents.has(item.id) && (!notificationReceipt || item.sequence > notificationReceipt.through)) { notificationEvents.set(item.id, item); notificationUnread.value += item.readAt ? 0 : 1; }
         window.dispatchEvent(new CustomEvent('remote-notification', { detail: item }));
         setTimeout(() => { void suppressVisibleNotification(item); }, 200);
       }
@@ -382,8 +391,8 @@ async function loadGroup(id: string | null, append = false) {
     }
     if (groups[id ?? 'recent'] !== state || epoch !== navigationEpoch) return;
     const ids = new Set(rows.map(row => row.id));
-    state.rows = append ? [...state.rows.filter(row => !ids.has(row.id)), ...rows] : refresh ? [...rows, ...state.rows.filter(row => !ids.has(row.id))] : rows;
-    if (!refresh || !state.hasMore) { state.cursor = cursor; state.offset = offset; state.hasMore = hasMore; }
+    state.rows = append ? [...state.rows.filter(row => !ids.has(row.id)), ...rows] : refresh && hasMore ? [...rows, ...state.rows.filter(row => !ids.has(row.id))] : rows;
+    if (!refresh || !state.hasMore || !hasMore) { state.cursor = cursor; state.offset = offset; state.hasMore = hasMore; }
     state.loaded = true; state.error = '';
     for (const row of rows) if (activities[row.id]) activities[row.id] = { ...activities[row.id], running: row.running === true, unread: row.unread === true };
   } catch (e: any) { if (groups[id ?? 'recent'] === state && epoch === navigationEpoch) state.error = e.message; } finally { state.loading = false; }
@@ -710,6 +719,7 @@ async function respondPlan(r: Interaction, action: 'implement'|'revise', feedbac
 function subscriptionChanged(subscription: Subscription) { status.value.subscription = subscription; void loadNavigation(); void read(); }
 function clearNavigation(preserveDrafts = false) {
   resetReadRecovery();
+  notificationReadRevision++; notificationReceipt = undefined; notificationEvents.clear(); notificationUnread.value = 0;
   if (preserveDrafts && selected.value) { drafts.set(selected.value.id, draft.value); try { savePendingSends(); } catch {} }
   notificationTaskIds.clear(); for (const id of Object.keys(notificationTasks)) delete notificationTasks[id];
   navigationEpoch++; focusedNavigationEpoch = -1; projectInteraction++; automaticProjects.clear();
@@ -768,7 +778,7 @@ function releasePendingCreate() {
 }
 function taskState(c:Conversation){const state=activities[c.id]??c;return{...state,running:hasCapability('live-activity')&&state.running};}
 let activityLoading=false;let seenKey='';let activityOffset=0;
-const resultObscured = computed(() => drawer.value || moreMenu.value || subscriptionOpen.value || notificationOpen.value || projectModal.value || modelModal.value || takeoverModal.value || permissionPicker.value || fullAccessConfirm.value || attachmentPicker.value);
+const resultObscured = computed(() => props.obscured || drawer.value || moreMenu.value || subscriptionOpen.value || notificationOpen.value || projectModal.value || modelModal.value || takeoverModal.value || permissionPicker.value || fullAccessConfirm.value || attachmentPicker.value);
 async function refreshActivity(){
   if(!canRead.value||!hasCapability('activity')||activityLoading)return;activityLoading=true;
   const cycle = modeSyncCycle, navigation = navigationEpoch;

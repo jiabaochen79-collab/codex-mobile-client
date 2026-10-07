@@ -19,3 +19,21 @@ for (const width of [320, 390]) test(`notification pagination retains incoming u
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: info.outputPath('notification-page-' + width + '.png') });
 });
+
+for (const width of [320, 390]) test(`notification read-all ignores delayed receipts at ${width}px`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 844 });
+  const item = (sequence: number) => ({ id: String(sequence), taskId: String(sequence), turnId: 'turn', deviceId: '123456789', status: 'completed', createdAt: sequence, occurredAt: Date.now(), sequence, readAt: null });
+  await page.route('**/api/notifications**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    return route.fulfill({ json: path.endsWith('/settings') ? { settings: { enabled: false }, pushConfigured: false } : path.endsWith('/read-all') ? { unread: 0, throughSequence: 2, readAt: 200 } : { items: [item(1), item(2)], unread: 2, throughSequence: 2 } });
+  });
+  await page.goto(origin + '/@fs/' + fileURLToPath(new URL('./component-harness.html', import.meta.url)).replaceAll('\\', '/') + '?component=notifications');
+  await expect(page.locator('#unread')).toHaveText('2'); await page.getByRole('button', { name: '全部标为已读', exact: true }).click();
+  await expect(page.locator('#unread')).toHaveText('0');
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('remote-notification-read', { detail: { deviceId: '123456789', id: '1', throughSequence: 2, readAt: 100, unread: 1 } })));
+  await expect(page.locator('#unread')).toHaveText('0'); await expect(page.locator('.notification-item.unread')).toHaveCount(0);
+  await page.evaluate(detail => window.dispatchEvent(new CustomEvent('remote-notification', { detail })), item(3));
+  await expect(page.locator('#unread')).toHaveText('1'); await expect(page.locator('.notification-item.unread')).toHaveCount(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath('notification-read-all-' + width + '.png') });
+});

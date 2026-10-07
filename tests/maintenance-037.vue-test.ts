@@ -10,6 +10,7 @@ import * as commerce from '../src/shared/commerce.js';
 import * as feedback from '../src/shared/feedback.js';
 import * as updates from '../src/shared/updates.js';
 import { conversationTurns } from '../web/conversation-model.js';
+import { mergeNotificationCount } from '../web/notification-count.js';
 import { useAttachments } from '../web/use-attachments.js';
 
 const api = vi.fn(), scopes: vue.EffectScope[] = [], cleanup: (() => void)[] = [];
@@ -31,6 +32,7 @@ function setup(file: string, props: any = {}, mount = false) {
     if (id === './use-chat-scroll') return { useChatScroll: () => ({ awayFromBottom: vue.ref(false), change: async (fn: () => void) => fn(), reset() {}, pause() {}, resume() {}, toBottom() {} }) };
     if (id === './use-attachments') return { useAttachments: () => ({ current: vue.ref([]), hasPending: vue.ref(false), restore() {}, clear() {} }) };
     if (id === './conversation-model') return { conversationTurns };
+    if (id === './notification-count') return { mergeNotificationCount };
     if (id === 'qrcode') return { default: { toDataURL: async () => 'data:fixture' } };
     if (id === 'lucide-vue-next' || id.endsWith('.vue') || ['./mobile-viewport','./push-registration','./prepare-photo'].includes(id)) return {};
     throw new Error('Unexpected import: ' + id);

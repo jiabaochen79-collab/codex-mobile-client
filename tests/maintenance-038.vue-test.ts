@@ -11,6 +11,7 @@ import * as feedback from '../src/shared/feedback.js';
 import * as updates from '../src/shared/updates.js';
 import * as pairedDevices from '../src/shared/paired-devices.js';
 import { conversationTurns } from '../web/conversation-model.js';
+import { mergeNotificationCount } from '../web/notification-count.js';
 import { ConversationImages } from '../src/agent/images.js';
 import sharp from 'sharp';
 const scopes: vue.EffectScope[] = [], cleanup: (() => void)[] = [];
@@ -38,6 +39,7 @@ function setup(file: string, props: any = {}, emit: (...args: any[]) => void = (
     if (id === './use-chat-scroll') return { useChatScroll: () => ({ awayFromBottom: vue.ref(false), change: async (fn: any) => fn(), reset() {}, pause() {}, resume() {}, toBottom() {} }) };
     if (id === './use-attachments') return { useAttachments: () => ({ current: vue.ref([]), hasPending: vue.ref(false), restore() {}, clear() {} }) };
     if (id === './conversation-model') return { conversationTurns };
+    if (id === './notification-count') return { mergeNotificationCount };
     if (id === './push-registration') return { pushRegistration: () => push() };
     if (id === 'qrcode') return { default: { toDataURL: async () => 'data:fixture' } };
     if (id === 'lucide-vue-next' || id.endsWith('.vue') || ['./mobile-viewport','./prepare-photo'].includes(id)) return {};

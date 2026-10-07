@@ -10,9 +10,11 @@ import * as feedback from '../src/shared/feedback.js';
 import * as updates from '../src/shared/updates.js';
 import * as pairedDevices from '../src/shared/paired-devices.js';
 import { conversationTurns } from '../web/conversation-model.js';
+import { mergeNotificationCount } from '../web/notification-count.js';
 import { afterEach, expect, it } from 'vitest';
 let api: (path: string) => Promise<any> = async () => ({});
 const cleanup: (() => void)[] = [], scopes: vue.EffectScope[] = [];
+const storage = new Map<string, string>();
 Object.assign(globalThis, { window: { addEventListener() {}, removeEventListener() {}, dispatchEvent() {}, matchMedia: () => ({ matches: true }), Notification: {}, PushManager: {} }, document: { visibilityState: 'visible', querySelector: () => null, documentElement: { classList: { toggle() {}, remove() {} } }, addEventListener() {}, removeEventListener() {} }, location: { href: 'http://127.0.0.1/', origin: 'http://127.0.0.1', search: '', hash: '', pathname: '/' }, history: { replaceState() {} }, sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} }, localStorage: { getItem: () => null, setItem() {}, removeItem() {} }, cancelAnimationFrame() {}, innerWidth: 390, innerHeight: 844, visualViewport: { height: 844, offsetTop: 0 } });
 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Fixture', platform: 'Fixture', maxTouchPoints: 0, serviceWorker: { addEventListener() {}, removeEventListener() {} } } });
 function setup(file: string, props: any = {}, emit: (...args: any[]) => void = () => {}) {
@@ -27,6 +29,7 @@ function setup(file: string, props: any = {}, emit: (...args: any[]) => void = (
     if (id === './use-chat-scroll') return { useChatScroll: () => ({ awayFromBottom: vue.ref(false), change: async (fn: any) => fn(), reset() {}, pause() {}, resume() {}, toBottom() {}, layoutChanged() {} }) };
     if (id === './use-attachments') return { useAttachments: () => ({ current: vue.ref([]), hasPending: vue.ref(false), uploading: vue.ref(false), restore() {}, clear() {} }) };
     if (id === './conversation-model') return { conversationTurns };
+    if (id === './notification-count') return { mergeNotificationCount };
     if (id === './push-registration') return { pushRegistration: async () => ({}) };
     if (id === 'qrcode') return { default: { toDataURL: async () => 'data:fixture' } };
     if (id === './resume-reload') return { installResumeReload: () => ({ ready() {}, dispose() {} }) };
@@ -35,7 +38,7 @@ function setup(file: string, props: any = {}, emit: (...args: any[]) => void = (
   }, module, module.exports);
   const scope = vue.effectScope(); scopes.push(scope); return scope.run(() => module.exports.default.setup(props, { expose() {}, emit }));
 }
-afterEach(() => { for (const fn of cleanup.splice(0)) fn(); for (const scope of scopes.splice(0)) scope.stop(); api = async () => ({}); });
+afterEach(() => { for (const fn of cleanup.splice(0)) fn(); for (const scope of scopes.splice(0)) scope.stop(); storage.clear(); api = async () => ({}); });
 function deferred() { let resolve!: (value: any) => void; return { promise: new Promise<any>(r => resolve = r), resolve: (value: any) => resolve(value) }; }
 it('B01 notification pagination retains unread events received after its snapshot', async () => {
   const p = setup('NotificationCenter.vue', { deviceId: '123456789', taskLabels: {}, resolveTasks: async () => {}, openTask: async () => true });
@@ -65,9 +68,9 @@ class FakeSocket {
   reply(frame: any, result: any) { this.onmessage?.({ data: JSON.stringify({ type: 'result', id: frame.id, result }) }); }
 }
 Object.assign(globalThis, { WebSocket: FakeSocket });
-function mobile() {
-  const p = setup('MobilePanel.vue', { deviceId: '123456789', deviceName: 'Fixture' }); p.active.value = true; p.openSocket(); p.connected.value = true;
-  p.status.value = { online: true, enabled: true, client: { available: true, capabilities: ['history-pages'] }, subscription: { access: true } }; return p;
+function mobile(extra: any = {}) {
+  const p = setup('MobilePanel.vue', vue.reactive({ deviceId: '123456789', deviceName: 'Fixture', ...extra })); p.active.value = true; p.openSocket(); p.connected.value = true;
+  p.status.value = { online: true, enabled: true, client: { available: true, capabilities: ['history-pages', 'activity'] }, subscription: { access: true } }; return p;
 }
 it('B13 enables continuation when a previously empty task list grows', async () => {
   const p = mobile(); let work = p.loadGroup(null); FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), { conversations: [], hasMore: false, nextOffset: 0 }); await work;
@@ -80,4 +83,95 @@ it('B14 discards a history page from the previous helper epoch and leaves it ret
   const older = p.loadHistory(), frame = FakeSocket.latest.frames.at(-1); p.snapshot.value = { ...p.snapshot.value, epoch: 'new' };
   FakeSocket.latest.reply(frame, { id, epoch: 'old', messages: [{ id: 'older', role: 'user', text: 'old image', images: [{ id: 'old-token', alt: 'fixture' }] }], hasMore: false }); await older;
   expect(p.snapshot.value.messages.map((m: any) => m.id)).toEqual(['current']);
+});
+
+it.each(['ownerRevision', 'historyRevision'])('R01 resets refreshed order pagination on a changed %s', async field => {
+  const p = setup('OrdersPanel.vue', { mode: 'mobile', deviceId: '123456789' }); p.historyPage.value = 3;
+  p.data.value = { ownerRevision: 'owner', historyRevision: 'old', orders: [], licenses: [], refunds: [] };
+  api = async path => path.includes('subscription') ? { catalog: { plans: [] } } : {
+    ownerRevision: 'owner', historyRevision: 'new', ...(path.includes('page=3') ? { [field]: 'changed' } : {}),
+    orders: [{ id: path.includes('page=') ? path : 'first' }], licenses: [], refunds: [], hasMore: true, readiness: { channels: [] }
+  };
+  await p.load(); expect(p.data.value.orders.map((r: any) => r.id)).toEqual(['first']); expect(p.historyPage.value).toBe(1); expect(p.hasMore.value).toBe(true);
+});
+it('R01 keeps multiple order pages when their revisions match', async () => {
+  const p = setup('OrdersPanel.vue', { mode: 'mobile', deviceId: '123456789' }); p.historyPage.value = 2;
+  p.data.value = { ownerRevision: 'owner', historyRevision: 'old', orders: [], licenses: [], refunds: [] };
+  api = async path => path.includes('subscription') ? { catalog: { plans: [] } } : { ownerRevision: 'owner', historyRevision: 'new', orders: [{ id: path.includes('page=2') ? 'second' : 'first' }], licenses: [], refunds: [], hasMore: false, readiness: { channels: [] } };
+  await p.load(); expect(p.data.value.orders.map((r: any) => r.id)).toEqual(['first', 'second']); expect(p.historyPage.value).toBe(2);
+});
+const notification = (id: string, sequence: number) => ({ id, deviceId: '123456789', taskId: randomUUID(), sequence, readAt: null, createdAt: sequence });
+const center = () => setup('NotificationCenter.vue', { deviceId: '123456789', taskLabels: {}, resolveTasks: async () => {}, openTask: async () => true });
+it('R02 delayed same-sequence receipts cannot resurrect read-all counts', () => {
+  const p = center(); p.items.value = [notification('first', 1), notification('second', 2)];
+  p.onRead({ detail: { deviceId: '123456789', all: true, throughSequence: 2, readAt: 200, unread: 0 } });
+  p.onRead({ detail: { deviceId: '123456789', id: 'first', throughSequence: 2, readAt: 100, unread: 1 } });
+  expect(p.items.value.every((r: any) => r.readAt)).toBe(true); expect(p.unread.value).toBe(0);
+  p.onIncoming({ detail: notification('third', 3) }); expect(p.unread.value).toBe(1);
+  p.onRead({ detail: { deviceId: '123456789', id: 'first', throughSequence: 1, readAt: 100, unread: 1 } }); expect(p.unread.value).toBe(1);
+  p.onIncoming({ detail: notification('older-page-event', 1) }); expect(p.unread.value).toBe(1);
+});
+it('R02 delayed HTTP and list snapshots preserve a prior read-all receipt', async () => {
+  const p = center(); p.items.value = [notification('first', 1)]; p.unread.value = 1;
+  p.onRead({ detail: { deviceId: '123456789', all: true, throughSequence: 1, readAt: 200, unread: 0 } });
+  api = async path => path.includes('settings') ? { settings: { enabled: false } } : { items: [notification('first', 1)], unread: 1, throughSequence: 1 };
+  await p.load(); expect(p.unread.value).toBe(0); expect(p.items.value[0].readAt).toBe(200);
+  const wait = deferred(); api = async () => wait.promise;
+  const work = p.readOne(p.items.value[0]); await Promise.resolve(); await Promise.resolve();
+  p.onIncoming({ detail: notification('second', 2) });
+  wait.resolve({ unread: 1, throughSequence: 1 }); await work; expect(p.unread.value).toBe(1);
+});
+it('R02 mobile badge deduplicates events and keeps newer events after stale receipts', async () => {
+  const p = mobile(), socket = FakeSocket.latest;
+  const frame = (value: any) => socket.onmessage?.({ data: JSON.stringify(value) });
+  frame({ type: 'notification-read', deviceId: '123456789', all: true, throughSequence: 2, readAt: 200, unread: 0 });
+  frame({ type: 'notification-read', deviceId: '123456789', id: 'first', throughSequence: 2, readAt: 100, unread: 1 }); expect(p.notificationUnread.value).toBe(0);
+  const item = notification('third', 3);
+  frame({ type: 'notification', notification: item }); frame({ type: 'notification', notification: item }); expect(p.notificationUnread.value).toBe(1);
+  frame({ type: 'notification-read', deviceId: '123456789', throughSequence: 1, readAt: 100, unread: 1 }); expect(p.notificationUnread.value).toBe(1);
+  api = async () => ({ unread: 1, throughSequence: 2, items: [] }); await p.refreshNotificationBadge(); expect(p.notificationUnread.value).toBe(1);
+  frame({ type: 'notification-read', deviceId: '123456789', throughSequence: 3, readAt: 300, unread: 0 }); expect(p.notificationUnread.value).toBe(0);
+  p.clearNavigation(); expect(p.notificationUnread.value).toBe(0);
+});
+it('R02 count snapshots reject invalid values and accept newer event sequences', () => {
+  const old = { through: 2, unread: 0 };
+  expect(mergeNotificationCount(old, { throughSequence: 1, unread: 3 })).toBe(old);
+  expect(mergeNotificationCount(old, { throughSequence: 2, unread: 1 })).toBe(old);
+  expect(mergeNotificationCount(old, { throughSequence: 3, unread: 1 })).toEqual({ through: 3, unread: 1 });
+  expect(mergeNotificationCount(old, { throughSequence: NaN, unread: -1 })).toBe(old);
+});
+it('R03 complete task refresh removes deleted rows and resets pagination', async () => {
+  const p = mobile(); const old = { id: randomUUID(), title: 'Deleted', updatedAt: 1 };
+  p.groups.recent = { rows: [old], loaded: true, loading: false, hasMore: true, offset: 90, cursor: 'old' };
+  const work = p.loadGroup(null); FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), { conversations: [], hasMore: false, nextOffset: 0 }); await work;
+  expect(p.groups.recent.rows).toEqual([]); expect(p.groups.recent.hasMore).toBe(false); expect(p.groups.recent.offset).toBe(0);
+});
+it('R03 incomplete head refresh preserves older pages and their continuation', async () => {
+  const p = mobile(); const old = { id: randomUUID(), title: 'Older', updatedAt: 1 }, head = { id: randomUUID(), title: 'Head', updatedAt: 2 };
+  p.groups.recent = { rows: [old], loaded: true, loading: false, hasMore: true, offset: 90, cursor: 'old' };
+  const work = p.loadGroup(null); FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), { conversations: [head], hasMore: true, nextOffset: 30 }); await work;
+  expect(p.groups.recent.rows.map((r: any) => r.id)).toEqual([head.id, old.id]); expect(p.groups.recent.offset).toBe(90); expect(p.groups.recent.cursor).toBe('old');
+});
+it.each(['directoryOpen', 'adding', 'subscriptionOpen', 'editingId', 'removeTarget', 'confirmLogout', 'pendingSwitch'])('R04 %s obscures the child task and blocks seen/push suppression', async field => {
+  const parent = setup('DevicesPanel.vue'); parent.restoring.value = false; parent.activeId.value = '123456789'; parent.devices.value = [{ deviceId: '123456789', authorized: true }];
+  const props = vue.reactive({ deviceId: '123456789', deviceName: 'Fixture', get obscured() { return parent.chatObscured.value; } });
+  const p = setup('MobilePanel.vue', props); p.active.value = true; p.openSocket(); p.connected.value = true;
+  p.status.value = { online: true, enabled: true, client: { available: true, capabilities: ['activity'] }, subscription: { access: true } };
+  const turnId = randomUUID(); p.snapshot.value = { id: randomUUID(), busy: false, completionId: turnId + ':completed', lastTurnId: turnId };
+  parent[field].value = field === 'removeTarget' ? { deviceId: '123456789' } : field.endsWith('Id') || field === 'pendingSwitch' ? '123456789' : true;
+  expect(parent.chatObscured.value).toBe(true); await p.markSeen(); expect(FakeSocket.latest.frames).toHaveLength(0);
+  let reads = 0; api = async () => { reads++; return {}; }; await p.suppressVisibleNotification({ taskId: p.snapshot.value.id, turnId }); expect(reads).toBe(0);
+  parent[field].value = field === 'removeTarget' || field === 'pendingSwitch' ? undefined : field.endsWith('Id') ? '' : false;
+  await vue.nextTick(); expect(parent.chatObscured.value).toBe(false);
+  const frame = FakeSocket.latest.frames.at(-1); expect(frame.command.method).toBe('seen'); FakeSocket.latest.reply(frame, { seen: true });
+  expect(readFileSync('web/DevicesPanel.vue', 'utf8')).toContain(':obscured="chatObscured"');
+});
+it('R05 a different-tab expiry receipt clears a stale 48-hour reminder', async () => {
+  Object.assign(globalThis, { localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) } });
+  const expiry = 100000000, props = vue.reactive({ deviceId: '123456789', subscription: { status: 'trial', expiresAt: expiry, serverTime: expiry - 10000 } });
+  const p = setup('TrialNotice.vue', props); expect(p.message.value).toContain('48');
+  props.subscription = { ...props.subscription, serverTime: expiry - 1000 }; await vue.nextTick(); expect(p.message.value).toContain('48');
+  storage.set(`trial-notice:${props.deviceId}:${expiry}:expired`, '1'); props.subscription = { ...props.subscription, status: 'expired', serverTime: expiry + 1 }; await vue.nextTick(); expect(p.message.value).toBe('');
+  props.deviceId = '234567891'; await vue.nextTick(); expect(p.message.value).toContain('已结束');
+  p.message.value = ''; props.subscription = { ...props.subscription, serverTime: expiry + 2 }; await vue.nextTick(); expect(p.message.value).toBe('');
 });
