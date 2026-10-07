@@ -80,7 +80,7 @@ async function send() {
     catch { error.value = '反馈已提交成功，但本地旧草稿未能清理；再次打开时可核对工单编号。'; }
     text.value = ''; images.value = []; pending.value = undefined; requestId.value = crypto.randomUUID(); loaded.value = true;
   } catch (e: any) {
-    if (['INVALID', 'CAPACITY', 'UPLOAD_CORRUPT', 'UPLOAD_CONSUMED', 'NOT_FOUND'].includes(e.code)) { images.value = images.value.map(image => ({ data: image.data })); pending.value = undefined; requestId.value = crypto.randomUUID(); error.value = e.message + ' 请修改反馈内容或移除截图后重新提交。'; await saveDraft(); }
+    if (['INVALID', 'CAPACITY', 'UPLOAD_CORRUPT', 'UPLOAD_CONSUMED', 'NOT_FOUND', 'CONFLICT'].includes(e.code)) { images.value = images.value.map(image => ({ data: image.data })); pending.value = undefined; requestId.value = crypto.randomUUID(); error.value = e.message + (e.code === 'CONFLICT' ? ' 内容已保留并可编辑，请先核对已有工单，再确认是否重新提交。' : ' 请修改反馈内容或移除截图后重新提交。'); await saveDraft(); }
     else error.value = e.message + ' 草稿已保留，可重试原提交。';
   } finally { busy.value = false; }
 }

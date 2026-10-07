@@ -133,7 +133,7 @@ it('B08 failed notification settings cannot be edited and can be reloaded', asyn
   api.mockRejectedValueOnce(new Error('offline')); await p.load(); expect(p.loading.value).toBe(false); expect(p.settings.value.enabled).toBe(false);
   const template = readFileSync(resolve(client, 'web/NotificationCenter.vue'), 'utf8');
   expect(p.settingsReady.value).toBe(false); await p.enable(); expect(api).toHaveBeenCalledTimes(2);
-  expect(template).toContain('@click="load"');
+  expect(template).toContain('@click="load(true)"');
   api.mockImplementation(async path => path.endsWith('/settings') ? { settings: { enabled: true, completed: true, failed: false }, revision: 'current' } : { items: [], unread: 0 });
   await p.load(); expect(p.settingsReady.value).toBe(true); expect(p.settings.value.failed).toBe(false);
 });

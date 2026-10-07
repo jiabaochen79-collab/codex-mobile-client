@@ -34,6 +34,8 @@ export class Agent {
   private socket?: WebSocket;
   private computerFingerprint?: string;
   private computerIdentitySent = false;
+  private computerIdentityReading = false;
+  private computerIdentityRetryAt = 0;
   private reconnect?: NodeJS.Timeout;
   private timer?: NodeJS.Timeout;
   private changeTimer?: NodeJS.Timeout;
@@ -139,6 +141,7 @@ export class Agent {
     if (this.socket?.readyState === WebSocket.OPEN) {
       if (Date.now() - this.lastPong > 75000) { this.socket.terminate(); return; }
       if (Date.now() - this.lastPing > 10000) { this.socket.ping(); this.lastPing = Date.now(); }
+      if (!this.computerIdentitySent && performance.now() >= this.computerIdentityRetryAt) void this.announceComputer();
     }
     if (this.codeExpires !== null && Date.now() >= this.codeExpires) this.refreshCode();
     this.client = await this.options.adapter.status();
@@ -395,11 +398,15 @@ export class Agent {
     } catch { return undefined; }
   }
   private async announceComputer() {
-    if (this.computerIdentitySent) return;
-    const fingerprint = await this.readComputerFingerprint();
-    if (!fingerprint || this.socket?.readyState !== WebSocket.OPEN) return;
-    this.send({ type: 'computer', fingerprint });
-    this.computerIdentitySent = true;
+    if (this.closing || this.computerIdentitySent || this.computerIdentityReading || this.socket?.readyState !== WebSocket.OPEN) return;
+    const socket = this.socket;
+    this.computerIdentityReading = true;
+    try {
+      const fingerprint = await this.readComputerFingerprint();
+      if (!fingerprint || this.closing || this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+      this.send({ type: 'computer', fingerprint });
+      this.computerIdentitySent = true;
+    } finally { this.computerIdentityReading = false; this.computerIdentityRetryAt = performance.now() + 15000; }
   }
   private async registerComputer() {
     const fingerprint = await this.readComputerFingerprint();

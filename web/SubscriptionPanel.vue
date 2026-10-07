@@ -17,17 +17,19 @@ async function claimTrial() {
   catch (e: any) { error.value = e.message; } finally { busy.value = false; }
 }
 const code = ref(''); const accepted = ref(false); const showCode = ref(false); const busy = ref(false); const error = ref(''); const success = ref(false);
+const readError = ref('');
+watch(code, () => { error.value = ''; success.value = false; }, { flush: 'sync' });
 let loadRevision = 0;
 let polling: ReturnType<typeof setInterval> | undefined; let disposed = false;
 const valid = computed(() => accepted.value && licenseCodeSchema.safeParse(code.value).success && !!catalog.value);
 const expiry = computed(() => subscription.value?.expiresAt ? new Date(subscription.value.expiresAt).toLocaleString('zh-CN', { hour12: false }) : null);
 async function load() {
   const revision = ++loadRevision;
-  busy.value = true; error.value = '';
+  busy.value = true; readError.value = '';
   try {
     if (props.mode === 'guest') { const result = await api('/api/plans'); if (revision === loadRevision) catalog.value = result; }
     else { const result = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription'); if (revision === loadRevision) { catalog.value = result.catalog; subscription.value = result.subscription; trial.value = result.trial; } }
-  } catch (e: any) { if (revision === loadRevision) error.value = e.message; } finally { if (revision === loadRevision) busy.value = false; }
+  } catch (e: any) { if (revision === loadRevision) readError.value = e.message; } finally { if (revision === loadRevision) busy.value = false; }
 }
 async function activate() {
   if (!valid.value || busy.value) return; busy.value = true; error.value = ''; success.value = false;
@@ -58,7 +60,7 @@ onUnmounted(() => { disposed = true; loadRevision++; clearInterval(polling); doc
         <div v-if="catalog.operatorName || catalog.supportContact" class="subscription-operator"><span>运营者：{{ catalog.operatorName }}</span><span>售后与退款：{{ catalog.supportContact }}</span></div>
       </template>
       <p v-if="success" class="activation-success" role="status"><Check :size="17"/>授权已激活</p>
-      <div v-if="error" class="alert" role="alert">{{ error }}<button class="text-button" :disabled="busy" @click="load">重试</button></div>
+      <div v-if="error || readError" class="alert" role="alert">{{ error || readError }}<button v-if="readError && !error" class="text-button" :disabled="busy" @click="load">重试读取</button></div>
     </section>
   </div>
   <OrdersPanel v-if="ordersOpen && mode !== 'guest' && !subscription?.disabled" :mode="mode" :initial-plan="purchasePlan" :device-id="deviceId" @close="ordersOpen = false" @changed="load"/>

@@ -6,7 +6,7 @@ import { setImmediate } from 'node:timers/promises';
 import { readCompactRecord } from './compact-json.js';
 
 export type NotificationSource = { id: string; path: string };
-type Cursor = { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; remainder: string };
+type Cursor = { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd: number; remainder: string };
 
 const MAX_DELTA_BYTES = 4 * 1024 * 1024;
 const MAX_REMAINDER_BYTES = 1024 * 1024;
@@ -64,6 +64,7 @@ export class CompletionMonitor {
     if (!source.id || !existsSync(source.path)) return;
     const stat = statSync(source.path);
     let previous = this.store.notificationCursor(source.path);
+    const initialized = !!previous;
     if (!previous) {
       const watch = this.store.notificationWatch(source.id);
       const baselineAt = watch?.startedAt ?? this.startedAt;
@@ -71,15 +72,16 @@ export class CompletionMonitor {
         this.store.saveNotificationCursor({ path: source.path, offset: stat.size, mtime: stat.mtimeMs, size: stat.size, fileId: fileIdentity(stat), baselineAt, remainder: '' });
         return;
       }
-      previous = { path: source.path, offset: 0, mtime: stat.mtimeMs, size: 0, fileId: fileIdentity(stat), baselineAt, remainder: '' };
+      previous = { path: source.path, offset: 0, mtime: stat.mtimeMs, size: 0, fileId: fileIdentity(stat), baselineAt, baselineEnd: stat.size, remainder: '' };
     }
     const currentFileId = fileIdentity(stat);
     let offset = previous.offset;
     let baselineAt = previous.baselineAt;
+    let baselineEnd = previous.baselineEnd;
     let remainder = previous.remainder;
     const rotated = (previous.fileId && previous.fileId !== currentFileId) || stat.size < offset || stat.size === offset && stat.mtimeMs !== previous.mtime;
-    if (rotated) { offset = 0; remainder = ''; }
-    if (!rotated && stat.size === offset && stat.mtimeMs === previous.mtime) return;
+    if (rotated) { offset = 0; remainder = ''; baselineEnd = stat.size; }
+    if (initialized && !rotated && stat.size === offset && stat.mtimeMs === previous.mtime) return;
     const delta = Math.min(stat.size - offset, MAX_DELTA_BYTES);
     const fd = openSync(source.path, 'r');
     let data = Buffer.alloc(delta);
@@ -90,21 +92,21 @@ export class CompletionMonitor {
     data = data.subarray(0, bytesRead);
     const priorBytes = remainder.startsWith('b64:') ? Buffer.from(remainder.slice(4), 'base64') : Buffer.from(remainder);
     const combined = Buffer.concat([priorBytes, data]);
-    const lines: string[] = [];
+    const lines: { text: string; end: number }[] = [];
     let start = 0;
-    for (let i = 0; i < combined.length; i++) if (combined[i] === 10) { lines.push(combined.subarray(start, i).toString('utf8')); start = i + 1; }
+    for (let i = 0; i < combined.length; i++) if (combined[i] === 10) { lines.push({ text: combined.subarray(start, i).toString('utf8'), end: offset - priorBytes.length + i + 1 }); start = i + 1; }
     const tail = combined.subarray(start);
     remainder = tail.length <= MAX_REMAINDER_BYTES ? `b64:${tail.toString('base64')}` : '';
     let nextOffset = offset + bytesRead;
     if (tail.length > MAX_REMAINDER_BYTES) {
       nextOffset -= tail.length;
       const record = await readCompactRecord(source.path, nextOffset);
-      if (record) { if (record.value) lines.push(JSON.stringify(record.value)); nextOffset = record.offset; }
+      if (record) { if (record.value) lines.push({ text: JSON.stringify(record.value), end: record.offset }); nextOffset = record.offset; }
     }
     if (this.closed) return;
-    const next: Cursor = { path: source.path, offset: nextOffset, mtime: stat.mtimeMs, size: stat.size, fileId: currentFileId, baselineAt, remainder };
+    const next: Cursor = { path: source.path, offset: nextOffset, mtime: stat.mtimeMs, size: stat.size, fileId: currentFileId, baselineAt, baselineEnd, remainder };
     const events: LocalNotificationEvent[] = [];
-    for (const line of lines) {
+    for (const { text: line, end } of lines) {
       if (!line.trim()) continue;
       let event: any;
       try { event = JSON.parse(line); } catch { continue; }
@@ -113,7 +115,8 @@ export class CompletionMonitor {
       const turnId = typeof payload?.turn_id === 'string' ? payload.turn_id : '';
       if (!status || !turnId || turnId.length > 200) continue;
       const occurredAt = timestamp(event.timestamp, 0);
-      if (occurredAt < baselineAt) continue;
+      // Only bootstrap history needs a wall-clock cutoff; appended records use the durable byte boundary.
+      if (end <= baselineEnd && occurredAt < baselineAt) continue;
       const eventId = createHash('sha256').update(`${this.namespace}\0${source.id}\0${turnId}\0${status}`).digest('hex');
       events.push({ eventId, taskId: source.id, turnId, status, occurredAt, protocolVersion: 1 });
     }

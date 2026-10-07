@@ -19,6 +19,10 @@ export class AgentStore {
     this.db.exec('CREATE TABLE IF NOT EXISTS remembered_grants (origin TEXT NOT NULL, id TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(origin,id));');
     this.db.exec('CREATE TABLE IF NOT EXISTS notification_cursors (path TEXT PRIMARY KEY, offset INTEGER NOT NULL, mtime INTEGER NOT NULL, size INTEGER NOT NULL, fileId TEXT NOT NULL DEFAULT \'\', baselineAt INTEGER NOT NULL, remainder TEXT NOT NULL);');
     if (!this.db.prepare('PRAGMA table_info(notification_cursors)').all().some(c => c.name === 'fileId')) this.db.exec("ALTER TABLE notification_cursors ADD COLUMN fileId TEXT NOT NULL DEFAULT ''");
+    if (!this.db.prepare('PRAGMA table_info(notification_cursors)').all().some(c => c.name === 'baselineEnd')) {
+      this.db.exec('ALTER TABLE notification_cursors ADD COLUMN baselineEnd INTEGER NOT NULL DEFAULT 0');
+      this.db.exec('UPDATE notification_cursors SET baselineEnd=size');
+    }
     this.db.exec('CREATE TABLE IF NOT EXISTS notification_watches (taskId TEXT PRIMARY KEY, startedAt INTEGER NOT NULL, lastWatchedAt INTEGER NOT NULL DEFAULT 0);');
     if (!this.db.prepare('PRAGMA table_info(notification_watches)').all().some(c => c.name === 'lastWatchedAt')) this.db.exec('ALTER TABLE notification_watches ADD COLUMN lastWatchedAt INTEGER NOT NULL DEFAULT 0');
     this.db.exec('UPDATE notification_watches SET lastWatchedAt=startedAt WHERE lastWatchedAt=0');
@@ -69,10 +73,10 @@ export class AgentStore {
     const namespace = randomUUID(); this.set('notification:namespace', namespace); return namespace;
   }
   notificationCursor(path: string) {
-    return this.db.prepare('SELECT path,offset,mtime,size,fileId,baselineAt,remainder FROM notification_cursors WHERE path=?').get(path) as { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; remainder: string } | undefined;
+    return this.db.prepare('SELECT path,offset,mtime,size,fileId,baselineAt,baselineEnd,remainder FROM notification_cursors WHERE path=?').get(path) as { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd: number; remainder: string } | undefined;
   }
-  saveNotificationCursor(cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; remainder: string }) {
-    this.db.prepare('INSERT INTO notification_cursors(path,offset,mtime,size,fileId,baselineAt,remainder) VALUES(?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,mtime=excluded.mtime,size=excluded.size,fileId=excluded.fileId,baselineAt=excluded.baselineAt,remainder=excluded.remainder').run(cursor.path, cursor.offset, cursor.mtime, cursor.size, cursor.fileId, cursor.baselineAt, cursor.remainder);
+  saveNotificationCursor(cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd?: number; remainder: string }) {
+    this.db.prepare('INSERT INTO notification_cursors(path,offset,mtime,size,fileId,baselineAt,baselineEnd,remainder) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,mtime=excluded.mtime,size=excluded.size,fileId=excluded.fileId,baselineAt=excluded.baselineAt,baselineEnd=excluded.baselineEnd,remainder=excluded.remainder').run(cursor.path, cursor.offset, cursor.mtime, cursor.size, cursor.fileId, cursor.baselineAt, cursor.baselineEnd ?? cursor.size, cursor.remainder);
   }
   watchNotificationTask(taskId: string, startedAt: number) {
     this.db.prepare('INSERT INTO notification_watches(taskId,startedAt,lastWatchedAt) VALUES(?,?,?) ON CONFLICT(taskId) DO UPDATE SET startedAt=MIN(startedAt,excluded.startedAt),lastWatchedAt=MAX(lastWatchedAt,excluded.lastWatchedAt)').run(taskId, startedAt, startedAt);
@@ -81,12 +85,12 @@ export class AgentStore {
     return this.db.prepare('SELECT startedAt FROM notification_watches WHERE taskId=?').get(taskId) as { startedAt: number } | undefined;
   }
   notificationWatchIds(offset = 0) { return (this.db.prepare('SELECT taskId FROM notification_watches ORDER BY lastWatchedAt DESC,taskId LIMIT 200 OFFSET ?').all(offset) as { taskId: string }[]).map(row => row.taskId); }
-  recordNotifications(events: LocalNotificationEvent[], cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; remainder: string }) {
+  recordNotifications(events: LocalNotificationEvent[], cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd?: number; remainder: string }) {
     this.db.exec('BEGIN');
     try {
       const insert = this.db.prepare('INSERT OR IGNORE INTO notification_outbox(eventId,taskId,turnId,status,occurredAt,createdAt) VALUES(?,?,?,?,?,?)');
       for (const event of events) insert.run(event.eventId, event.taskId, event.turnId, event.status, event.occurredAt, Date.now());
-      this.db.prepare('INSERT INTO notification_cursors(path,offset,mtime,size,fileId,baselineAt,remainder) VALUES(?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,mtime=excluded.mtime,size=excluded.size,fileId=excluded.fileId,baselineAt=excluded.baselineAt,remainder=excluded.remainder').run(cursor.path, cursor.offset, cursor.mtime, cursor.size, cursor.fileId, cursor.baselineAt, cursor.remainder);
+      this.saveNotificationCursor(cursor);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }

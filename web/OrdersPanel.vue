@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ArrowLeft, ArrowUpRight, Check, ClipboardList, Copy, CreditCard, QrCode, RefreshCw, Wallet, X } from 'lucide-vue-next';
 import QRCode from 'qrcode';
 import { api as requestApi } from './api';
@@ -26,6 +26,7 @@ const plan = computed(() => catalog.value?.plans.find(p => p.id === selected.val
 const plans = computed(() => catalog.value?.plans.filter(p => p.id !== 'trial') ?? []);
 const canBuy = computed(() => data.value?.readiness.ready && plan.value?.available && accepted.value && !loading.value && !data.value?.orders.some((o: PaymentOrder) => !['paid','closed','refunded'].includes(o.status)));
 function changedChoice() { accepted.value = false; key.value = crypto.randomUUID(); }
+watch(() => JSON.stringify([selected.value, channel.value, data.value?.ownerRevision, plan.value?.revision, plan.value?.priceFen, plan.value?.days, plan.value?.name, plan.value?.available, catalog.value?.termsVersion]), changedChoice, { flush: 'sync' });
 const date = (value: number | null) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-';
 let polling: ReturnType<typeof setInterval> | undefined;
 let readRevision = 0, reading = false, disposed = false;
