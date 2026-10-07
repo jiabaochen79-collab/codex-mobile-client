@@ -6,13 +6,18 @@ import { setImmediate } from 'node:timers/promises';
 import { readCompactRecord } from './compact-json.js';
 
 export type NotificationSource = { id: string; path: string };
-type Cursor = { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd: number; remainder: string };
+type Cursor = { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd: number; remainder: string; fingerprint?: string };
 
 const MAX_DELTA_BYTES = 4 * 1024 * 1024;
 const MAX_REMAINDER_BYTES = 1024 * 1024;
 
 function fileIdentity(stat: { dev: number | bigint; ino: number | bigint }) {
   return `${stat.dev}:${stat.ino}`;
+}
+function cursorFingerprint(path: string, offset: number) {
+  const fd = openSync(path, 'r'), bytes = Buffer.alloc(Math.min(128, offset));
+  try { const count = readSync(fd, bytes, 0, bytes.length, offset - bytes.length); return createHash('sha256').update(bytes.subarray(0, count)).digest('hex'); }
+  finally { closeSync(fd); }
 }
 
 function eventStatus(payload: any): LocalNotificationEvent['status'] | undefined {
@@ -54,7 +59,7 @@ export class CompletionMonitor {
       this.watchOffset = watched.length === 200 ? this.watchOffset + 200 : 0;
       const rows = await this.sources(watched);
       for (const source of rows.slice(0, 400)) if (!this.closed) {
-        try { await setImmediate(); if (!this.closed) await this.readSource(source); } catch { /* Retry this file without starving other tasks. */ }
+        try { await setImmediate(); if (!this.closed) { await this.readSource(source); if (!this.store.notificationWatch(source.id)) this.store.watchNotificationTask(source.id, this.startedAt); } } catch { /* Retry this file without starving other tasks. */ }
       }
       this.store.pruneNotifications();
     } catch { /* The desktop index may be replacing files while Codex starts. */ }
@@ -69,7 +74,7 @@ export class CompletionMonitor {
       const watch = this.store.notificationWatch(source.id);
       const baselineAt = watch?.startedAt ?? this.startedAt;
       if (!watch && stat.mtimeMs < this.startedAt) {
-        this.store.saveNotificationCursor({ path: source.path, offset: stat.size, mtime: stat.mtimeMs, size: stat.size, fileId: fileIdentity(stat), baselineAt, remainder: '' });
+        this.store.saveNotificationCursor({ path: source.path, offset: stat.size, mtime: stat.mtimeMs, size: stat.size, fileId: fileIdentity(stat), baselineAt, remainder: '', fingerprint: cursorFingerprint(source.path, stat.size) });
         return;
       }
       previous = { path: source.path, offset: 0, mtime: stat.mtimeMs, size: 0, fileId: fileIdentity(stat), baselineAt, baselineEnd: stat.size, remainder: '' };
@@ -79,7 +84,7 @@ export class CompletionMonitor {
     let baselineAt = previous.baselineAt;
     let baselineEnd = previous.baselineEnd;
     let remainder = previous.remainder;
-    const rotated = (previous.fileId && previous.fileId !== currentFileId) || stat.size < offset || stat.size === offset && stat.mtimeMs !== previous.mtime;
+    const rotated = (previous.fileId && previous.fileId !== currentFileId) || stat.size < offset || stat.size === offset && stat.mtimeMs !== previous.mtime || !!previous.fingerprint && cursorFingerprint(source.path, offset) !== previous.fingerprint;
     if (rotated) { offset = 0; remainder = ''; baselineEnd = stat.size; }
     if (initialized && !rotated && stat.size === offset && stat.mtimeMs === previous.mtime) return;
     const delta = Math.min(stat.size - offset, MAX_DELTA_BYTES);
@@ -104,7 +109,7 @@ export class CompletionMonitor {
       if (record) { if (record.value) lines.push({ text: JSON.stringify(record.value), end: record.offset }); nextOffset = record.offset; }
     }
     if (this.closed) return;
-    const next: Cursor = { path: source.path, offset: nextOffset, mtime: stat.mtimeMs, size: stat.size, fileId: currentFileId, baselineAt, baselineEnd, remainder };
+    const next: Cursor = { path: source.path, offset: nextOffset, mtime: stat.mtimeMs, size: stat.size, fileId: currentFileId, baselineAt, baselineEnd, remainder, fingerprint: cursorFingerprint(source.path, nextOffset) };
     const events: LocalNotificationEvent[] = [];
     for (const { text: line, end } of lines) {
       if (!line.trim()) continue;

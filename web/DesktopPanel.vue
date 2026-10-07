@@ -42,7 +42,7 @@ onMounted(async () => {
   const secret = new URLSearchParams(location.hash.slice(1)).get('token');
   history.replaceState(null, '', location.pathname);
   if (secret) { try { await api('/local/session', {}, { Authorization: `Bearer ${secret}` }); } catch (e: any) { operationError.value = e.message; } }
-  await refresh(); subscriptionOpen.value = showSubscription; timer = setInterval(refresh, 3000);
+  await refresh(); if (closed) return; subscriptionOpen.value = showSubscription; timer = setInterval(refresh, 3000);
 });
 onUnmounted(() => { closed = true; revision++; clearInterval(timer); });
 </script>

@@ -146,11 +146,20 @@ it('R03 complete task refresh removes deleted rows and resets pagination', async
   const work = p.loadGroup(null); FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), { conversations: [], hasMore: false, nextOffset: 0 }); await work;
   expect(p.groups.recent.rows).toEqual([]); expect(p.groups.recent.hasMore).toBe(false); expect(p.groups.recent.offset).toBe(0);
 });
-it('R03 incomplete head refresh preserves older pages and their continuation', async () => {
-  const p = mobile(); const old = { id: randomUUID(), title: 'Older', updatedAt: 1 }, head = { id: randomUUID(), title: 'Head', updatedAt: 2 };
-  p.groups.recent = { rows: [old], loaded: true, loading: false, hasMore: true, offset: 90, cursor: 'old' };
-  const work = p.loadGroup(null); FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), { conversations: [head], hasMore: true, nextOffset: 30 }); await work;
-  expect(p.groups.recent.rows.map((r: any) => r.id)).toEqual([head.id, old.id]); expect(p.groups.recent.offset).toBe(90); expect(p.groups.recent.cursor).toBe('old');
+it('R03 refresh revalidates older pages and removes archived rows', async () => {
+  const p = mobile(); const old = { id: randomUUID(), title: 'Older', updatedAt: 1 }, archived = { id: randomUUID(), title: 'Archived', updatedAt: 0 };
+  const head = Array.from({ length: 30 }, () => ({ id: randomUUID(), title: 'Head', updatedAt: 2 }));
+  p.groups.recent = { rows: [...head, old, archived], loaded: true, loading: false, hasMore: true, offset: 60, cursor: 'old' };
+  const work = p.loadGroup(null); FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), { conversations: head, hasMore: true, nextOffset: 30, cursor: 'new' });
+  await Promise.resolve(); await Promise.resolve();
+  expect(FakeSocket.latest.frames.at(-1).command.params).toMatchObject({ offset: 30, cursor: 'new' });
+  FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), { conversations: [old], hasMore: false, nextOffset: 31, cursor: 'new' }); await work;
+  expect(p.groups.recent.rows.map((r: any) => r.id)).toEqual([...head.map(row => row.id), old.id]); expect(p.groups.recent.offset).toBe(31); expect(p.groups.recent.cursor).toBe('new');
+});
+it('R03 an expired group cursor replaces stale pages with the restart page', async () => {
+  const p = mobile(); p.groups.recent = { rows: [{ id: 'old', title: 'Old', updatedAt: 1 }], loaded: true, loading: false, hasMore: true, offset: 30, cursor: 'expired' };
+  const work = p.loadGroup(null, true); FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), { conversations: [{ id: 'new', title: 'New', updatedAt: 2 }], hasMore: false, nextOffset: 1, cursor: 'new', reset: true }); await work;
+  expect(p.groups.recent.rows.map((row: any) => row.id)).toEqual(['new']); expect(p.groups.recent.offset).toBe(1);
 });
 it.each(['directoryOpen', 'adding', 'subscriptionOpen', 'editingId', 'removeTarget', 'confirmLogout', 'pendingSwitch'])('R04 %s obscures the child task and blocks seen/push suppression', async field => {
   const parent = setup('DevicesPanel.vue'); parent.restoring.value = false; parent.activeId.value = '123456789'; parent.devices.value = [{ deviceId: '123456789', authorized: true }];

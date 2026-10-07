@@ -285,11 +285,14 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
         const ids = db.prepare('SELECT id ' + selection + ' LIMIT 1000001').all(...values).map(row => String(row.id));
         if (ids.length + [...this.listPages.values()].reduce((n, value) => n + value.ids.length, 0) > 1000000) throw new RemoteError('BUSY', '任务列表缓存已满，请缩小项目或搜索范围，稍后重试。');
         cursor = randomUUID(); page = { filter: identity, ids, expires: Date.now() + 15 * 60000 }; this.listPages.set(cursor, page);
-        if (!reset) offset = 0;
+        offset = 0;
       }
-      const lookup = db.prepare(`SELECT ${fields} FROM threads WHERE id=? AND ${ACTIVE_THREADS}`);
-      const rows = page ? page.ids.slice(offset, offset + 30).flatMap(id => { const row = lookup.get(id); return row ? [row as unknown as Conversation] : []; }) : db.prepare('SELECT ' + fields + ' ' + selection + ' LIMIT 31 OFFSET ?').all(...values, offset) as unknown as Conversation[];
-      return { conversations: rows.slice(0,30).map(row => ({ ...row, ...this.taskActivity(row.id, db) })), hasMore: page ? offset + 30 < page.ids.length : rows.length > 30, ...(cursor ? { cursor, reset, nextOffset: offset + 30 } : {}) };
+      const lookup = db.prepare(`SELECT ${fields} FROM threads WHERE id=? AND ${conditions.join(' AND ')}`);
+      let nextOffset = offset;
+      const rows: Conversation[] = [];
+      if (page) { while (nextOffset < page.ids.length && rows.length < 30) { const row = lookup.get(page.ids[nextOffset++], ...values); if (row) rows.push(row as unknown as Conversation); } }
+      else rows.push(...db.prepare('SELECT ' + fields + ' ' + selection + ' LIMIT 31 OFFSET ?').all(...values, offset) as unknown as Conversation[]);
+      return { conversations: rows.slice(0,30).map(row => ({ ...row, ...this.taskActivity(row.id, db) })), hasMore: page ? nextOffset < page.ids.length : rows.length > 30, ...(cursor ? { cursor, reset, nextOffset } : {}) };
     } finally { db.close(); }
   }
   async notificationSources(taskIds: string[] = []) {
@@ -383,6 +386,11 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       return { ...row, running: running === true, unread: running === false && this.activity.isUnread(row.id, row.completionId) };
     });
   }
+  private async readyTaskActivity(id: string, db: DatabaseSync) {
+    const row = db.prepare(`SELECT rollout_path FROM threads WHERE id=? AND ${ACTIVE_THREADS}`).get(id);
+    if (row) await this.activity.readAsync(String(row.rollout_path));
+    return this.taskActivity(id, db);
+  }
   private async appTool(name: string, args: unknown, contextId: string, authorize?: () => void) {
     if (!this.discovery?.toolsPipe) throw new RemoteError('UNSUPPORTED', '当前客户端未开放此操作。');
     this.tools ??= this.createTools(this.discovery.toolsPipe);
@@ -433,10 +441,12 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     await waiting;
     if (this.followed.get(id) !== followed || !followed.state) throw new RemoteError('CLIENT_UNAVAILABLE', '任务连接正在恢复，请稍后重试。');
   }
-  private snapshot(limit = 100, before?: string) {
+  private async snapshot(limit = 100, before?: string) {
+    const current = this.current, discovery = this.discovery;
     const result = normalizeSnapshot(this.current!.state, `${this.discovery!.processId}:${this.current!.owner}`, limit, this.images, before);
     result.nativeQueuedCount = this.nativeQueuedCount(result.id);
-    const db = this.index(); try { result.completionId = this.taskActivity(result.id, db).completionId; } finally { db.close(); }
+    const db = this.index(); try { result.completionId = (await this.readyTaskActivity(result.id, db)).completionId; } finally { db.close(); }
+    if (this.current !== current || this.discovery !== discovery) throw new RemoteError('STALE', '任务连接已变化，请重新读取。');
     return result;
   }
   private nativeQueuedCount(id: string): number | null {
@@ -474,7 +484,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
         for (const row of batch) {
           const live = runtimeRunning(this.followed.get(row.id)?.state?.threadRuntimeStatus);
           if (live !== undefined) values.set(row.id, live);
-          else { try { if (this.activity.read(row.rollout_path).pending !== false) candidates.push(row.id); else values.set(row.id, false); } catch { values.set(row.id, undefined); } }
+          else { try { if ((await this.activity.readAsync(row.rollout_path)).pending !== false) candidates.push(row.id); else values.set(row.id, false); } catch { values.set(row.id, undefined); } }
         }
         const statuses = await this.runtimeActivity.read(candidates);
         if (generation !== this.projectGeneration) return;
@@ -490,7 +500,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (command.method === 'command.status') throw new RemoteError('INVALID', '发送结果由电脑助手核对。');
     await this.ready(command);
     if (command.method === 'safety.status') {
-      await this.follow(command.params.id, false); const snapshot = this.snapshot(20);
+      await this.follow(command.params.id, false); const snapshot = await this.snapshot(20);
       return { id: snapshot.id, epoch: snapshot.epoch, busy: snapshot.busy, turnId: snapshot.turnId, requests: snapshot.requests.filter(request => request.kind === 'command' || request.kind === 'file').slice(0,100).map(request => ({ id: request.id, kind: request.kind, title: request.title, detail: '' })) };
     }
     if (command.method === 'image.read') {
@@ -502,10 +512,10 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (command.method === 'activity' || command.method === 'seen') {
       const db = this.index();
       try {
-        if (command.method === 'activity') return { activities: await this.withRuntimeActivity(command.params.ids.flatMap(id => { try { return [this.taskActivity(id, db)]; } catch { return []; } })) };
-        let current = this.taskActivity(command.params.id, db);
+        if (command.method === 'activity') return { activities: await this.withRuntimeActivity((await Promise.all(command.params.ids.map(async id => { try { return [await this.readyTaskActivity(id, db)]; } catch { return []; } }))).flat()) };
+        let current = await this.readyTaskActivity(command.params.id, db);
         const statuses = await this.runtimeActivity.read([current.id]);
-        current = this.taskActivity(command.params.id, db);
+        current = await this.readyTaskActivity(command.params.id, db);
         const running = runtimeRunning(this.followed.get(current.id)?.state?.threadRuntimeStatus) ?? statuses.get(current.id);
         const seen = running === false && !!current.completionId && current.completionId === command.params.completionId
           && (!command.params.turnId || current.completionId.startsWith(`${command.params.turnId}:`));
@@ -551,13 +561,13 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (command.method === 'queue.list' || command.method === 'queue.remove' || command.method === 'queue.resume') throw new RemoteError('INVALID', '排队操作需要通过助手处理。');
     if (command.method === 'upload.begin' || command.method === 'upload.status' || command.method === 'upload.complete' || command.method === 'upload.remove') throw new RemoteError('INVALID', '操作无效。');
     await this.follow(command.params.id, command.method === 'read' && command.params.activate, authorize);
-    if (command.method === 'read') return snapshotResponse(this.snapshot(command.params.limit, command.params.before), command.params.ifRevision);
-    const snap = this.snapshot();
+    if (command.method === 'read') return snapshotResponse(await this.snapshot(command.params.limit, command.params.before), command.params.ifRevision);
+    const snap = await this.snapshot();
     if (command.params.epoch !== snap.epoch) throw new RemoteError('STALE', '客户端已重新连接，请刷新会话。');
     if (command.method === 'permissions.update') {
       if (snap.settings?.revision !== command.params.revision) throw new RemoteError('STALE', '任务权限已变化，请刷新后重试。');
       authorize?.(); await this.updateSettings(snap.id, permissionSettings[command.params.permission]);
-      this.current!.state = undefined; await this.follow(snap.id); return { settings: this.snapshot().settings };
+      this.current!.state = undefined; await this.follow(snap.id); return { settings: (await this.snapshot()).settings };
     }
     if (command.method === 'mode.update') {
       if (snap.settings?.revision !== command.params.revision) throw new RemoteError('STALE', '任务设置已变化，请刷新后重试。');
@@ -583,10 +593,10 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (command.method === 'settings.update') {
       if (snap.settings?.revision !== command.params.revision) throw new RemoteError('STALE', '电脑上的模型设置已改变，请刷新后重试。');
       validateModel(await desktopModels(this.discovery?.cliExecutablePath), command.params.model, command.params.effort); authorize?.();
-      const latest = this.snapshot();
+      const latest = await this.snapshot();
       if (latest.id !== snap.id || latest.epoch !== command.params.epoch || latest.settings?.revision !== command.params.revision) throw new RemoteError('STALE', '电脑上的模型设置已改变，请刷新后重试。');
       await this.updateSettings(snap.id, { model: command.params.model, effort: command.params.effort });
-      this.current!.state = undefined; await this.follow(snap.id); return { settings: this.snapshot().settings };
+      this.current!.state = undefined; await this.follow(snap.id); return { settings: (await this.snapshot()).settings };
     }
     let method: string; let version = 1; let params: any;
     if (command.method === 'send') {

@@ -13,7 +13,7 @@ export class SendQueue {
     if (!store.db.prepare('PRAGMA table_info(send_queue)').all().some(c => c.name === 'resumeAfter')) store.db.exec('ALTER TABLE send_queue ADD COLUMN resumeAfter TEXT');
     store.db.prepare("UPDATE send_queue SET state='uncertain',reason=? WHERE origin=? AND state='sending'").run('助手在发送确认前退出，请核对原任务，不会自动重发。', origin);
   }
-  entries(conversation?: string) { return this.store.db.prepare('SELECT * FROM send_queue WHERE origin=?' + (conversation ? ' AND conversation=?' : '') + ' ORDER BY created,rowid').all(this.origin, ...(conversation ? [conversation] : [])) as QueueEntry[]; }
+  entries(conversation?: string) { return this.store.db.prepare('SELECT * FROM send_queue WHERE origin=?' + (conversation ? ' AND conversation=?' : '') + ' ORDER BY rowid').all(this.origin, ...(conversation ? [conversation] : [])) as QueueEntry[]; }
   get(id: string, conversation: string) { const row = this.store.db.prepare('SELECT * FROM send_queue WHERE id=? AND origin=? AND conversation=?').get(id, this.origin, conversation) as QueueEntry | undefined; if (!row) throw new RemoteError('NOT_FOUND', '待发送消息已移除或已经发送。'); return row; }
   payload(row: QueueEntry) { const cached = this.cache.get(row.id); if (cached?.cipher === row.payload) return cached.value; const value = payloadSchema.parse(JSON.parse(this.store.protect(row.payload, true))); this.cache.set(row.id, { cipher: row.payload, value }); return value; }
   list(conversation: string): QueuedMessage[] { return this.entries(conversation).map(row => { try { return { id: row.id, ...this.payload(row), state: row.state, reason: row.reason, created: row.created }; } catch { return { id: row.id, text: '', attachments: [], state: 'paused', reason: '待发送内容无法读取，可移除此项。', created: row.created }; } }); }

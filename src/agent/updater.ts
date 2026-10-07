@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, statfsSync, unlinkSync, writeFileSync, createWriteStream } from 'node:fs';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { pipeline } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
@@ -190,18 +191,35 @@ export class HelperUpdater {
     finally { this.preparingInstall = false; }
   }
   async report(phase: 'ready' | 'installed' | 'failed' | 'rolled_back', version: string) { try { await this.options.request('/api/updates/device/result', { method: 'POST', body: JSON.stringify({ phase, version }), headers: { 'Content-Type': 'application/json' } }); return true; } catch { return false; } }
+  private async installerActive(result: { runnerPid?: number; installerPid?: number }) {
+    const ids = [result.runnerPid, result.installerPid].filter((id): id is number => Number.isSafeInteger(id) && id! > 0);
+    for (const id of ids) { try { process.kill(id, 0); return true; } catch (error: any) { if (error.code !== 'ESRCH') return true; } }
+    if (ids.length) return false;
+    if (process.platform !== 'win32') return false;
+    // Older runners did not persist a PID; use a conservative installer inventory.
+    const names = readdirSync(this.dir).filter(name => /^[a-f0-9]{64}\.exe$/.test(name));
+    try {
+      const query = ["Name LIKE 'is-%.tmp'", ...names.map(name => `Name='${name}'`)].join(' OR ');
+      const { stdout } = await promisify(execFile)('wmic.exe', ['process', 'where', query, 'get', 'ProcessId', '/value'], { windowsHide: true, timeout: 5000 });
+      return /ProcessId=\d+/.test(stdout);
+    } catch { return true; }
+  }
   async reportPrevious() {
     if (this.closed || this.reporting) return;
     this.reporting = true;
     try {
       await this.reportReady();
       const file = join(this.dir, 'result.json'); if (!existsSync(file)) return;
-      const contents = readFileSync(file, 'utf8'); if (contents === this.reportedResult) return;
+      let contents = readFileSync(file, 'utf8'); if (contents === this.reportedResult) return;
       const result = JSON.parse(contents);
       if (result.installerRunning === true && /^\d+\.\d+\.\d+$/.test(result.version)) {
-        if (this.state.phase !== 'installing') this.options.freeze(true);
-        this.state.phase = 'installing'; this.state.version = result.version;
-        if (result.phase !== 'installing') this.state.message = '安装器超时且尚未确认退出，请关闭安装器后重启助手。'; return;
+        if (await this.installerActive(result)) {
+          if (this.state.phase !== 'installing') this.options.freeze(true);
+          this.state.phase = 'installing'; this.state.version = result.version;
+          if (result.phase !== 'installing') this.state.message = '安装器超时且尚未确认退出，请关闭安装器后重启助手。'; return;
+        }
+        result.installerRunning = false; if (result.phase === 'installing') result.phase = 'failed';
+        contents = JSON.stringify(result); writeFileSync(file, contents, { mode: 0o600 });
       }
       if (['installed', 'failed', 'rolled_back'].includes(result.phase) && /^\d+\.\d+\.\d+$/.test(result.version)) {
         if (this.state.phase === 'installing' && result.version === this.state.version) { this.state.phase = this.candidate ? 'ready' : 'idle'; this.options.freeze(false); }

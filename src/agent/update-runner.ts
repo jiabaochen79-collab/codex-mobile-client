@@ -15,7 +15,8 @@ export async function runUpdate(jobPath: string) {
   if (process.platform !== 'win32' || !isAbsolute(job.root) || !isAbsolute(job.dataDir) || resolve(job.root) === resolve(job.dataDir)) throw new Error('Invalid installation paths');
   const cache = join(job.dataDir, 'updates');
   const version = job.version ?? JSON.parse(Buffer.from(job.next.payload, 'base64').toString()).version;
-  const result = (phase: string, installerRunning = false) => writeFileSync(join(cache, 'result.json'), JSON.stringify({ phase, version, at: Date.now(), installerRunning }), { mode: 0o600 });
+  let installerPid = 0;
+  const result = (phase: string, installerRunning = false) => writeFileSync(join(cache, 'result.json'), JSON.stringify({ phase, version, at: Date.now(), installerRunning, runnerPid: process.pid, installerPid }), { mode: 0o600 });
   let next: ReturnType<typeof verifyRelease>['manifest'], previous: typeof next;
   try {
     next = verifyRelease(job.next).manifest; previous = verifyRelease(job.previous).manifest;
@@ -23,6 +24,7 @@ export async function runUpdate(jobPath: string) {
   } catch (error) { result('failed'); throw error; }
   const execute = (file: string, args: string[], wait = true) => new Promise<number>((done, reject) => {
     const child = spawn(file, args, { windowsHide: true, stdio: 'ignore', cwd: job.root, detached: !wait });
+    if (wait) child.once('spawn', () => { installerPid = child.pid ?? 0; result('installing', true); });
     let timer: NodeJS.Timeout | undefined, exited = false, terminating = false, terminationFinished = false;
     child.once('error', error => { clearTimeout(timer); reject(error); });
     if (!wait) { child.once('spawn', () => { child.unref(); done(child.pid ?? 0); }); return; }

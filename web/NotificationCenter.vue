@@ -90,7 +90,8 @@ async function load(preserveHistory = false) {
     }
     const snapshot = ((listResult.items ?? []) as NotificationItem[]).map(applyReceipt);
     const snapshotIds = new Set(snapshot.map(item => item.id));
-    const retained = preserveHistory ? items.value.filter(item => !snapshotIds.has(item.id) && !incomingDuringLoad.has(item.id)) : [];
+    const serverTime = Number(listResult.serverTime) || Date.now();
+    const retained = preserveHistory ? items.value.filter(item => !snapshotIds.has(item.id) && !incomingDuringLoad.has(item.id) && (!Number.isFinite((item as any).expiresAt) || (item as any).expiresAt > serverTime)) : [];
     const hadHistory = preserveHistory && items.value.length > 0;
     const historyGap = hadHistory && !snapshotIds.has(items.value[0].id);
     items.value = retained.concat([...incomingDuringLoad.values()].filter(item => !snapshotIds.has(item.id)), snapshot.map(item => {

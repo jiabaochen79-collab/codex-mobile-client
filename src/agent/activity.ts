@@ -1,5 +1,7 @@
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { open } from 'node:fs/promises';
+import { readCompactRecord } from './compact-json.js';
 
 type Entry = { size: number; mtime: number; completionId: string; pending?: boolean };
 export class DesktopActivity {
@@ -7,10 +9,15 @@ export class DesktopActivity {
   private seen = new Map<string, string>();
   private unread = new Set<string>();
   private globalMtime = -1;
+  private scans = new Map<string, Promise<Entry>>();
   constructor(private home: string) {}
   read(file: string) {
     const stat = statSync(file); const previous = this.cache.get(file);
     if (previous?.size === stat.size && previous.mtime === stat.mtimeMs) return previous;
+    if (stat.size > 2 * 1024 * 1024) {
+      void this.readAsync(file).catch(() => {});
+      return previous ?? { size: 0, mtime: 0, completionId: '' };
+    }
     const entry: Entry = { size: stat.size, mtime: stat.mtimeMs, completionId: previous?.completionId ?? '' };
     const fd = openSync(file, 'r');
     try {
@@ -34,6 +41,32 @@ export class DesktopActivity {
     } finally { closeSync(fd); }
     if (this.cache.size > 20000) this.cache.delete(this.cache.keys().next().value!);
     this.cache.set(file, entry); return entry;
+  }
+  async readAsync(file: string): Promise<Entry> {
+    const stat = statSync(file), previous = this.cache.get(file);
+    if (previous?.size === stat.size && previous.mtime === stat.mtimeMs) return previous;
+    if (stat.size <= 2 * 1024 * 1024) return this.read(file);
+    const pending = this.scans.get(file); if (pending) { await pending; return this.readAsync(file); }
+    const scan = (async () => {
+      const entry: Entry = { size: stat.size, mtime: stat.mtimeMs, completionId: previous?.completionId ?? '' };
+      let offset = Math.max(0, stat.size - 64 * 1024 * 1024);
+      if (offset) {
+        const handle = await open(file, 'r'), bytes = Buffer.alloc(65536);
+        try { while (offset < stat.size) { const { bytesRead } = await handle.read(bytes, 0, bytes.length, offset); if (!bytesRead) break; const end = bytes.subarray(0, bytesRead).indexOf(10); offset += end < 0 ? bytesRead : end + 1; if (end >= 0) break; } }
+        finally { await handle.close(); }
+      }
+      while (offset < stat.size) {
+        const record = await readCompactRecord(file, offset); if (!record || record.offset <= offset) break;
+        offset = record.offset;
+        const event = record.value, payload = event?.type === 'event_msg' ? event.payload : undefined;
+        if (payload?.type === 'task_started') entry.pending = true;
+        else if (['task_complete', 'turn_aborted', 'task_failed'].includes(payload?.type)) { entry.pending = false; entry.completionId = `${payload.turn_id ?? ''}:${event.timestamp ?? ''}`; }
+      }
+      if (this.cache.size > 20000) this.cache.delete(this.cache.keys().next().value!);
+      this.cache.set(file, entry); return entry;
+    })();
+    this.scans.set(file, scan);
+    try { return await scan; } finally { if (this.scans.get(file) === scan) this.scans.delete(file); }
   }
   isUnread(id: string, completionId: string) {
     try {

@@ -1,5 +1,5 @@
 // Push-only worker. It deliberately has no fetch handler or cache storage.
-const PUSH_WORKER_VERSION = 'codex-mobile-push-v2';
+const PUSH_WORKER_VERSION = 'codex-mobile-push-v3';
 
 function localUrl(value) {
   if (typeof value !== 'string') return `${self.location.origin}/`;
@@ -44,7 +44,7 @@ self.addEventListener('notificationclick', event => {
     }).sort((a, b) => Number(b.focused) - Number(a.focused))[0];
     if (current) {
       try {
-        // Keep drafts intact; older or suspended pages fall back to a deep-link navigation.
+        // A suspended page may hold attachments; never replace it without an acknowledgement.
         const channel = new MessageChannel();
         const handled = await new Promise(resolve => {
           const timer = setTimeout(() => resolve(false), 1000);
@@ -52,7 +52,7 @@ self.addEventListener('notificationclick', event => {
           current.postMessage({ type: 'notification.open', url }, [channel.port2]);
         });
         channel.port1.close();
-        if (!handled && (!('navigate' in current) || !await current.navigate(url))) {
+        if (!handled) {
           await self.clients.openWindow(url);
           return;
         }

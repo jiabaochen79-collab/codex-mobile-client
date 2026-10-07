@@ -46,12 +46,12 @@ it('falls back to opening the task link if an existing app cannot be focused', a
   await fixture.click(); expect(fixture.openWindow).toHaveBeenCalledWith(target);
 });
 
-it('navigates an older app before focusing it when there is no message acknowledgement', async () => {
+it('opens a separate task page when an existing app does not acknowledge, preserving its attachments', async () => {
   const calls: string[] = [];
   const page = { url: origin + '/', postMessage() {}, navigate: vi.fn(async () => { calls.push('navigate'); return page; }), focus: vi.fn(async () => { calls.push('focus'); }) };
   const fixture = worker([page]); await fixture.click();
-  expect(page.navigate).toHaveBeenCalledWith(target);
-  expect(calls).toEqual(['navigate', 'focus']); expect(fixture.openWindow).not.toHaveBeenCalled();
+  expect(page.navigate).not.toHaveBeenCalled(); expect(page.focus).not.toHaveBeenCalled();
+  expect(calls).toEqual([]); expect(fixture.openWindow).toHaveBeenCalledWith(target);
 });
 
 it('does not follow a notification link to another origin', async () => {

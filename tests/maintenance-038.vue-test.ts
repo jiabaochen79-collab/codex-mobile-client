@@ -117,18 +117,18 @@ it('F14 running projects arrive in one project response, with no archive scan', 
   expect(p.expandedProjects.has('running-project')).toBe(true);
   expect(calls.filter(c => c.method === 'list')).toHaveLength(2);
 });
-it('F15 loaded navigation refreshes only one head page while preserving its continuation', async () => {
+it('F15 loaded navigation revalidates its visible range with one sequential page in flight', async () => {
   const p = mobileFixture(['task-list-cursor']), state = p.group('recent');
   state.rows = Array.from({ length: 1500 }, (_, i) => ({ id: String(i), title: 'Fixture' })); state.loaded = true; state.cursor = 'retained'; state.offset = 1500; state.hasMore = true;
-  let calls = 0; socketReply = () => { calls++; return { conversations: [{ id: '0', title: 'Updated' }], hasMore: true }; };
+  let calls = 0; socketReply = (c: any) => { calls++; return { conversations: Array.from({length:30},(_,i)=>({id:String(c.params.offset+i),title:'Updated'})), hasMore:true, cursor:'fresh', nextOffset:c.params.offset+30 }; };
   for (let i = 0; i < 4; i++) await p.loadGroup(null);
-  expect(calls).toBe(4); expect(state.rows).toHaveLength(1500); expect(state.cursor).toBe('retained'); expect(state.offset).toBe(1500);
+  expect(calls).toBe(200); expect(state.rows).toHaveLength(1500); expect(state.cursor).toBe('fresh'); expect(state.offset).toBe(1500);
 });
-it('F17 cursor reset during append does not replace already loaded rows', async () => {
+it('F17 cursor reset during append replaces stale rows with the restart page', async () => {
   const p = mobileFixture(['task-list-cursor']), state = p.group('recent');
   state.rows = [{ id: 'old' }]; state.loaded = true; state.offset = 30; state.cursor = 'expired';
-  socketReply = () => ({ reset: true, conversations: [{ id: 'next' }], hasMore: false, cursor: 'restored', nextOffset: 60 });
-  await p.loadGroup(null, true); expect(state.rows.map((r: any) => r.id)).toEqual(['old','next']);
+  socketReply = () => ({ reset: true, conversations: [{ id: 'next' }], hasMore: false, cursor: 'restored', nextOffset: 1 });
+  await p.loadGroup(null, true); expect(state.rows.map((r: any) => r.id)).toEqual(['next']);
 });
 it('F23 unchanged feedback polls request a revision and do not replace the conversation', async () => {
   const p = setup('FeedbackPanel.vue', { mode: 'mobile', deviceId: '123456789' });

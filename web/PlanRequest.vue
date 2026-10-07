@@ -3,9 +3,12 @@ import { ref, watch } from 'vue';
 import { FileText, Pencil, Play, Send, X } from 'lucide-vue-next';
 import MessageContent from './MessageContent.vue';
 import type { Interaction } from '../src/shared/protocol';
-defineProps<{ request: Interaction; conversationId: string; deviceId: string; disabled: boolean; supported: boolean }>();
+const props = defineProps<{ request: Interaction; conversationId: string; deviceId: string; disabled: boolean; supported: boolean }>();
 const emit = defineEmits<{ submit: [action: 'implement' | 'revise', feedback?: string]; resized: [] }>();
 const editing = ref(false); const feedback = ref('');
+const draftKey = `plan-feedback:${props.deviceId}:${props.conversationId}:${props.request.id}`;
+try { const saved = JSON.parse(sessionStorage.getItem(draftKey) ?? 'null'); if (saved?.detail === props.request.detail && typeof saved.feedback === 'string') { feedback.value = saved.feedback; editing.value = saved.editing === true; } } catch {}
+watch([feedback, editing], () => { try { sessionStorage.setItem(draftKey, JSON.stringify({ detail: props.request.detail, feedback: feedback.value, editing: editing.value })); } catch {} }, { flush: 'sync' });
 watch(editing, () => emit('resized'), { flush: 'post' });
 </script>
 <template>

@@ -20,7 +20,8 @@ watch(() => props.images, images => {
   const exact = images.find(image => image.id === selected.value!.id);
   const replacements = exact ? [exact] : images.filter(image => image.alt === selected.value!.alt);
   if (replacements.length !== 1) { close(); return; }
-  selected.value = replacements[0]; retryPreview();
+  const unchanged = exact?.id === selected.value.id;
+  selected.value = replacements[0]; if (!unchanged) retryPreview();
 });
 onUnmounted(() => dialog.value?.close());
 onDeactivated(close);

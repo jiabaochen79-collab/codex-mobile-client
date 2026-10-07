@@ -41,13 +41,13 @@ it('F16 continues beyond ten thousand tasks without silently truncating', () => 
   for (;;) { for (const row of page.conversations) ids.add(row.id); if (!page.hasMore) break; page = desktop.list(page.nextOffset!, { cursor: page.cursor }); }
   expect(ids.size).toBe(10001);
 });
-it('F17 another 32 cursors cannot evict active navigation; expiry resumes at the requested offset', () => {
+it('F17 another 32 cursors cannot evict active navigation; expiry restarts at the first page', () => {
   const desktop = library(60), first = desktop.list(0, { cursor: 'new' });
   for (let i = 0; i < 32; i++) desktop.list(0, { cursor: 'new', query: 'fixture' });
   const second = desktop.list(30, { cursor: first.cursor });
   expect(second.reset).toBe(false); expect(second.conversations.some(row => first.conversations.some(old => old.id === row.id))).toBe(false);
   vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 16 * 60000);
-  const restored = desktop.list(30, { cursor: first.cursor }); expect(restored.reset).toBe(true); expect(restored.conversations).toEqual(second.conversations);
+  const restored = desktop.list(30, { cursor: first.cursor }); expect(restored.reset).toBe(true); expect(restored.conversations).toEqual(first.conversations); expect(restored.nextOffset).toBe(30);
 });
 it('F18 concurrent cache misses never account replaced image buffers twice', async () => {
   const images = new ConversationImages(), task = randomUUID();

@@ -73,12 +73,12 @@ it('Regression: monitoring a bounded backlog yields to event-loop scheduling', a
   expect(fired).toBe(true);
 });
 
-it('Regression: a complete terminal record larger than the activity tail preserves the new completion identity', () => {
+it('Regression: a complete terminal record larger than the activity tail preserves the new completion identity', async () => {
   const d = dir(), file = join(d, 'task.jsonl'), activity = new DesktopActivity(d);
   writeFileSync(file, JSON.stringify({ timestamp: 'first', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'first' } }) + '\n');
   expect(activity.read(file).completionId).toBe('first:first');
   appendFileSync(file, JSON.stringify({ timestamp: 'second', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'second', last_agent_message: 'x'.repeat(2100000) } }) + '\n');
-  expect(activity.read(file).completionId).toBe('second:second');
+  expect((await activity.readAsync(file)).completionId).toBe('second:second');
 });
 
 it('Regression: downloaded update is advertised ready while pending telemetry does not prevent the installation safety check', async () => {

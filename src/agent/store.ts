@@ -11,6 +11,7 @@ import { REMEMBERED_SESSION_MS } from '../shared/session.js';
 export class AgentStore {
   db: DatabaseSync;
   private runningCommands = new Set<string>();
+  private notificationClock?: { server: number; local: number; monotonic: number };
   constructor(dir: string, private nativeExe?: string) {
     privateDirectory(dir); this.db = new DatabaseSync(join(dir, 'agent.sqlite'));
     this.db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, digest TEXT NOT NULL, result TEXT, created INTEGER NOT NULL);');
@@ -19,6 +20,7 @@ export class AgentStore {
     this.db.exec('CREATE TABLE IF NOT EXISTS remembered_grants (origin TEXT NOT NULL, id TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(origin,id));');
     this.db.exec('CREATE TABLE IF NOT EXISTS notification_cursors (path TEXT PRIMARY KEY, offset INTEGER NOT NULL, mtime INTEGER NOT NULL, size INTEGER NOT NULL, fileId TEXT NOT NULL DEFAULT \'\', baselineAt INTEGER NOT NULL, remainder TEXT NOT NULL);');
     if (!this.db.prepare('PRAGMA table_info(notification_cursors)').all().some(c => c.name === 'fileId')) this.db.exec("ALTER TABLE notification_cursors ADD COLUMN fileId TEXT NOT NULL DEFAULT ''");
+    if (!this.db.prepare('PRAGMA table_info(notification_cursors)').all().some(c => c.name === 'fingerprint')) this.db.exec("ALTER TABLE notification_cursors ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''");
     if (!this.db.prepare('PRAGMA table_info(notification_cursors)').all().some(c => c.name === 'baselineEnd')) {
       this.db.exec('ALTER TABLE notification_cursors ADD COLUMN baselineEnd INTEGER NOT NULL DEFAULT 0');
       this.db.exec('UPDATE notification_cursors SET baselineEnd=size');
@@ -73,10 +75,10 @@ export class AgentStore {
     const namespace = randomUUID(); this.set('notification:namespace', namespace); return namespace;
   }
   notificationCursor(path: string) {
-    return this.db.prepare('SELECT path,offset,mtime,size,fileId,baselineAt,baselineEnd,remainder FROM notification_cursors WHERE path=?').get(path) as { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd: number; remainder: string } | undefined;
+    return this.db.prepare('SELECT path,offset,mtime,size,fileId,baselineAt,baselineEnd,remainder,fingerprint FROM notification_cursors WHERE path=?').get(path) as { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd: number; remainder: string; fingerprint?: string } | undefined;
   }
-  saveNotificationCursor(cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd?: number; remainder: string }) {
-    this.db.prepare('INSERT INTO notification_cursors(path,offset,mtime,size,fileId,baselineAt,baselineEnd,remainder) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,mtime=excluded.mtime,size=excluded.size,fileId=excluded.fileId,baselineAt=excluded.baselineAt,baselineEnd=excluded.baselineEnd,remainder=excluded.remainder').run(cursor.path, cursor.offset, cursor.mtime, cursor.size, cursor.fileId, cursor.baselineAt, cursor.baselineEnd ?? cursor.size, cursor.remainder);
+  saveNotificationCursor(cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd?: number; remainder: string; fingerprint?: string }) {
+    this.db.prepare('INSERT INTO notification_cursors(path,offset,mtime,size,fileId,baselineAt,baselineEnd,remainder,fingerprint) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,mtime=excluded.mtime,size=excluded.size,fileId=excluded.fileId,baselineAt=excluded.baselineAt,baselineEnd=excluded.baselineEnd,remainder=excluded.remainder,fingerprint=excluded.fingerprint').run(cursor.path, cursor.offset, cursor.mtime, cursor.size, cursor.fileId, cursor.baselineAt, cursor.baselineEnd ?? cursor.size, cursor.remainder, cursor.fingerprint ?? '');
   }
   watchNotificationTask(taskId: string, startedAt: number) {
     this.db.prepare('INSERT INTO notification_watches(taskId,startedAt,lastWatchedAt) VALUES(?,?,?) ON CONFLICT(taskId) DO UPDATE SET startedAt=MIN(startedAt,excluded.startedAt),lastWatchedAt=MAX(lastWatchedAt,excluded.lastWatchedAt)').run(taskId, startedAt, startedAt);
@@ -88,21 +90,25 @@ export class AgentStore {
   recordNotifications(events: LocalNotificationEvent[], cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd?: number; remainder: string }) {
     this.db.exec('BEGIN');
     try {
-      const insert = this.db.prepare('INSERT OR IGNORE INTO notification_outbox(eventId,taskId,turnId,status,occurredAt,createdAt) VALUES(?,?,?,?,?,?)');
-      for (const event of events) insert.run(event.eventId, event.taskId, event.turnId, event.status, event.occurredAt, Date.now());
+      const insert = this.db.prepare('INSERT OR IGNORE INTO notification_outbox(eventId,taskId,turnId,status,occurredAt,createdAt,serverOccurredAt) VALUES(?,?,?,?,?,?,?)');
+      const now = Date.now(), clock = this.notificationClock;
+      const inferred = clock ? clock.server + performance.now() - clock.monotonic - now : undefined;
+      const offset = clock && inferred !== undefined ? Math.abs(inferred - (clock.server - clock.local)) > 5000 ? inferred : clock.server - clock.local : undefined;
+      for (const event of events) insert.run(event.eventId, event.taskId, event.turnId, event.status, event.occurredAt, now, offset === undefined ? null : Math.max(0, Math.round(event.occurredAt + offset)));
       this.saveNotificationCursor(cursor);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   recordNotification(event: LocalNotificationEvent, cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; remainder: string }) { this.recordNotifications([event], cursor); }
   notificationOutbox(now = Date.now()) {
-    return this.db.prepare('SELECT eventId,taskId,turnId,status,occurredAt,attempts,lastAttempt,createdAt,ackedAt FROM notification_outbox WHERE ackedAt IS NULL AND (lastAttempt IS NULL OR lastAttempt<?) ORDER BY createdAt LIMIT 20').all(now - 10000) as { eventId: string; taskId: string; turnId: string; status: 'completed' | 'failed' | 'interrupted'; occurredAt: number; attempts: number; lastAttempt: number | null; createdAt: number; ackedAt: number | null }[];
+    return this.db.prepare('SELECT eventId,taskId,turnId,status,occurredAt,attempts,lastAttempt,createdAt,ackedAt FROM notification_outbox WHERE ackedAt IS NULL AND (lastAttempt IS NULL OR lastAttempt<? OR lastAttempt>?) ORDER BY rowid LIMIT 20').all(now - 10000, now) as { eventId: string; taskId: string; turnId: string; status: 'completed' | 'failed' | 'interrupted'; occurredAt: number; attempts: number; lastAttempt: number | null; createdAt: number; ackedAt: number | null }[];
   }
   markNotificationAttempt(eventId: string) { this.db.prepare('UPDATE notification_outbox SET attempts=attempts+1,lastAttempt=? WHERE eventId=? AND ackedAt IS NULL').run(Date.now(), eventId); }
   syncNotificationClock(origin: string, serverTime: number, localTime = Date.now(), correctedEvent?: string) {
     const key = `notification:clock:${hash(origin)}`; const previous = this.get(key);
-    if (previous !== null) this.db.prepare('UPDATE notification_outbox SET serverOccurredAt=MAX(0,ROUND(occurredAt+?)) WHERE serverOccurredAt IS NULL AND ackedAt IS NULL AND eventId<>?').run(Number(previous), correctedEvent ?? '');
+    if (previous !== null) this.db.prepare('UPDATE notification_outbox SET serverOccurredAt=MAX(0,ROUND(occurredAt+?)) WHERE serverOccurredAt IS NULL AND ackedAt IS NULL AND eventId<>?').run(Math.abs(serverTime - localTime - Number(previous)) > 5000 ? serverTime - localTime : Number(previous), correctedEvent ?? '');
     this.set(key, String(serverTime - localTime));
+    this.notificationClock = { server: serverTime, local: localTime, monotonic: performance.now() };
   }
   notificationTime(eventId: string, origin: string) {
     const row = this.db.prepare('SELECT occurredAt,serverOccurredAt FROM notification_outbox WHERE eventId=?').get(eventId) as { occurredAt: number; serverOccurredAt: number | null };

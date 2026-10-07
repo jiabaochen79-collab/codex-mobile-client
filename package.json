@@ -1,6 +1,6 @@
 {
   "name": "codex-mobile",
-  "version": "0.4.42",
+  "version": "0.4.43",
   "description": "A secure, self-hosted mobile companion for continuing Codex desktop tasks.",
   "license": "Apache-2.0",
   "repository": {

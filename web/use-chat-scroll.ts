@@ -43,7 +43,6 @@ export function useChatScroll(container: Ref<HTMLElement | undefined>, content: 
   function layoutChanged() { if (paused) return; if (follow) toBottom(); else { restore(anchor); updateDistance(); } }
   async function change(update: () => void, mode: 'auto' | 'bottom' | 'preserve' = 'auto') {
     const saved = capture(); const shouldFollow = mode === 'bottom' || mode === 'auto' && follow;
-    if (mode === 'preserve') follow = false;
     update(); await nextTick();
     if (paused) return;
     if (shouldFollow) toBottom(); else { restore(saved); updateDistance(); anchor = capture(); }

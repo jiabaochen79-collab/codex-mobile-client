@@ -27,6 +27,7 @@ const subscriptionOpen = ref(false);
 const notificationOpen = ref(false); const notificationUnread = ref(0);
 const notificationTasks = reactive<Record<string, Conversation>>({});
 const notificationTaskIds = new Set<string>();
+const notificationTaskChecked = new Map<string, number>();
 let resolvingNotificationTasks: Promise<void> | undefined;
 let openingNotification = false;
 let notificationNavigationRevision = 0;
@@ -94,6 +95,24 @@ const answers = ref<Record<string, string>>({}); const answerModes = reactive<Re
 const customAnswers: Record<string, string> = {};
 const shell = ref<HTMLElement>(); const scroll = ref<HTMLElement>(); const content = ref<HTMLElement>(); const input = ref<HTMLTextAreaElement>(); const navigation = ref<HTMLElement>();
 const chatScroll = useChatScroll(scroll, content); const turns = computed(() => conversationTurns(snapshot.value));
+const modalControls = 'button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],[tabindex="0"]';
+let modalReturnFocus: HTMLElement | undefined;
+function topModal() { return Array.from(shell.value?.querySelectorAll<HTMLElement>('.modal-backdrop [aria-modal="true"]') ?? []).filter(element => element.getClientRects().length).at(-1); }
+function containModalFocus(event: FocusEvent) { const modal = topModal(); if (modal && !modal.contains(event.target as Node)) modal.querySelector<HTMLElement>(modalControls)?.focus(); }
+function modalKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Tab') return;
+  const modal = topModal(); if (!modal) return;
+  const controls = Array.from(modal.querySelectorAll<HTMLElement>(modalControls)).filter(element => element.getClientRects().length);
+  if (!controls.length) { event.preventDefault(); return; }
+  const index = controls.indexOf(document.activeElement as HTMLElement);
+  if (index < 0 || event.shiftKey && index === 0 || !event.shiftKey && index === controls.length - 1) { event.preventDefault(); controls[event.shiftKey ? controls.length - 1 : 0].focus(); }
+}
+watch([permissionPicker, fullAccessConfirm, attachmentPicker, projectModal, modelModal, takeoverModal, subscriptionOpen, notificationOpen], async () => {
+  const previous = document.activeElement as HTMLElement;
+  await nextTick(); const modal = topModal();
+  if (modal) { if (!modalReturnFocus) modalReturnFocus = previous; if (!modal.contains(document.activeElement)) modal.querySelector<HTMLElement>(modalControls)?.focus(); }
+  else { const target = modalReturnFocus; modalReturnFocus = undefined; if (target?.isConnected) target.focus(); }
+}, { flush: 'post' });
 const viewportHeight = ref('100dvh'); const viewportTop = ref('0px'); const keyboardOpen = ref(false);
 const viewportProbe = ref<HTMLElement>();
 let viewportWatchdog: ReturnType<typeof setInterval> | undefined;
@@ -154,7 +173,7 @@ const attachmentReason = computed(() => !canControl.value ? connectionLabel.valu
 const attachments = useAttachments({request,thread:()=>selected.value?.id,deviceId:props.deviceId,control:()=>({clientId:clientId.value,epoch:status.value.control?.epoch,allowed:canControl.value})});
 const projectNavigation = computed(() => status.value.client?.capabilities?.includes('project-navigation') === true);
 const hasDraft = computed(() => !!draft.value.trim() || !!attachments.current.value.length);
-const canSend = computed(() => canControl.value && canUse('send-messages') && modeReady.value && !!snapshot.value && (!snapshot.value.busy || hasCapability('queued-send')) && !busy.value && !pendingSend.value && hasDraft.value && attachments.current.value.every(a=>a.attachment?.ready&&!a.error));
+const canSend = computed(() => canControl.value && canUse('send-messages') && modeReady.value && !!snapshot.value && (!snapshot.value.busy || hasCapability('queued-send')) && !busy.value && !pendingSend.value && hasDraft.value && attachments.current.value.every(a=>a.attachment?.ready&&!a.error&&!a.removing&&!a.cancelled));
 const canSteer = computed(() => canControl.value && modeReady.value && !!snapshot.value?.busy && !!snapshot.value?.turnId && !busy.value && !pendingSend.value && !!draft.value.trim() && !attachments.current.value.length && hasCapability('steering-text'));
 const canRemoveQueued = computed(() => connected.value && status.value.online && status.value.enabled && !busy.value && status.value.control?.role === 'controller');
 watch([hasDraft, () => snapshot.value?.busy], () => { if (!hasDraft.value || !snapshot.value?.busy) sendMenu.value = false; });
@@ -228,9 +247,12 @@ function knownNotificationTask(taskId: string) {
   return Object.values(groups).flatMap(group => group.rows).find(row => row.id === taskId) ?? searchRows.value.find(row => row.id === taskId) ?? notificationTasks[taskId];
 }
 async function resolveNotificationTasks(ids: string[]) {
+  const now = performance.now();
   for (const id of ids) {
     notificationTaskIds.add(id);
-    const known = knownNotificationTask(id); if (known) notificationTasks[id] = known;
+    const known = Object.values(groups).flatMap(group => group.rows).find(row => row.id === id) ?? searchRows.value.find(row => row.id === id);
+    if (known) { notificationTasks[id] = known; notificationTaskChecked.set(id, now); }
+    else if (now - (notificationTaskChecked.get(id) ?? -Infinity) >= 60000) delete notificationTasks[id];
   }
   if (!active.value || !canRead.value || resolvingNotificationTasks || ids.every(id => notificationTasks[id])) return resolvingNotificationTasks;
   const epoch = navigationEpoch;
@@ -246,7 +268,7 @@ async function resolveNotificationTasks(ids: string[]) {
           for (let start = 0; start < wanted.length; start += 30) {
             const result = await request({ method: 'list', params: { offset: 0, ids: wanted.slice(start, start + 30) } });
             if (!active.value || !canRead.value || epoch !== navigationEpoch) return;
-            for (const task of result.conversations as Conversation[]) notificationTasks[task.id] = task;
+            for (const task of result.conversations as Conversation[]) { notificationTasks[task.id] = task; notificationTaskChecked.set(task.id, performance.now()); }
           }
           continue;
         }
@@ -254,7 +276,7 @@ async function resolveNotificationTasks(ids: string[]) {
         for (let page = 0; page < 3; page++) {
           const result = await request({ method: 'list', params: { offset, ...(cursor ? { cursor } : {}) } }); cursor = result.cursor;
           if (!active.value || !canRead.value || epoch !== navigationEpoch) return;
-          for (const task of result.conversations as Conversation[]) if (notificationTaskIds.has(task.id)) notificationTasks[task.id] = task;
+          for (const task of result.conversations as Conversation[]) if (notificationTaskIds.has(task.id)) { notificationTasks[task.id] = task; notificationTaskChecked.set(task.id, performance.now()); }
           const next = result.nextOffset ?? offset + result.conversations.length;
           if (!result.hasMore || next <= offset || wanted.every(id => notificationTasks[id])) break;
           offset = next;
@@ -381,18 +403,20 @@ async function loadGroup(id: string | null, append = false) {
   const state = group(id ?? 'recent'); if (state.loading) return; state.loading = true;
   const epoch = navigationEpoch;
   try {
-    const refresh = !append && state.loaded;
-    const rows: Conversation[] = []; let hasMore = false; let cursor = hasCapability('task-list-cursor') ? append ? state.cursor ?? 'new' : refresh && state.hasMore ? undefined : 'new' : undefined;
+    const rows: Conversation[] = []; let hasMore = false, reset = false; let cursor = hasCapability('task-list-cursor') ? append ? state.cursor ?? 'new' : 'new' : undefined;
     let offset = append ? state.offset ?? state.rows.length : 0;
-    {
+    const target = append ? 30 : Math.max(30, state.rows.length);
+    do {
       const params = { offset, ...(cursor ? { cursor } : {}), ...(projectNavigation.value ? { projectId: id } : {}) };
       const r = await request({ method: 'list', params }); cursor = r.cursor; rows.push(...r.conversations); hasMore = r.hasMore;
-      offset = r.nextOffset ?? offset + r.conversations.length;
-    }
+      if (r.reset) { reset = true; rows.splice(0, rows.length - r.conversations.length); }
+      const next = r.nextOffset ?? offset + r.conversations.length; if (next <= offset && !r.reset) break; offset = next;
+      if (r.conversations.length < 30) break;
+    } while (hasMore && rows.length < target);
     if (groups[id ?? 'recent'] !== state || epoch !== navigationEpoch) return;
     const ids = new Set(rows.map(row => row.id));
-    state.rows = append ? [...state.rows.filter(row => !ids.has(row.id)), ...rows] : refresh && hasMore ? [...rows, ...state.rows.filter(row => !ids.has(row.id))] : rows;
-    if (!refresh || !state.hasMore || !hasMore) { state.cursor = cursor; state.offset = offset; state.hasMore = hasMore; }
+    state.rows = append && !reset ? [...state.rows.filter(row => !ids.has(row.id)), ...rows] : rows;
+    state.cursor = cursor; state.offset = offset; state.hasMore = hasMore;
     state.loaded = true; state.error = '';
     for (const row of rows) if (activities[row.id]) activities[row.id] = { ...activities[row.id], running: row.running === true, unread: row.unread === true };
   } catch (e: any) { if (groups[id ?? 'recent'] === state && epoch === navigationEpoch) state.error = e.message; } finally { state.loading = false; }
@@ -499,9 +523,9 @@ async function read(activate = false) {
         const staleImages = previous.filter(message => message.images?.length && !freshIds.has(message.id));
         imageRefresh = staleImages.length && next.historyCursor ? { taskId: id, epoch: next.epoch, before: next.historyCursor, ids: new Set(staleImages.map(message => message.id)) } : undefined;
       }
-      if (!previous.length) { historyCursor = next.historyCursor; historyMore = next.hasMore; }
+      if (!previous.length || !next.hasMore) { historyCursor = next.historyCursor; historyMore = next.hasMore; if (!next.hasMore) { historyGaps = []; imageRefresh = undefined; } }
       else if (next.hasMore && next.historyCursor && next.messages.length && !next.messages.some((message: Message) => previous.some(old => old.id === message.id)) && !historyGaps.includes(next.historyCursor)) historyGaps.push(next.historyCursor);
-      next.messages = mergeMessages(previous, next.messages); next.hasMore = historyMore || historyGaps.length > 0;
+      next.messages = mergeMessages(previous, next.messages, !next.hasMore); next.hasMore = historyMore || historyGaps.length > 0;
     } snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } if (historyGaps.length && !historyError.value) void loadHistory(); void refreshHistoryImages(); void markSeen(); void reconcileSends(); } }
   catch (e: any) {
     if (selected.value?.id !== id || cycle !== modeSyncCycle) return;
@@ -526,7 +550,8 @@ async function read(activate = false) {
     }
   } finally { reading = false; if (dirty) { dirty = false; void read(); } }
 }
-function mergeMessages(previous: Message[], incoming: Message[]) {
+function mergeMessages(previous: Message[], incoming: Message[], complete = false) {
+  if (complete) return incoming;
   const updates = new Map(incoming.map(message => [message.id, message]));
   const ids = new Set(previous.map(message => message.id));
   return previous.map(message => updates.get(message.id) ?? message).concat(incoming.filter(message => !ids.has(message.id)));
@@ -659,6 +684,7 @@ function sendFromButton(event?: Event) {
   const now = performance.now(); if (buttonSendAt && now - buttonSendAt < 500) return; buttonSendAt = now; void send();
 }
 function composerPointerdown(event: PointerEvent) {
+  if (event.button !== 0 || event.isPrimary === false) return;
   const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('.composer-field .send-button') : null;
   if (!button || button.disabled || button.classList.contains('stop') || button.classList.contains('takeover')) return;
   sendFromButton(event);
@@ -696,7 +722,7 @@ async function setPlanMode(mode: 'plan'|'default') {
   catch (e: any) { if (selected.value?.id === s.id && active.value) error.value = e.message; }
   finally { invalidateMode(); modeChanging.value = false; busy.value = false; if (active.value) await read(); }
 }
-function openPermissionMenu() { permissionPicker.value = true; attachmentPicker.value = false; moreMenu.value = false; }
+function openPermissionMenu(event?: Event) { if (event?.currentTarget instanceof HTMLElement) modalReturnFocus = event.currentTarget; permissionPicker.value = true; attachmentPicker.value = false; moreMenu.value = false; }
 function choosePermission(permission: PermissionMode) {
   if (!canChangePermission.value) return;
   if (snapshot.value?.settings?.permission === permission) { permissionPicker.value = false; return; }
@@ -721,7 +747,7 @@ function clearNavigation(preserveDrafts = false) {
   resetReadRecovery();
   notificationReadRevision++; notificationReceipt = undefined; notificationEvents.clear(); notificationUnread.value = 0;
   if (preserveDrafts && selected.value) { drafts.set(selected.value.id, draft.value); try { savePendingSends(); } catch {} }
-  notificationTaskIds.clear(); for (const id of Object.keys(notificationTasks)) delete notificationTasks[id];
+  notificationTaskIds.clear(); notificationTaskChecked.clear(); for (const id of Object.keys(notificationTasks)) delete notificationTasks[id];
   navigationEpoch++; focusedNavigationEpoch = -1; projectInteraction++; automaticProjects.clear();
   subscriptionOpen.value = false; notificationOpen.value = false; permissionPicker.value = false; fullAccessConfirm.value = false;
   selected.value = null; snapshot.value = null; drawer.value = false; moreMenu.value = false; projectModal.value = false;
@@ -937,7 +963,7 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
 </script>
 
 <template>
-  <div ref="shell" class="mobile-shell" :class="{ authenticated: session, 'in-conversation': selected, 'keyboard-open': keyboardOpen, 'viewport-offset': viewportTop !== '0px' }" :style="{ '--chat-viewport': viewportHeight, '--chat-top': viewportTop }">
+  <div ref="shell" class="mobile-shell" @keydown.capture="modalKeydown" @focusin.capture="containModalFocus" :class="{ authenticated: session, 'in-conversation': selected, 'keyboard-open': keyboardOpen, 'viewport-offset': viewportTop !== '0px' }" :style="{ '--chat-viewport': viewportHeight, '--chat-top': viewportTop }">
       <div ref="viewportProbe" data-viewport-probe aria-hidden="true"></div>
       <TrialNotice :device-id="deviceId" :subscription="status.subscription" @open="subscriptionOpen = true"/>
       <header v-if="selected" class="chat-toolbar">

@@ -34,8 +34,9 @@ async function load() {
 async function activate() {
   if (!valid.value || busy.value) return; busy.value = true; error.value = ''; success.value = false;
   try {
-    const result = await api(props.mode === 'desktop' ? '/local/license' : '/api/subscription/redeem', { code: code.value.trim(), termsVersion: catalog.value!.termsVersion });
-    catalog.value = result.catalog; subscription.value = result.subscription; trial.value = result.trial; code.value = ''; accepted.value = false; success.value = true; emit('changed', result.subscription);
+    const submitted = code.value;
+    const result = await api(props.mode === 'desktop' ? '/local/license' : '/api/subscription/redeem', { code: submitted.trim(), termsVersion: catalog.value!.termsVersion });
+    catalog.value = result.catalog; subscription.value = result.subscription; trial.value = result.trial; if (code.value === submitted) code.value = ''; accepted.value = false; success.value = true; emit('changed', result.subscription);
   } catch (e: any) { error.value = e.message; } finally { busy.value = false; }
 }
 function refreshEligibility() { if (!disposed && !busy.value && !ordersOpen.value && document.visibilityState === 'visible') void load(); }

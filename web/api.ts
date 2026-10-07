@@ -4,7 +4,9 @@ export async function api(path: string, body?: unknown, headers?: Record<string,
   for (let attempt = 0; ; attempt++) {
     try {
       const response = await fetch(path, { method: verb, credentials: 'same-origin', headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30000) });
-      const result = await response.json().catch(() => undefined);
+      let result;
+      try { result = await response.json(); }
+      catch (error) { if (!(error instanceof SyntaxError)) throw error; }
       if (!response.ok) throw Object.assign(new Error(result?.error?.message ?? '连接失败，请稍后重试。'), { code: result?.error?.code, status: response.status });
       if (result === undefined || !response.headers.get('content-type')?.includes('application/json')) throw Object.assign(new Error('服务器返回异常，请稍后重试。'), { code: 'INVALID_RESPONSE' });
       return result;

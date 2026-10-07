@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { AgentStore } from '../src/agent/store.js';
 import { CompletionMonitor } from '../src/agent/notifications.js';
 import { ConversationImages } from '../src/agent/images.js';
@@ -33,17 +33,18 @@ it('B20 continues monitoring an archived task outside the first two hundred watc
   writeFileSync(file, JSON.stringify({ timestamp: new Date(now).toISOString(), type: 'event_msg', payload: { type: 'task_complete', turn_id: 'old-watch' } }) + '\n');
   await monitor.poll(); await monitor.poll(); expect(store.notificationOutbox().map(row => row.turnId)).toEqual(['old-watch']);
 });
-it('B08 detects a large terminal followed by another valid JSONL record', () => {
+it('B08 detects a large terminal followed by another valid JSONL record', async () => {
   const dir = directory(), file = join(dir, 'rollout.jsonl'), activity = new DesktopActivity(dir);
   const record = (turn: string, text = '') => JSON.stringify({ timestamp: '2026-10-07T00:00:00Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: turn, last_agent_message: text } }) + '\n';
   writeFileSync(file, record('old')); expect(activity.read(file).completionId).toContain('old');
   writeFileSync(file, record('old') + record('new', 'x'.repeat(3 * 1024 * 1024)) + JSON.stringify({ type: 'event_msg', payload: { type: 'token_count' } }) + '\n');
-  expect(activity.read(file).completionId).toContain('new');
+  expect((await activity.readAsync(file)).completionId).toContain('new');
 });
 it('B07 restores an active installation freeze before allowing update checks', async () => {
   const dir = directory(); mkdirSync(join(dir, 'updates')); writeFileSync(join(dir, 'updates/result.json'), JSON.stringify({ phase: 'installing', version: '0.4.40', installerRunning: true }));
   let frozen = false, checks = 0;
   const updater = new HelperUpdater({ dir, root: dir, version: '0.4.39', store: { get: () => null, set() {} } as any, blockers: async () => [], freeze: value => frozen = value, request: async () => { checks++; return new Response(JSON.stringify({ release: null, current: null, rollback: null })); } }); cleanup.push(() => updater.close());
+  vi.spyOn(updater as any, 'installerActive').mockResolvedValue(true);
   await updater.reportPrevious(); await updater.check(); expect(updater.state.phase).toBe('installing'); expect(frozen).toBe(true); expect(checks).toBe(0);
   writeFileSync(join(dir, 'updates/result.json'), JSON.stringify({ phase: 'installed', version: '0.4.40', installerRunning: false }));
   await updater.reportPrevious(); expect(frozen).toBe(false); await updater.check(); expect(updater.state.phase).toBe('idle');
