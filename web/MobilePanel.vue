@@ -373,7 +373,7 @@ async function loadGroup(id: string | null, append = false) {
   const epoch = navigationEpoch;
   try {
     const refresh = !append && state.loaded;
-    const rows: Conversation[] = []; let hasMore = false; let cursor = hasCapability('task-list-cursor') ? append ? state.cursor ?? 'new' : refresh ? undefined : 'new' : undefined;
+    const rows: Conversation[] = []; let hasMore = false; let cursor = hasCapability('task-list-cursor') ? append ? state.cursor ?? 'new' : refresh && state.hasMore ? undefined : 'new' : undefined;
     let offset = append ? state.offset ?? state.rows.length : 0;
     {
       const params = { offset, ...(cursor ? { cursor } : {}), ...(projectNavigation.value ? { projectId: id } : {}) };
@@ -383,7 +383,7 @@ async function loadGroup(id: string | null, append = false) {
     if (groups[id ?? 'recent'] !== state || epoch !== navigationEpoch) return;
     const ids = new Set(rows.map(row => row.id));
     state.rows = append ? [...state.rows.filter(row => !ids.has(row.id)), ...rows] : refresh ? [...rows, ...state.rows.filter(row => !ids.has(row.id))] : rows;
-    if (!refresh) { state.cursor = cursor; state.offset = offset; state.hasMore = hasMore; }
+    if (!refresh || !state.hasMore) { state.cursor = cursor; state.offset = offset; state.hasMore = hasMore; }
     state.loaded = true; state.error = '';
     for (const row of rows) if (activities[row.id]) activities[row.id] = { ...activities[row.id], running: row.running === true, unread: row.unread === true };
   } catch (e: any) { if (groups[id ?? 'recent'] === state && epoch === navigationEpoch) state.error = e.message; } finally { state.loading = false; }
@@ -550,10 +550,10 @@ async function loadHistory() {
     limit.value += 100; await read(); return;
   }
   const gap = historyGaps[0]; const before = gap ?? historyCursor; if (!before) return;
-  const cycle = modeSyncCycle; historyLoading.value = true; historyError.value = '';
+  const cycle = modeSyncCycle, epoch = snapshot.value?.epoch; historyLoading.value = true; historyError.value = '';
   try {
     const page = await request({ method: 'read', params: { id, limit: 100, before } });
-    if (!active.value || cycle !== modeSyncCycle || snapshot.value?.id !== id || (gap ? historyGaps[0] !== gap : historyCursor !== before)) return;
+    if (!active.value || cycle !== modeSyncCycle || snapshot.value?.id !== id || snapshot.value.epoch !== epoch || page.epoch !== epoch || (gap ? historyGaps[0] !== gap : historyCursor !== before)) return;
     if (page.id !== id || page.hasMore && (!page.messages.length || !page.historyCursor || page.historyCursor === before)) throw new Error('历史消息未能继续加载，请重试。');
     await chatScroll.change(() => {
       if (gap) {

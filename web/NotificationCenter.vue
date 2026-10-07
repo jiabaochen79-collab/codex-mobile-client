@@ -25,6 +25,7 @@ const info = ref('');
 const standalone = ref(false);
 let listRevision = 0;
 const incomingDuringLoad = new Map<string, NotificationItem>();
+const incomingDuringPage = new Map<string, NotificationItem>();
 let markingAll = false;
 const incomingDuringReadAll = new Map<string, NotificationItem>();
 let readingOne = false;
@@ -225,6 +226,7 @@ function onIncoming(event: Event) {
   if (markingAll) incomingDuringReadAll.set(item.id, item);
   if (readingOne) incomingDuringReadOne.set(item.id, item);
   if (loading.value) incomingDuringLoad.set(item.id, item);
+  if (loadingMore.value) incomingDuringPage.set(item.id, item);
   const index = items.value.findIndex(row => row.id === item.id);
   if (index >= 0) { if (items.value[index].readAt) item.readAt ??= items.value[index].readAt; items.value[index] = item; }
   else { items.value.unshift(item); if (!item.readAt) updateUnread(unread.value + 1); }
@@ -242,21 +244,22 @@ function onRead(event: Event) {
   updateUnread((Number(receipt.unread) || 0) + items.value.filter(item => !item.readAt && typeof item.sequence === 'number' && item.sequence > receipt.throughSequence).length);
 }
 async function loadMore() {
-  if (loadingMore.value || busy.value || !nextCursor.value) return;
+  if (disposed || loadingMore.value || busy.value || !nextCursor.value) return;
   loadingMore.value = true; error.value = '';
+  incomingDuringPage.clear();
   const revision = listRevision; const cursor = nextCursor.value;
   const priorReceipt = latestReceipt;
   try {
     const result = await api(`/api/notifications?cursor=${encodeURIComponent(cursor)}`, undefined, headers());
-    if (revision !== listRevision || cursor !== nextCursor.value) return;
+    if (disposed || revision !== listRevision || cursor !== nextCursor.value) return;
     const page = ((result.items ?? []) as NotificationItem[]).map(applyReceipt);
     const ids = new Set(items.value.map(item => item.id));
     items.value.push(...page.filter(item => !ids.has(item.id)));
     nextCursor.value = result.nextCursor ?? null;
-    if (revision === listRevision) updateUnread(snapshotUnread(Number(result.unread) || 0, items.value, priorReceipt));
+    if (revision === listRevision) updateUnread(snapshotUnread((Number(result.unread) || 0) + [...incomingDuringPage.values()].filter(item => !item.readAt && typeof item.sequence === 'number' && item.sequence > result.throughSequence).length, items.value, priorReceipt));
     void props.resolveTasks(page.map(item => item.taskId));
-  } catch (e: any) { if (revision === listRevision) error.value = e.message; }
-  finally { loadingMore.value = false; }
+  } catch (e: any) { if (!disposed && revision === listRevision) error.value = e.message; }
+  finally { loadingMore.value = false; incomingDuringPage.clear(); }
 }
 function resume() { if (!disposed && !busy.value && document.visibilityState === 'visible') void load(); }
 let settingsReading = false; let settingsTimer: ReturnType<typeof setInterval> | undefined;

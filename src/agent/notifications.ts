@@ -36,6 +36,7 @@ export class CompletionMonitor {
   private polling = false;
   private closed = false;
   private startedAt = Date.now();
+  private watchOffset = 0;
   constructor(private store: AgentStore, private sources: (taskIds?: string[]) => Promise<NotificationSource[]> | NotificationSource[]) { this.namespace = store.notificationNamespace(); }
   start(intervalMs = 2000) {
     if (this.timer) return;
@@ -49,7 +50,9 @@ export class CompletionMonitor {
     if (this.closed || this.polling) return;
     this.polling = true;
     try {
-      const rows = await this.sources(this.store.notificationWatchIds());
+      const watched = this.store.notificationWatchIds(this.watchOffset);
+      this.watchOffset = watched.length === 200 ? this.watchOffset + 200 : 0;
+      const rows = await this.sources(watched);
       for (const source of rows.slice(0, 400)) if (!this.closed) {
         try { await setImmediate(); if (!this.closed) await this.readSource(source); } catch { /* Retry this file without starving other tasks. */ }
       }

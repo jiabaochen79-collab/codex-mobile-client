@@ -50,9 +50,15 @@ export class ConversationImages {
   private threads = new Map<string, Map<string, Source>>();
   private cache = new Map<string, Buffer>();
   private cacheBytes = 0;
+  private sources = new Map<string, { threadId: string; id: string; bytes: number }>();
+  private sourceBytes = 0;
 
-  begin(id: string, retain = false) { if (!retain || !this.threads.has(id)) this.threads.set(id, new Map()); }
+  private dropSources(id?: string) {
+    for (const [key, source] of this.sources) if (!id || source.threadId === id) { this.sourceBytes -= source.bytes; this.sources.delete(key); }
+  }
+  begin(id: string, retain = false) { if (!retain || !this.threads.has(id)) { this.dropSources(id); this.threads.set(id, new Map()); } }
   clear(id?: string) {
+    this.dropSources(id);
     if (id) this.threads.delete(id); else this.threads.clear();
     this.cache.clear(); this.cacheBytes = 0;
   }
@@ -67,7 +73,14 @@ export class ConversationImages {
       try { source.realPath = realpathSync(path); source.stamp = stamp(statSync(path)); } catch { /* Missing references remain visible as retryable placeholders. */ }
     }
     const id = createHmac('sha256', this.secret).update(JSON.stringify([threadId, source])).digest('hex');
+    const key = `${threadId}:${id}`, bytes = Buffer.byteLength(source.value);
+    this.sourceBytes -= this.sources.get(key)?.bytes ?? 0;
+    this.sources.delete(key); this.sources.set(key, { threadId, id, bytes }); this.sourceBytes += bytes;
     entries.delete(id); entries.set(id, source);
+    while (this.sourceBytes > 64 * 1024 * 1024) {
+      const [oldest, entry] = this.sources.entries().next().value!;
+      this.threads.get(entry.threadId)?.delete(entry.id); this.sourceBytes -= entry.bytes; this.sources.delete(oldest);
+    }
     return { id, alt: (alt || '照片').slice(0, 180) };
   }
   async read(threadId: string, imageId: string, variant: 'thumbnail' | 'full') {

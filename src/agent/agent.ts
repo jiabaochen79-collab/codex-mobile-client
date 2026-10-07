@@ -167,7 +167,7 @@ export class Agent {
       if (parsed.success) {
         const ack = parsed.data;
         if (ack.accepted) this.store.ackNotification(ack.eventId);
-        else if (ack.errorCode === 'NOTIFICATION_TIME' && ack.occurredAt !== undefined && ack.serverTime !== undefined && this.store.rejectNotificationTime(ack.eventId, ack.occurredAt)) this.store.syncNotificationClock(this.origin, ack.serverTime);
+        else if (ack.errorCode === 'NOTIFICATION_TIME' && ack.occurredAt !== undefined && ack.serverTime !== undefined && this.store.rejectNotificationTime(ack.eventId, ack.occurredAt)) this.store.syncNotificationClock(this.origin, ack.serverTime, Date.now(), ack.eventId);
       }
       return;
     }

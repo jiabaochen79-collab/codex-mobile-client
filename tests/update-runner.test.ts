@@ -132,7 +132,7 @@ describe.skipIf(process.platform !== 'win32')('isolated update installation and 
     expect(JSON.parse(readFileSync(join(cache, 'result.json'), 'utf8'))).toMatchObject({ phase: 'failed', version: '0.4.26', installerRunning: false });
     const freeze = vi.fn(); const updater = new HelperUpdater({ dir: job.dataDir, root, version: '0.4.25', store: { get: () => null } as any, request: async () => { throw new TypeError('Offline'); }, blockers: async () => [], freeze });
     updater.state.phase = 'installing'; updater.state.version = '0.4.26';
-    await updater.reportPrevious(); expect(updater.state.phase).toBe('ready'); expect(freeze).toHaveBeenCalledWith(false); updater.close();
+    await updater.reportPrevious(); expect(updater.state.phase).toBe('idle'); expect(freeze).toHaveBeenCalledWith(false); updater.close();
   });
   it('persists an early failure even if the signed payload becomes unreadable', async () => {
     job.next.payload = Buffer.from('unreadable manifest').toString('base64');

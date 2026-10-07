@@ -80,7 +80,7 @@ export class AgentStore {
   notificationWatch(taskId: string) {
     return this.db.prepare('SELECT startedAt FROM notification_watches WHERE taskId=?').get(taskId) as { startedAt: number } | undefined;
   }
-  notificationWatchIds() { return (this.db.prepare('SELECT taskId FROM notification_watches ORDER BY lastWatchedAt DESC LIMIT 200').all() as { taskId: string }[]).map(row => row.taskId); }
+  notificationWatchIds(offset = 0) { return (this.db.prepare('SELECT taskId FROM notification_watches ORDER BY lastWatchedAt DESC,taskId LIMIT 200 OFFSET ?').all(offset) as { taskId: string }[]).map(row => row.taskId); }
   recordNotifications(events: LocalNotificationEvent[], cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; remainder: string }) {
     this.db.exec('BEGIN');
     try {
@@ -95,9 +95,9 @@ export class AgentStore {
     return this.db.prepare('SELECT eventId,taskId,turnId,status,occurredAt,attempts,lastAttempt,createdAt,ackedAt FROM notification_outbox WHERE ackedAt IS NULL AND (lastAttempt IS NULL OR lastAttempt<?) ORDER BY createdAt LIMIT 20').all(now - 10000) as { eventId: string; taskId: string; turnId: string; status: 'completed' | 'failed' | 'interrupted'; occurredAt: number; attempts: number; lastAttempt: number | null; createdAt: number; ackedAt: number | null }[];
   }
   markNotificationAttempt(eventId: string) { this.db.prepare('UPDATE notification_outbox SET attempts=attempts+1,lastAttempt=? WHERE eventId=? AND ackedAt IS NULL').run(Date.now(), eventId); }
-  syncNotificationClock(origin: string, serverTime: number, localTime = Date.now()) {
+  syncNotificationClock(origin: string, serverTime: number, localTime = Date.now(), correctedEvent?: string) {
     const key = `notification:clock:${hash(origin)}`; const previous = this.get(key);
-    if (previous !== null) this.db.prepare('UPDATE notification_outbox SET serverOccurredAt=MAX(0,ROUND(occurredAt+?)) WHERE serverOccurredAt IS NULL AND ackedAt IS NULL').run(Number(previous));
+    if (previous !== null) this.db.prepare('UPDATE notification_outbox SET serverOccurredAt=MAX(0,ROUND(occurredAt+?)) WHERE serverOccurredAt IS NULL AND ackedAt IS NULL AND eventId<>?').run(Number(previous), correctedEvent ?? '');
     this.set(key, String(serverTime - localTime));
   }
   notificationTime(eventId: string, origin: string) {

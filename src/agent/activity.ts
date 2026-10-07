@@ -16,18 +16,20 @@ export class DesktopActivity {
     try {
       let size = Math.min(stat.size, 2 * 1024 * 1024); let data = Buffer.alloc(size);
       readSync(fd, data, 0, size, stat.size - size);
-      // A terminal record can contain a long final answer. Widen only when the
-      // entire tail is one incomplete record, preserving the normal fast path.
-      while (size < stat.size && data.subarray(0, Math.max(0, data.length - 1)).indexOf(10) < 0 && size < 64 * 1024 * 1024) {
+      // Small records can follow a large terminal record, so a newline alone
+      // does not prove that the tail includes the most recent completion.
+      for (;;) {
+        const lines = data.toString('utf8').split('\n'); if (size < stat.size) lines.shift();
+        entry.pending = undefined; let found = false;
+        for (const line of lines.reverse()) {
+          let event: any; try { event = JSON.parse(line); } catch { continue; }
+          if (event.type !== 'event_msg') continue;
+          const p = event.payload;
+          if (p?.type === 'task_started') { entry.pending = true; continue; }
+          if (['task_complete', 'turn_aborted', 'task_failed'].includes(p?.type)) { entry.pending ??= false; entry.completionId = `${p.turn_id ?? ''}:${event.timestamp ?? ''}`; found = true; break; }
+        }
+        if (found || size >= stat.size || size >= 64 * 1024 * 1024) break;
         size = Math.min(stat.size, size * 2, 64 * 1024 * 1024); data = Buffer.alloc(size); readSync(fd, data, 0, size, stat.size - size);
-      }
-      const lines = data.toString('utf8').split('\n'); if (size < stat.size) lines.shift();
-      for (const line of lines.reverse()) {
-        let event: any; try { event = JSON.parse(line); } catch { continue; }
-        if (event.type !== 'event_msg') continue;
-        const p = event.payload;
-        if (p?.type === 'task_started') { entry.pending = true; continue; }
-        if (['task_complete', 'turn_aborted', 'task_failed'].includes(p?.type)) { entry.pending ??= false; entry.completionId = `${p.turn_id ?? ''}:${event.timestamp ?? ''}`; break; }
       }
     } finally { closeSync(fd); }
     if (this.cache.size > 20000) this.cache.delete(this.cache.keys().next().value!);

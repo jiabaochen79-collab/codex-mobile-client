@@ -17,8 +17,8 @@ const historyPage = ref(1); const hasMore = ref(false); const loadingMore = ref(
 function mergeRecords(previous: any[], incoming: any[]) { const ids = new Set(incoming.map(row => row.id)); return [...incoming, ...previous.filter(row => !ids.has(row.id))]; }
 async function loadMore() {
   if (loadingMore.value || !hasMore.value || disposed) return;
-  const target = historyPage.value + 1; loadingMore.value = true; error.value = '';
-  try { const page = await api(`${base}?page=${target}`); if (disposed || !data.value) return; for (const key of ['orders', 'licenses', 'refunds']) { const ids = new Set(data.value[key].map((row: any) => row.id)); data.value[key].push(...page[key].filter((row: any) => !ids.has(row.id))); } historyPage.value = target; hasMore.value = page.hasMore === true; }
+  const target = historyPage.value + 1, owner = data.value?.ownerRevision, history = data.value?.historyRevision; loadingMore.value = true; error.value = '';
+  try { const page = await api(`${base}?page=${target}`); if (disposed || !data.value || owner !== data.value.ownerRevision || history !== data.value.historyRevision || page.ownerRevision !== owner || page.historyRevision !== history) return; for (const key of ['orders', 'licenses', 'refunds']) { const ids = new Set(data.value[key].map((row: any) => row.id)); data.value[key].push(...page[key].filter((row: any) => !ids.has(row.id))); } historyPage.value = target; hasMore.value = page.hasMore === true; }
   catch (e: any) { if (!disposed) error.value = e.message; }
   finally { loadingMore.value = false; }
 }

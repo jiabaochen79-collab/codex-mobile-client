@@ -33,6 +33,10 @@ export class HelperUpdater {
   constructor(private options: { dir: string; root: string; version: string; store: AgentStore; request: Request; blockers: () => Promise<string[]>; freeze: (value: boolean) => void; publicKey?: string }) {
     this.dir = join(options.dir, 'updates'); mkdirSync(this.dir, { recursive: true });
     this.state.autoDownload = options.store.get('update:auto') !== 'false';
+    try {
+      const result = JSON.parse(readFileSync(join(this.dir, 'result.json'), 'utf8'));
+      if (result.installerRunning === true && /^\d+\.\d+\.\d+$/.test(result.version)) { this.state.phase = 'installing'; this.state.version = result.version; options.freeze(true); }
+    } catch { /* A first install has no prior update result. */ }
   }
   start() { const initial = setTimeout(() => { void this.check(); }, 15000); initial.unref(); this.timer = setInterval(() => { void this.check(); }, 6 * 3600000); this.timer.unref(); this.resultTimer = setInterval(() => { void this.reportPrevious(); }, 2000); this.resultTimer.unref(); }
   setting(enabled: boolean) { this.state.autoDownload = enabled; this.options.store.set('update:auto', String(enabled)); if (enabled && this.state.phase === 'available') void this.download(); return this.state; }
@@ -194,9 +198,13 @@ export class HelperUpdater {
       const file = join(this.dir, 'result.json'); if (!existsSync(file)) return;
       const contents = readFileSync(file, 'utf8'); if (contents === this.reportedResult) return;
       const result = JSON.parse(contents);
+      if (result.installerRunning === true && /^\d+\.\d+\.\d+$/.test(result.version)) {
+        if (this.state.phase !== 'installing') this.options.freeze(true);
+        this.state.phase = 'installing'; this.state.version = result.version;
+        if (result.phase !== 'installing') this.state.message = '安装器超时且尚未确认退出，请关闭安装器后重启助手。'; return;
+      }
       if (['installed', 'failed', 'rolled_back'].includes(result.phase) && /^\d+\.\d+\.\d+$/.test(result.version)) {
-        if (result.installerRunning === true) { this.state.message = '安装器超时且尚未确认退出，请关闭安装器后重启助手。'; return; }
-        if (this.state.phase === 'installing' && result.version === this.state.version) { this.state.phase = 'ready'; this.options.freeze(false); }
+        if (this.state.phase === 'installing' && result.version === this.state.version) { this.state.phase = this.candidate ? 'ready' : 'idle'; this.options.freeze(false); }
         if (contents !== this.presentedResult) {
           if (this.state.checkedAt === null || result.version === this.state.version) this.state.message = result.phase === 'rolled_back' ? '更新失败，已恢复上一版本' : result.phase === 'failed' ? '更新失败，请重新检查更新' : '';
           this.presentedResult = contents;
