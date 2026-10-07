@@ -226,11 +226,11 @@ describe('M05: task-name resolution during pagination', () => {
 });
 
 describe('M06: durable send protection when storage fails', () => {
-  for (const failingKey of ['chat-drafts:123456789', 'pending-sends:123456789']) it(`keeps draft and attachments when ${failingKey} cannot be saved`, async () => {
+  for (const failingKey of ['chat-drafts:123456789', 'pending-send:123456789:']) it(`keeps draft and attachments when ${failingKey} cannot be saved`, async () => {
     const p = setup(), a = task(); p.showConversation(a); p.draft.value = 'Important draft'; p.status.value.online = false;
     const attachment = { id: crypto.randomUUID(), name: 'saved.txt', size: 4, offset: 4, mediaType: 'text/plain', ready: true };
     p.attachments.restore(a.id, [attachment]);
-    const setItem = vi.fn((key: string): void => { if (key === failingKey) throw new DOMException('Quota exceeded', 'QuotaExceededError'); });
+    const setItem = vi.fn((key: string): void => { if (key.startsWith(failingKey)) throw new DOMException('Quota exceeded', 'QuotaExceededError'); });
     vi.stubGlobal('sessionStorage', { getItem: () => null, setItem, removeItem() {} });
     vi.stubGlobal('localStorage', { getItem: () => null, setItem, removeItem() {} });
     const command = { method: 'send', params: { id: a.id, epoch: 'fixture', text: p.draft.value, attachmentIds: [attachment.id] } };
@@ -249,7 +249,17 @@ describe('M06: durable send protection when storage fails', () => {
     const sending = p.perform({ method: 'send', params: { id: a.id, epoch: 'fixture', text: p.draft.value } }), frame = FakeSocket.latest.frames.at(-1);
     FakeSocket.latest.receive({ type: 'result', id: frame.id, error: { code: 'OUTCOME_UNKNOWN', message: 'Lost acknowledgement' } });
     expect(await sending).toBe(false); expect(p.pendingSends[a.id].requestId).toBe(frame.id);
-    expect(JSON.parse(saved.get('pending-sends:123456789')!)[a.id].requestId).toBe(frame.id);
+    expect(JSON.parse(saved.get(`pending-send:123456789:${a.id}`)!).requestId).toBe(frame.id);
     expect(p.draft.value).toBe('Unconfirmed draft'); expect(FakeSocket.latest.frames).toHaveLength(1);
+  });
+  it('does not settle a newer attempt from another tab when the old request is acknowledged', async () => {
+    const p = setup(), a = task(), saved = new Map<string, string>(); p.showConversation(a); p.draft.value = 'Old draft'; p.status.value.online = false;
+    vi.stubGlobal('localStorage', { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => saved.set(key, value), removeItem() {} });
+    const sending = p.perform({ method: 'send', params: { id: a.id, epoch: 'fixture', text: p.draft.value } }), frame = FakeSocket.latest.frames.at(-1);
+    const newer = { requestId: crypto.randomUUID(), text: 'New draft', message: 'Pending', attachments: [] };
+    p.draft.value = newer.text; p.pendingSends[a.id] = newer; p.savePendingSends(a.id);
+    FakeSocket.latest.reply(frame, { accepted: true }); expect(await sending).toBe(true);
+    expect(p.pendingSends[a.id].requestId).toBe(newer.requestId); expect(p.draft.value).toBe(newer.text);
+    expect(JSON.parse(saved.get(`pending-send:123456789:${a.id}`)!).requestId).toBe(newer.requestId);
   });
 });

@@ -13,6 +13,8 @@ const view = ref(props.initialPlan ? 'buy' : 'orders'); const data = ref<any>();
 const channels = computed(() => data.value?.readiness?.channels ?? []);
 const loading = ref(false); const error = ref(''); const readError = ref(''); const active = ref<PaymentOrder>(); const payUrl = ref(''); const qr = ref(''); const copied = ref(false); const key = ref(crypto.randomUUID());
 const refundTarget = ref<any>(); const refundReason = ref('first_purchase'); const explanation = ref('');
+const serverClock = ref<{ time: number; monotonic: number }>();
+function serviceTime() { return serverClock.value ? serverClock.value.time + performance.now() - serverClock.value.monotonic : Date.now(); }
 const historyPage = ref(1); const hasMore = ref(false); const loadingMore = ref(false);
 function mergeRecords(previous: any[], incoming: any[]) { const ids = new Set(incoming.map(row => row.id)); return [...incoming, ...previous.filter(row => !ids.has(row.id))]; }
 async function loadMore() {
@@ -49,6 +51,7 @@ async function load(force = false) {
     }
     const info = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription');
     if (revision !== readRevision) return;
+    if (Number.isFinite(info.subscription?.serverTime)) serverClock.value = { time: info.subscription.serverTime, monotonic: performance.now() };
     const previous = new Map<string, string>((data.value?.orders ?? (active.value ? [active.value] : [])).map((order: PaymentOrder) => [order.id, order.status]));
     const entitlementChanged = orders.orders.some((order: PaymentOrder) => ['paid','refunded'].includes(order.status) && previous.get(order.id) !== order.status);
     if (data.value && historyPage.value > 1 && !refreshHistory) {
@@ -130,7 +133,7 @@ onUnmounted(() => { disposed = true; readRevision++; paymentRevision++; clearInt
         </form>
         <div v-else class="purchase-order-list">
           <div v-for="order in data?.orders ?? []" :key="order.id" class="purchase-order"><div><strong>{{ order.planName }} · ¥{{ money(order.priceFen) }}</strong><span>{{ date(order.created) }}</span><span>{{ paymentStatusNames[order.status] }} · {{ order.serviceStatus }}</span></div><div class="purchase-order-actions"><button v-if="['pending','confirming'].includes(order.status)" class="icon-button" title="打开付款" :disabled="loading" @click="open(order)"><QrCode :size="20"/></button><button v-if="['pending','confirming'].includes(order.status)" class="icon-button" title="关闭待支付订单" :disabled="loading" @click="closeOrder(order)"><X :size="19"/></button></div></div>
-          <h3 v-if="data?.licenses.length">服务记录</h3><div v-for="item in data?.licenses ?? []" :key="item.id" class="purchase-order"><div><strong>¥{{ money(item.price_fen) }} · {{ item.source === 'online' ? '在线购买' : '人工授权' }}</strong><span>{{ item.refunded ? '已退款' : !item.ends ? '未激活' : item.starts > Date.now() ? '待生效 · ' + date(item.starts) : item.ends <= Date.now() ? '已到期 · ' + date(item.ends) : '有效至 ' + date(item.ends) }}</span></div><button v-if="item.price_fen && !item.refunded && !item.refund_pending && !data.refunds.some((r:any) => r.billing_order_id === item.id && r.state !== 'rejected')" class="icon-button" title="申请退款" @click="refundTarget = item"><Wallet :size="18"/></button></div>
+          <h3 v-if="data?.licenses.length">服务记录</h3><div v-for="item in data?.licenses ?? []" :key="item.id" class="purchase-order"><div><strong>¥{{ money(item.price_fen) }} · {{ item.source === 'online' ? '在线购买' : '人工授权' }}</strong><span>{{ item.refunded ? '已退款' : !item.ends ? '未激活' : item.starts > serviceTime() ? '待生效 · ' + date(item.starts) : item.ends <= serviceTime() ? '已到期 · ' + date(item.ends) : '有效至 ' + date(item.ends) }}</span></div><button v-if="item.price_fen && !item.refunded && !item.refund_pending && !data.refunds.some((r:any) => r.billing_order_id === item.id && r.state !== 'rejected')" class="icon-button" title="申请退款" @click="refundTarget = item"><Wallet :size="18"/></button></div>
           <div v-for="item in data?.refunds ?? []" :key="item.id" class="purchase-order"><span>退款 · {{ refundStatusNames[item.state] }}</span><span>{{ item.amount_fen == null ? '待审核' : '¥' + money(item.amount_fen) }}</span></div>
           <p v-if="data && !data.orders.length && !data.licenses.length" class="empty-state">暂无订单</p>
           <button v-if="hasMore" class="button" :disabled="loadingMore || loading" @click="loadMore"><RefreshCw v-if="loadingMore" :size="16" class="spin"/>{{ loadingMore ? '正在读取' : '加载更早的记录' }}</button>

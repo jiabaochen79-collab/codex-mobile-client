@@ -49,7 +49,7 @@ describe('durable completion watches', () => {
     await monitor.poll(); await monitor.poll();
     expect(retained).toEqual({ startedAt }); expect(store.notificationWatch(taskId)).toEqual({ startedAt });
     expect(store.notificationOutbox()).toEqual([expect.objectContaining({ taskId, turnId: 'new-turn', status: 'completed' })]);
-    store.pruneNotifications(now + 1); expect(store.notificationWatch(taskId)).toBeUndefined();
+    store.pruneNotifications(Date.now() + 1); expect(store.notificationWatch(taskId)).toBeUndefined();
   });
 
   it('preserves the earliest capture baseline when another watch arrives before the first poll', async () => {

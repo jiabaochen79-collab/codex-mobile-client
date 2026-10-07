@@ -21,6 +21,8 @@ export class AgentStore {
     this.db.exec('CREATE TABLE IF NOT EXISTS notification_cursors (path TEXT PRIMARY KEY, offset INTEGER NOT NULL, mtime INTEGER NOT NULL, size INTEGER NOT NULL, fileId TEXT NOT NULL DEFAULT \'\', baselineAt INTEGER NOT NULL, remainder TEXT NOT NULL);');
     if (!this.db.prepare('PRAGMA table_info(notification_cursors)').all().some(c => c.name === 'fileId')) this.db.exec("ALTER TABLE notification_cursors ADD COLUMN fileId TEXT NOT NULL DEFAULT ''");
     if (!this.db.prepare('PRAGMA table_info(notification_cursors)').all().some(c => c.name === 'fingerprint')) this.db.exec("ALTER TABLE notification_cursors ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''");
+    if (!this.db.prepare('PRAGMA table_info(notification_cursors)').all().some(c => c.name === 'observed')) this.db.exec('ALTER TABLE notification_cursors ADD COLUMN observed INTEGER NOT NULL DEFAULT 0');
+    this.db.exec('CREATE TABLE IF NOT EXISTS notification_baselines(eventId TEXT PRIMARY KEY,path TEXT NOT NULL); CREATE INDEX IF NOT EXISTS notification_baselines_path ON notification_baselines(path);');
     if (!this.db.prepare('PRAGMA table_info(notification_cursors)').all().some(c => c.name === 'baselineEnd')) {
       this.db.exec('ALTER TABLE notification_cursors ADD COLUMN baselineEnd INTEGER NOT NULL DEFAULT 0');
       this.db.exec('UPDATE notification_cursors SET baselineEnd=size');
@@ -75,26 +77,33 @@ export class AgentStore {
     const namespace = randomUUID(); this.set('notification:namespace', namespace); return namespace;
   }
   notificationCursor(path: string) {
-    return this.db.prepare('SELECT path,offset,mtime,size,fileId,baselineAt,baselineEnd,remainder,fingerprint FROM notification_cursors WHERE path=?').get(path) as { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd: number; remainder: string; fingerprint?: string } | undefined;
+    return this.db.prepare('SELECT path,offset,mtime,size,fileId,baselineAt,baselineEnd,remainder,fingerprint,observed FROM notification_cursors WHERE path=?').get(path) as { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd: number; remainder: string; fingerprint?: string; observed: number } | undefined;
   }
-  saveNotificationCursor(cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd?: number; remainder: string; fingerprint?: string }) {
-    this.db.prepare('INSERT INTO notification_cursors(path,offset,mtime,size,fileId,baselineAt,baselineEnd,remainder,fingerprint) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,mtime=excluded.mtime,size=excluded.size,fileId=excluded.fileId,baselineAt=excluded.baselineAt,baselineEnd=excluded.baselineEnd,remainder=excluded.remainder,fingerprint=excluded.fingerprint').run(cursor.path, cursor.offset, cursor.mtime, cursor.size, cursor.fileId, cursor.baselineAt, cursor.baselineEnd ?? cursor.size, cursor.remainder, cursor.fingerprint ?? '');
+  saveNotificationCursor(cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd?: number; remainder: string; fingerprint?: string; observed?: number }) {
+    this.db.prepare('INSERT INTO notification_cursors(path,offset,mtime,size,fileId,baselineAt,baselineEnd,remainder,fingerprint,observed) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,mtime=excluded.mtime,size=excluded.size,fileId=excluded.fileId,baselineAt=excluded.baselineAt,baselineEnd=excluded.baselineEnd,remainder=excluded.remainder,fingerprint=excluded.fingerprint,observed=excluded.observed').run(cursor.path, cursor.offset, cursor.mtime, cursor.size, cursor.fileId, cursor.baselineAt, cursor.baselineEnd ?? cursor.size, cursor.remainder, cursor.fingerprint ?? '', cursor.observed ?? 0);
   }
-  watchNotificationTask(taskId: string, startedAt: number) {
-    this.db.prepare('INSERT INTO notification_watches(taskId,startedAt,lastWatchedAt) VALUES(?,?,?) ON CONFLICT(taskId) DO UPDATE SET startedAt=MIN(startedAt,excluded.startedAt),lastWatchedAt=MAX(lastWatchedAt,excluded.lastWatchedAt)').run(taskId, startedAt, startedAt);
+  watchNotificationTask(taskId: string, startedAt: number, observedAt = startedAt) {
+    this.db.prepare('INSERT INTO notification_watches(taskId,startedAt,lastWatchedAt) VALUES(?,?,?) ON CONFLICT(taskId) DO UPDATE SET startedAt=MIN(startedAt,excluded.startedAt),lastWatchedAt=MAX(lastWatchedAt,excluded.lastWatchedAt)').run(taskId, startedAt, observedAt);
+  }
+  discoverNotificationTasks(taskIds: string[], startedAt: number) {
+    this.db.exec('BEGIN');
+    try { const insert = this.db.prepare('INSERT OR IGNORE INTO notification_watches(taskId,startedAt,lastWatchedAt) VALUES(?,?,?)'); const now = Date.now(); for (const id of taskIds) insert.run(id, startedAt, now); this.db.exec('COMMIT'); }
+    catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   notificationWatch(taskId: string) {
     return this.db.prepare('SELECT startedAt FROM notification_watches WHERE taskId=?').get(taskId) as { startedAt: number } | undefined;
   }
   notificationWatchIds(offset = 0) { return (this.db.prepare('SELECT taskId FROM notification_watches ORDER BY lastWatchedAt DESC,taskId LIMIT 200 OFFSET ?').all(offset) as { taskId: string }[]).map(row => row.taskId); }
-  recordNotifications(events: LocalNotificationEvent[], cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd?: number; remainder: string }) {
+  recordNotifications(events: LocalNotificationEvent[], cursor: { path: string; offset: number; mtime: number; size: number; fileId: string; baselineAt: number; baselineEnd?: number; remainder: string; observed?: number }, baselines: string[] = []) {
     this.db.exec('BEGIN');
     try {
+      const remember = this.db.prepare('INSERT OR IGNORE INTO notification_baselines(eventId,path) VALUES(?,?)');
+      for (const id of baselines) remember.run(id, cursor.path);
       const insert = this.db.prepare('INSERT OR IGNORE INTO notification_outbox(eventId,taskId,turnId,status,occurredAt,createdAt,serverOccurredAt) VALUES(?,?,?,?,?,?,?)');
       const now = Date.now(), clock = this.notificationClock;
       const inferred = clock ? clock.server + performance.now() - clock.monotonic - now : undefined;
       const offset = clock && inferred !== undefined ? Math.abs(inferred - (clock.server - clock.local)) > 5000 ? inferred : clock.server - clock.local : undefined;
-      for (const event of events) insert.run(event.eventId, event.taskId, event.turnId, event.status, event.occurredAt, now, offset === undefined ? null : Math.max(0, Math.round(event.occurredAt + offset)));
+      for (const event of events) if (remember.run(event.eventId, cursor.path).changes) insert.run(event.eventId, event.taskId, event.turnId, event.status, event.occurredAt, now, offset === undefined ? null : Math.max(0, Math.round(event.occurredAt + offset)));
       this.saveNotificationCursor(cursor);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
@@ -127,7 +136,7 @@ export class AgentStore {
     this.db.prepare('DELETE FROM notification_watches WHERE lastWatchedAt<?').run(before);
     for (const row of this.db.prepare('SELECT path FROM notification_cursors WHERE mtime<?').all(before)) {
       try { statSync(String(row.path)); }
-      catch (error: any) { if (error.code === 'ENOENT') this.db.prepare('DELETE FROM notification_cursors WHERE path=?').run(row.path); }
+      catch (error: any) { if (error.code === 'ENOENT') { this.db.prepare('DELETE FROM notification_cursors WHERE path=?').run(row.path); this.db.prepare('DELETE FROM notification_baselines WHERE path=?').run(row.path); } }
     }
   }
   commandStatus(id: string, session: string, conversation: string) {

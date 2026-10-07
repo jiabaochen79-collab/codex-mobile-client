@@ -9,6 +9,7 @@ import { HelperUpdater } from '../src/agent/updater.js';
 
 const verification = vi.hoisted(() => ({ publicKey: '' }));
 vi.mock('node:child_process', () => ({ spawn: vi.fn(), execFile: vi.fn() }));
+vi.mock('../src/agent/update-process.js', () => ({ updateProcesses: vi.fn(async () => []) }));
 vi.mock('node:timers/promises', () => ({ setTimeout: (ms: number) => new Promise(resolve => setTimeout(resolve, ms)) }));
 vi.mock('../src/shared/release-signature.js', async original => {
   const real = await original<typeof import('../src/shared/release-signature.js')>();

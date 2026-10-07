@@ -1,7 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, statfsSync, unlinkSync, writeFileSync, createWriteStream } from 'node:fs';
 import { join } from 'node:path';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { pipeline } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
@@ -10,6 +9,7 @@ import { verifyRelease, fileDigest } from '../shared/release-signature.js';
 import { compareVersions, signedReleaseSchema, type SignedRelease, type UpdateState } from '../shared/updates.js';
 import { RemoteError } from '../shared/protocol.js';
 import type { AgentStore } from './store.js';
+import { updateProcesses, type UpdateProcess } from './update-process.js';
 
 type Request = (path: string, init?: RequestInit) => Promise<Response>;
 const checkResponseSchema = z.object({ release: signedReleaseSchema.nullable(), current: signedReleaseSchema.nullable(), rollback: signedReleaseSchema.nullable().optional() });
@@ -31,7 +31,7 @@ export class HelperUpdater {
   private failures = 0;
   private closed = false;
   private dir: string;
-  constructor(private options: { dir: string; root: string; version: string; store: AgentStore; request: Request; blockers: () => Promise<string[]>; freeze: (value: boolean) => void; publicKey?: string }) {
+  constructor(private options: { dir: string; root: string; version: string; store: AgentStore; request: Request; blockers: () => Promise<string[]>; freeze: (value: boolean) => void; publicKey?: string; processes?: typeof updateProcesses }) {
     this.dir = join(options.dir, 'updates'); mkdirSync(this.dir, { recursive: true });
     this.state.autoDownload = options.store.get('update:auto') !== 'false';
     try {
@@ -191,17 +191,20 @@ export class HelperUpdater {
     finally { this.preparingInstall = false; }
   }
   async report(phase: 'ready' | 'installed' | 'failed' | 'rolled_back', version: string) { try { await this.options.request('/api/updates/device/result', { method: 'POST', body: JSON.stringify({ phase, version }), headers: { 'Content-Type': 'application/json' } }); return true; } catch { return false; } }
-  private async installerActive(result: { runnerPid?: number; installerPid?: number }) {
+  private async installerActive(result: { runnerPid?: number; installerPid?: number; runnerIdentity?: UpdateProcess; installerIdentity?: UpdateProcess }) {
     const ids = [result.runnerPid, result.installerPid].filter((id): id is number => Number.isSafeInteger(id) && id! > 0);
-    for (const id of ids) { try { process.kill(id, 0); return true; } catch (error: any) { if (error.code !== 'ESRCH') return true; } }
-    if (ids.length) return false;
-    if (process.platform !== 'win32') return false;
-    // Older runners did not persist a PID; use a conservative installer inventory.
     const names = readdirSync(this.dir).filter(name => /^[a-f0-9]{64}\.exe$/.test(name));
     try {
-      const query = ["Name LIKE 'is-%.tmp'", ...names.map(name => `Name='${name}'`)].join(' OR ');
-      const { stdout } = await promisify(execFile)('wmic.exe', ['process', 'where', query, 'get', 'ProcessId', '/value'], { windowsHide: true, timeout: 5000 });
-      return /ProcessId=\d+/.test(stdout);
+      const rows = await (this.options.processes ?? updateProcesses)(ids);
+      const samePath = (a: string, b: string) => a.replaceAll('\\', '/').toLowerCase() === b.replaceAll('\\', '/').toLowerCase();
+      return rows.some(row => {
+        if (!ids.length) return names.includes(row.name) || /^is-.*\.tmp$/i.test(row.name);
+        const expected = row.pid === result.runnerPid ? result.runnerIdentity : result.installerIdentity;
+        if (!row.path || !row.startedAt) return true;
+        if (expected?.path && expected.startedAt) return samePath(row.path, expected.path) && row.startedAt === expected.startedAt;
+        if (row.pid === result.runnerPid) return samePath(row.path, join(this.dir, 'runner/node.exe'));
+        return names.some(name => samePath(row.path, join(this.dir, name))) || /^is-.*\.tmp$/i.test(row.name);
+      });
     } catch { return true; }
   }
   async reportPrevious() {

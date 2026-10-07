@@ -302,7 +302,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     try {
       const db = this.index();
       try {
-        const rows = db.prepare(`SELECT id, rollout_path AS path FROM threads WHERE ${ACTIVE_THREADS} ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC LIMIT 200`).all() as { id: string; path: string }[];
+        const rows = db.prepare(`SELECT id, rollout_path AS path FROM threads WHERE ${ACTIVE_THREADS} ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC`).all() as { id: string; path: string }[];
         // A task explicitly watched for completion must remain observable even if
         // Codex changes its index state after the turn starts.
         const extra = watched.length ? db.prepare(`SELECT id, rollout_path AS path FROM threads WHERE id IN (${watched.map(() => '?').join(',')})`).all(...watched) as { id: string; path: string }[] : [];

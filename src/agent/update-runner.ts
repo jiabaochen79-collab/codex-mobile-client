@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { verifyRelease, fileDigest } from '../shared/release-signature.js';
 import { signedReleaseSchema } from '../shared/updates.js';
+import { updateProcesses, type UpdateProcess } from './update-process.js';
 
 const jobSchema = z.object({ root: z.string(), dataDir: z.string(), next: signedReleaseSchema, previous: signedReleaseSchema, nonce: z.string().uuid(), version: z.string().regex(/^\d+\.\d+\.\d+$/).optional() }).strict();
 const INSTALL_TIMEOUT_MS = 5 * 60000;
@@ -16,7 +17,9 @@ export async function runUpdate(jobPath: string) {
   const cache = join(job.dataDir, 'updates');
   const version = job.version ?? JSON.parse(Buffer.from(job.next.payload, 'base64').toString()).version;
   let installerPid = 0;
-  const result = (phase: string, installerRunning = false) => writeFileSync(join(cache, 'result.json'), JSON.stringify({ phase, version, at: Date.now(), installerRunning, runnerPid: process.pid, installerPid }), { mode: 0o600 });
+  let runnerIdentity: UpdateProcess | undefined, installerIdentity: UpdateProcess | undefined;
+  try { runnerIdentity = (await updateProcesses([process.pid]))[0]; } catch {}
+  const result = (phase: string, installerRunning = false) => writeFileSync(join(cache, 'result.json'), JSON.stringify({ phase, version, at: Date.now(), installerRunning, runnerPid: process.pid, installerPid, runnerIdentity, installerIdentity }), { mode: 0o600 });
   let next: ReturnType<typeof verifyRelease>['manifest'], previous: typeof next;
   try {
     next = verifyRelease(job.next).manifest; previous = verifyRelease(job.previous).manifest;
@@ -24,8 +27,11 @@ export async function runUpdate(jobPath: string) {
   } catch (error) { result('failed'); throw error; }
   const execute = (file: string, args: string[], wait = true) => new Promise<number>((done, reject) => {
     const child = spawn(file, args, { windowsHide: true, stdio: 'ignore', cwd: job.root, detached: !wait });
-    if (wait) child.once('spawn', () => { installerPid = child.pid ?? 0; result('installing', true); });
     let timer: NodeJS.Timeout | undefined, exited = false, terminating = false, terminationFinished = false;
+    if (wait) child.once('spawn', () => {
+      installerPid = child.pid ?? 0; installerIdentity = undefined; result('installing', true);
+      void updateProcesses([installerPid]).then(rows => { if (!exited && !terminating) { installerIdentity = rows[0]; result('installing', true); } }).catch(() => {});
+    });
     child.once('error', error => { clearTimeout(timer); reject(error); });
     if (!wait) { child.once('spawn', () => { child.unref(); done(child.pid ?? 0); }); return; }
     child.once('exit', code => { exited = true; clearTimeout(timer); if (!terminating) done(code ?? 1); else if (terminationFinished) done(1); });

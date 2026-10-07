@@ -48,7 +48,24 @@ const taskSynced = ref(false);
 type PendingSend = { requestId: string; text: string; message: string; attachments: Attachment[] };
 const pendingSends = reactive<Record<string, PendingSend>>({});
 const checkingSend = ref(false);
-try { const saved = JSON.parse(localStorage.getItem('pending-sends:' + props.deviceId) ?? sessionStorage.getItem('pending-sends:' + props.deviceId) ?? '{}'); for (const [id, value] of Object.entries(saved)) { const row = value as PendingSend; if (/^[a-f0-9-]{36}$/.test(id) && /^[a-f0-9-]{36}$/.test(row?.requestId) && typeof row.text === 'string' && row.text.length <= 32000) pendingSends[id] = { requestId: row.requestId, text: row.text, message: '发送结果待核对，内容已保留，不会自动重发。', attachments: Array.isArray(row.attachments) ? row.attachments.filter(a => /^[a-f0-9-]{36}$/.test(a?.id) && typeof a.name === 'string' && a.name.length <= 180 && a.ready === true && Number.isSafeInteger(a.size) && a.size > 0 && a.size <= 25 * 1024 * 1024 && a.offset === a.size && typeof a.mediaType === 'string').slice(0,5) : [] }; } } catch {}
+function pendingSendKey(id: string) { return `pending-send:${props.deviceId}:${id}`; }
+function storedPendingSend(value: string | null): PendingSend | undefined {
+  try {
+    const row = JSON.parse(value ?? 'null') as PendingSend & { outcome?: string };
+    if (!row || row.outcome || !/^[a-f0-9-]{36}$/.test(row.requestId) || typeof row.text !== 'string' || row.text.length > 32000) return;
+    return { requestId: row.requestId, text: row.text, message: '发送结果待核对，内容已保留，不会自动重发。', attachments: Array.isArray(row.attachments) ? row.attachments.filter(a => /^[a-f0-9-]{36}$/.test(a?.id) && typeof a.name === 'string' && a.name.length <= 180 && a.ready === true && Number.isSafeInteger(a.size) && a.size > 0 && a.size <= 25 * 1024 * 1024 && a.offset === a.size && typeof a.mediaType === 'string').slice(0,5) : [] };
+  } catch { return; }
+}
+try {
+  const legacyKey = 'pending-sends:' + props.deviceId;
+  const legacy = JSON.parse(localStorage.getItem(legacyKey) ?? sessionStorage.getItem(legacyKey) ?? '{}');
+  for (const [id, row] of Object.entries(legacy)) if (/^[a-f0-9-]{36}$/.test(id) && storedPendingSend(JSON.stringify(row)) && localStorage.getItem(pendingSendKey(id)) === null) localStorage.setItem(pendingSendKey(id), JSON.stringify(row));
+  localStorage.removeItem(legacyKey); sessionStorage.removeItem(legacyKey);
+  for (let index = 0; index < localStorage.length; index++) {
+    const key = localStorage.key(index); const id = key?.startsWith(`pending-send:${props.deviceId}:`) ? key.slice(`pending-send:${props.deviceId}:`.length) : '';
+    const row = key && storedPendingSend(localStorage.getItem(key)); if (/^[a-f0-9-]{36}$/.test(id) && row) pendingSends[id] = row;
+  }
+} catch {}
 const pendingSend = computed(() => selected.value ? pendingSends[selected.value.id] : undefined);
 const modeSynced = ref(false); const modeChanging = ref(false); let modeSyncCycle = 0;
 const queuedMessages = ref<QueuedMessage[]>([]); const sendMenu = ref(false); let readingQueue = false;
@@ -84,6 +101,14 @@ function dismissError() {
   } else if (snapshot.value) readError.value = '';
 }
 const projectModal = ref(false); const projectId = ref(''); const newText = ref('');
+try {
+  const saved = JSON.parse(sessionStorage.getItem('new-task-draft:' + props.deviceId) ?? 'null');
+  if (saved && typeof saved.text === 'string' && saved.text.length <= 32000 && typeof saved.projectId === 'string') {
+    newText.value = saved.text; projectId.value = saved.projectId;
+    if (typeof saved.model === 'string') newModel.value = saved.model;
+    if (typeof saved.effort === 'string') newEffort.value = saved.effort;
+  }
+} catch {}
 type PendingCreate = { requestId: string; command: Extract<Command, { method: 'create' }> };
 const pendingCreate = ref<PendingCreate>();
 try {
@@ -447,7 +472,10 @@ async function loadNavigation() {
 function refreshPage() {
   if (busy.value || modeChanging.value || attachments.hasPending.value) { error.value = '请先发送或移除待发送附件，再刷新网页。'; return; }
   if (selected.value) drafts.set(selected.value.id, draft.value);
-  try { sessionStorage.setItem('chat-drafts:' + props.deviceId, JSON.stringify([...drafts])); } catch { error.value = '草稿保存失败，未刷新网页。'; return; }
+  try {
+    sessionStorage.setItem('chat-drafts:' + props.deviceId, JSON.stringify([...drafts]));
+    sessionStorage.setItem('new-task-draft:' + props.deviceId, JSON.stringify({ text: newText.value, projectId: projectId.value, model: newModel.value, effort: newEffort.value }));
+  } catch { error.value = '草稿保存失败，未刷新网页。'; return; }
   location.reload();
 }
 async function toggleProject(id: string) { projectInteraction++; automaticProjects.delete(id); if (expandedProjects.has(id)) expandedProjects.delete(id); else { expandedProjects.add(id); await loadGroup(id); } }
@@ -619,10 +647,27 @@ async function queueAction(queuedId: string, action: 'remove' | 'resume') {
   await readQueue();
 }
 function queueResized() { void nextTick(chatScroll.layoutChanged); }
-function savePendingSends() {
+function savePendingSends(id?: string) {
   if (selected.value) drafts.set(selected.value.id, draft.value);
   sessionStorage.setItem('chat-drafts:' + props.deviceId, JSON.stringify([...drafts]));
-  localStorage.setItem('pending-sends:' + props.deviceId, JSON.stringify(pendingSends)); sessionStorage.removeItem('pending-sends:' + props.deviceId);
+  if (id && pendingSends[id]) localStorage.setItem(pendingSendKey(id), JSON.stringify(pendingSends[id]));
+}
+function clearPendingSend(id: string, attempt: PendingSend, outcome: 'succeeded' | 'failed' | 'released') {
+  if (pendingSends[id]?.requestId !== attempt.requestId) return;
+  try { const saved = JSON.parse(localStorage.getItem(pendingSendKey(id)) ?? 'null'); if (saved?.requestId === attempt.requestId) localStorage.setItem(pendingSendKey(id), JSON.stringify({ requestId: attempt.requestId, outcome })); } catch {}
+  delete pendingSends[id]; try { savePendingSends(); } catch {}
+}
+function syncPendingSend(event: StorageEvent) {
+  const prefix = `pending-send:${props.deviceId}:`; if (!event.key?.startsWith(prefix)) return;
+  const id = event.key.slice(prefix.length); if (!/^[a-f0-9-]{36}$/.test(id)) return;
+  const saved = storedPendingSend(event.newValue);
+  if (saved) { pendingSends[id] = saved; return; }
+  try {
+    const result = JSON.parse(event.newValue ?? 'null'), attempt = pendingSends[id];
+    if (attempt?.requestId !== result?.requestId) return;
+    if (result.outcome === 'succeeded') settleSend(id, attempt);
+    else if (result.outcome === 'failed' || result.outcome === 'released') delete pendingSends[id];
+  } catch {}
 }
 function settleSend(id: string, attempt: PendingSend, failure?: { message: string }) {
   if (!attempt || pendingSends[id]?.requestId !== attempt.requestId) return;
@@ -631,7 +676,7 @@ function settleSend(id: string, attempt: PendingSend, failure?: { message: strin
     if (drafts.get(id) === attempt.text) drafts.delete(id);
     attachments.clear(id);
   } else if (selected.value?.id === id) error.value = failure.message;
-  delete pendingSends[id]; try { savePendingSends(); } catch {}
+  clearPendingSend(id, attempt, failure ? 'failed' : 'succeeded');
   const awaiting = pending.get(attempt.requestId);
   if (awaiting) { pending.delete(attempt.requestId); clearTimeout(awaiting.timer); if (failure) awaiting.reject(Object.assign(new Error(failure.message), { code: 'SEND_REJECTED' })); else awaiting.resolve({ accepted: true }); }
 }
@@ -649,24 +694,28 @@ async function reconcileSends() {
 function keepUnconfirmedDraft() {
   const id = selected.value?.id;
   if (!id || busy.value || !pendingSends[id] || !confirm('请先核对电脑端及待发送队列。保留为草稿后再次发送，可能重复执行；确定已完成核对？')) return;
-  delete pendingSends[id]; try { savePendingSends(); } catch {}
+  clearPendingSend(id, pendingSends[id], 'released');
 }
 async function perform(command: Command) {
   busy.value = true; error.value = '';
   const requestId = crypto.randomUUID();
+  let sendAttempt: PendingSend | undefined;
   try {
     if (command.method === 'send') {
-      pendingSends[command.params.id] = { requestId, text: draft.value, message: '正在等待电脑确认发送，内容已保留。', attachments: attachments.current.value.flatMap(item => item.attachment ? [item.attachment] : []) };
-      try { savePendingSends(); }
+      const saved = storedPendingSend(localStorage.getItem(pendingSendKey(command.params.id)));
+      if (saved) { pendingSends[command.params.id] = saved; return false; }
+      sendAttempt = { requestId, text: draft.value, message: '正在等待电脑确认发送，内容已保留。', attachments: attachments.current.value.flatMap(item => item.attachment ? [item.attachment] : []) };
+      pendingSends[command.params.id] = sendAttempt;
+      try { savePendingSends(command.params.id); }
       catch { throw new Error('无法保存发送确认记录，本次未发送。草稿和附件已保留，请检查浏览器存储权限或释放空间，恢复后再次点击发送。'); }
     }
     await request(command, requestId);
-    if (command.method === 'send') settleSend(command.params.id, pendingSends[command.params.id]);
+    if (command.method === 'send' && sendAttempt) settleSend(command.params.id, sendAttempt);
     return true;
   }
   catch (e: any) {
-    if (command.method === 'send' && ['OUTCOME_UNKNOWN', 'INTERNAL'].includes(e.code)) { const attempt = pendingSends[command.params.id]; if (attempt) attempt.message = '发送结果待核对，内容已保留，不会自动重发。'; try { savePendingSends(); } catch {} }
-    else { if (command.method === 'send') { delete pendingSends[command.params.id]; try { savePendingSends(); } catch {} } if (active.value && (!('id' in command.params) || selected.value?.id === command.params.id)) error.value = e.message; }
+    if (command.method === 'send' && ['OUTCOME_UNKNOWN', 'INTERNAL'].includes(e.code)) { const attempt = pendingSends[command.params.id]; if (attempt?.requestId === requestId) { attempt.message = '发送结果待核对，内容已保留，不会自动重发。'; try { savePendingSends(command.params.id); } catch {} } }
+    else { if (command.method === 'send' && pendingSends[command.params.id]?.requestId === requestId) clearPendingSend(command.params.id, pendingSends[command.params.id], 'failed'); if (active.value && (!('id' in command.params) || selected.value?.id === command.params.id)) error.value = e.message; }
     return false;
   }
   finally { busy.value = false; await read(); }
@@ -776,7 +825,7 @@ async function newConversation(project?: string) {
   const revision = notificationNavigationRevision; const cycle = modeSyncCycle;
   const stillPreparing = () => active.value && canControl.value && revision === notificationNavigationRevision && cycle === modeSyncCycle;
   moreMenu.value = false; error.value = '';
-  try { const r = await request({ method: 'projects', params: {} }); if (!stillPreparing()) return; projects.value = r.projects; projectId.value = pendingCreate.value?.command.params.projectId ?? project ?? selected.value?.projectId ?? r.projects[0]?.id ?? ''; if (pendingCreate.value) newText.value = pendingCreate.value.command.params.text; projectModal.value = true; }
+  try { const r = await request({ method: 'projects', params: {} }); if (!stillPreparing()) return; projects.value = r.projects; projectId.value = pendingCreate.value?.command.params.projectId ?? project ?? (newText.value && r.projects.some((p: Project) => p.id === projectId.value) ? projectId.value : selected.value?.projectId ?? r.projects[0]?.id ?? ''); if (pendingCreate.value) newText.value = pendingCreate.value.command.params.text; projectModal.value = true; }
   catch (e: any) { if (stillPreparing()) error.value = e.message; }
 }
 async function create() {
@@ -788,7 +837,7 @@ async function create() {
     pendingCreate.value = attempt; localStorage.setItem('pending-create:' + props.deviceId, JSON.stringify(attempt)); sessionStorage.removeItem('pending-create:' + props.deviceId);
     const r = await request(attempt.command, attempt.requestId);
     if (!r?.threadId) throw Object.assign(new Error('创建结果尚未确认，请在电脑端核对。'), { code: 'OUTCOME_UNKNOWN' });
-    pendingCreate.value = undefined; localStorage.removeItem('pending-create:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); newText.value = '';
+    pendingCreate.value = undefined; localStorage.removeItem('pending-create:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); sessionStorage.removeItem('new-task-draft:' + props.deviceId); newText.value = '';
     const navigate = active.value && revision === notificationNavigationRevision && projectModal.value;
     if (navigate) projectModal.value = false;
     await loadNavigation();
@@ -932,6 +981,8 @@ onActivated(async () => {
   window.addEventListener('pageshow', pageRestored);
   window.addEventListener('pagehide', pageHidden);
   window.addEventListener('pointerdown', composerPointerdown, true);
+  window.addEventListener('storage', syncPendingSend);
+  for (const id of Object.keys(pendingSends)) syncPendingSend({ key: pendingSendKey(id), newValue: localStorage.getItem(pendingSendKey(id)) } as StorageEvent);
   document.addEventListener('visibilitychange', foreground); void refreshNotificationBadge(); void openNotificationFromUrl(); poll = setInterval(() => { if (document.visibilityState === 'visible') {if(selected.value)void read();if(listVisible.value)void refreshActivity();void reconcileSends();} }, 10000);
   navigationPoll = setInterval(() => { if (document.visibilityState === 'visible' && listVisible.value) void loadNavigation(); }, 15000);
 });
@@ -948,6 +999,7 @@ function suspend() {
   window.removeEventListener('pageshow', pageRestored);
   window.removeEventListener('pagehide', pageHidden);
   window.removeEventListener('pointerdown', composerPointerdown, true);
+  window.removeEventListener('storage', syncPendingSend);
   window.visualViewport?.removeEventListener('resize', resyncViewport); window.visualViewport?.removeEventListener('scroll', updateViewport); window.removeEventListener('resize', resyncViewport); window.removeEventListener('keydown', closeOverlays);
   window.removeEventListener('scroll', updateViewport);
   window.removeEventListener('focus', resyncViewport); window.removeEventListener('orientationchange', resyncViewport); document.removeEventListener('focusin', resyncViewport); document.removeEventListener('focusout', resyncViewport);

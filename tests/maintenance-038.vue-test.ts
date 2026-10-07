@@ -176,10 +176,10 @@ it('F30 iPad desktop-mode diagnostics consistently identify iOS', () => {
 
 it('A06 uncertain submissions survive opening a new tab without crossing devices', () => {
   const persistent = new Map<string, string>();
-  const storage = { getItem: (k: string) => persistent.get(k) ?? null, setItem: (k: string, v: string) => persistent.set(k, v), removeItem: (k: string) => persistent.delete(k) };
+  const storage = { get length() { return persistent.size; }, key: (i: number) => [...persistent.keys()][i] ?? null, getItem: (k: string) => persistent.get(k) ?? null, setItem: (k: string, v: string) => persistent.set(k, v), removeItem: (k: string) => persistent.delete(k) };
   Object.assign(globalThis, { localStorage: storage });
   const p = setup('MobilePanel.vue', { deviceId: '123456789' }), task = crypto.randomUUID();
-  p.pendingSends[task] = { requestId: crypto.randomUUID(), text: 'uncertain fixture', attachments: [] }; p.savePendingSends();
+  p.pendingSends[task] = { requestId: crypto.randomUUID(), text: 'uncertain fixture', attachments: [] }; p.savePendingSends(task);
   expect(setup('MobilePanel.vue', { deviceId: '123456789' }).pendingSends[task].text).toBe('uncertain fixture');
   expect(Object.keys(setup('MobilePanel.vue', { deviceId: '234567891' }).pendingSends)).toHaveLength(0);
   persistent.clear();
