@@ -20,7 +20,7 @@ import { RemoteError, supportsDesktopCommand, uid, type ClientStatus, type Comma
 enablePatches();
 const run = promisify(execFile);
 const ACTIVE_THREADS = "archived = 0 AND source = 'vscode' AND remote_rollout_exists(rollout_path)";
-type Discovery = { version: string | null; processId: number; toolsPipe: string | null; executablePath: string | null; cliExecutablePath?: string | null };
+type Discovery = { version: string | null; processId: number; startedAt?: string; toolsPipe: string | null; executablePath: string | null; cliExecutablePath?: string | null };
 type Followed = { id: string; owner: string; revision: number; state: any; ownerCheckedAt?: number };
 const permissionSettings: Record<PermissionMode, { permissions: string; approvalPolicy: 'on-request' | 'never'; approvalsReviewer: 'user' | 'guardian_subagent' }> = {
   ask: { permissions: ':workspace', approvalPolicy: 'on-request', approvalsReviewer: 'user' },
@@ -211,6 +211,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     const { stdout } = await run(this.nativeExe, ['--discover'], { windowsHide: true, timeout: 8000, maxBuffer: 1024 * 1024 });
     return JSON.parse(stdout);
   }
+  desktopProcess() { return this.discovery?.processId === 0 ? null : this.discovery?.startedAt ? { processId: this.discovery.processId, startedAt: this.discovery.startedAt, version: this.discovery.version } : undefined; }
   private async inspectStatus(): Promise<ClientStatus> {
     let version: string | null = this.discovery?.version ?? null;
     let next: Discovery;
@@ -221,12 +222,12 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
         throw error;
       }
       const previous = this.discovery;
-      const sameDesktop = !!previous && previous.processId === next.processId && previous.executablePath === next.executablePath;
+      const sameDesktop = !!previous && previous.processId === next.processId && previous.startedAt === next.startedAt && previous.executablePath === next.executablePath;
       // The native probe can briefly lose a busy single-instance pipe while the
       // already validated IPC connection remains usable. Keep that connection
       // until a real disconnect or a new pipe is positively discovered.
       if (sameDesktop && !next.toolsPipe && previous.toolsPipe) next = { ...next, toolsPipe: previous.toolsPipe, cliExecutablePath: next.cliExecutablePath ?? previous.cliExecutablePath };
-      const desktopChanged = previous?.processId !== next.processId || previous?.executablePath !== next.executablePath;
+      const desktopChanged = !sameDesktop;
       const toolsChanged = previous?.toolsPipe !== next.toolsPipe;
       if (desktopChanged) { this.ipc.close(); this.tools?.close(); this.tools = undefined; this.current = undefined; this.contract = undefined; this.projectCache = undefined; }
       else if (toolsChanged) { this.tools?.close(); this.tools = undefined; }
@@ -497,7 +498,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     this.projectScan = scan;
   }
   async execute(command: Command, commandId: string, authorize?: () => void, attachments: LocalAttachment[] = []) {
-    if (command.method === 'command.status') throw new RemoteError('INVALID', '发送结果由电脑助手核对。');
+    if (command.method === 'command.status' || command.method === 'client.recover') throw new RemoteError('INVALID', '此操作由电脑助手处理。');
     await this.ready(command);
     if (command.method === 'safety.status') {
       await this.follow(command.params.id, false); const snapshot = await this.snapshot(20);

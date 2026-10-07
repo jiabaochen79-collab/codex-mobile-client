@@ -19,6 +19,7 @@ Codex Mobile is an independent Windows companion and mobile web client for exist
 - **Multiple computers:** Keep home, office, and remote computers in one mobile device list and switch with explicit device authorization.
 - **Useful mobile input:** Upload photos and files, preview attachments, handle HEIC photos, and retry failed uploads.
 - **Quiet completion alerts:** Use in-site notifications and supported Web Push browsers to know when a task finishes or fails.
+- **Desktop crash recovery:** Restore Codex after a confirmed abnormal exit, with bounded retries and a manual recovery panel. Interrupted tasks and uncertain sends are never automatically replayed.
 - **Operational feedback:** Submit a product issue with optional screenshots and sanitized diagnostics without exposing task content by default.
 
 ## Product boundary

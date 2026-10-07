@@ -40,6 +40,7 @@ export const commandSchema = z.discriminatedUnion('method', [
   z.object({ method: z.literal('activity'), params: z.object({ ids: z.array(uid).max(150) }).strict() }).strict(),
  z.object({ method: z.literal('seen'), params: z.object({ id: uid, completionId: z.string().max(200), turnId: z.string().min(1).max(200).optional() }).strict() }).strict(),
   z.object({ method: z.literal('control.claim'), params: z.object({ epoch: uid.nullable() }).strict() }).strict(),
+  z.object({ method: z.literal('client.recover'), params: z.object({ action: z.enum(['launch', 'pause', 'enable']) }).strict() }).strict(),
   z.object({ method: z.literal('upload.begin'), params: z.object({ id: uid, name: z.string().min(1).max(180), size: z.number().int().min(1).max(MAX_FILE_SIZE), sha256: z.string().regex(/^[a-f0-9]{64}$/), mediaType: z.string().max(100) }).strict() }).strict(),
   z.object({ method: z.literal('upload.status'), params: z.object({ attachmentId: uid }).strict() }).strict(),
   z.object({ method: z.literal('upload.complete'), params: z.object({ attachmentId: uid }).strict() }).strict(),
@@ -47,6 +48,7 @@ export const commandSchema = z.discriminatedUnion('method', [
 ]);
 export type Command = z.infer<typeof commandSchema>;
 export function supportsDesktopCommand(capabilities: string[] | undefined, command: Command) {
+  if (command.method === 'client.recover') return capabilities?.includes('desktop-recovery') === true;
   if (command.method === 'plan.respond') return capabilities?.includes('plan-implementation') === true;
   if (command.method === 'mode.update') return capabilities?.includes('task-mode') === true;
   if (command.method === 'permissions.update') return capabilities?.includes('permission-settings') === true;
@@ -66,7 +68,14 @@ export type ThreadSettings = { model: string; effort: string | null; revision: s
 export type Activity = { id: string; running: boolean; unread: boolean; completionId: string };
 export type Attachment = { id: string; name: string; size: number; mediaType: string; offset: number; ready: boolean };
 export type LocalAttachment = Attachment & { path: string };
-export type ClientStatus = { available: boolean; version: string | null; reason: string | null; capabilities?: string[] };
+export const recoveryStateSchema = z.object({
+  autoEnabled: z.boolean(), phase: z.enum(['idle', 'watching', 'backoff', 'launching', 'connecting', 'recovered', 'paused', 'failed']),
+  attempts: z.number().int().min(0).max(3), reason: z.string().max(300), nextRetryAt: z.number().int().positive().optional(), recoveredAt: z.number().int().positive().optional(),
+  lastExit: z.object({ code: z.string().regex(/^(?:0x[0-9a-fA-F]{8}|unknown)$/), at: z.number().int().positive(), version: z.string().max(100).nullable(), cause: z.enum(['crash', 'normal', 'session-ending']) }).strict().optional()
+}).strict();
+export type RecoveryState = z.infer<typeof recoveryStateSchema>;
+export type DesktopProcess = { processId: number; startedAt: string; version: string | null };
+export type ClientStatus = { available: boolean; version: string | null; reason: string | null; capabilities?: string[]; recovery?: RecoveryState };
 export type Project = { id: string; name: string; path: string; count?: number; running?: boolean };
 export type Conversation = { id: string; title: string; cwd: string; updatedAt: number; projectId?: string | null; running?: boolean; unread?: boolean; completionId?: string };
 export type MessageImage = { id: string; alt: string };
@@ -76,6 +85,7 @@ export type Interaction = { id: string | number; kind: 'command' | 'file' | 'inp
 export type QueuedMessage = { id: string; text: string; attachments: { id: string; name: string }[]; state: 'pending' | 'paused' | 'sending' | 'uncertain'; reason: string | null; created: number };
 export type Snapshot = { id: string; title: string; epoch: string; turnId: string | null; busy: boolean; messages: Message[]; requests: Interaction[]; hasMore: boolean; historyCursor?: string; settings?: ThreadSettings; completionId?: string; revision?: string; lastTurnStatus?: string; lastTurnId?: string | null; lastTurnReason?: string; nativeQueuedCount?: number | null; queued?: QueuedMessage[] };
 export interface DesktopAdapter {
+  desktopProcess?(): DesktopProcess | null | undefined;
   hasConversation?(id: string): boolean | undefined;
   updateBlockers?(): Promise<string[]>;
   notificationSources?(taskIds?: string[]): Promise<{ id: string; path: string }[]>;

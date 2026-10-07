@@ -30,6 +30,13 @@ export class RateLimit {
   constructor(private max: number, private windowMs: number, private now = Date.now) {}
   reset(key: string) { this.entries.delete(key); }
   resetPrefix(prefix: string) { for (const key of this.entries.keys()) if (key.startsWith(prefix)) this.entries.delete(key); }
+  check(key: string) {
+    const value = this.entries.get(key), now = this.now();
+    if (value && value.until > now && value.count >= this.max) {
+      const seconds = Math.max(1, Math.ceil((value.until - now) / 1000));
+      throw new RemoteError('RATE_LIMIT', `请求过于频繁，请在 ${Math.ceil(seconds / 60)} 分钟后重试。`, seconds);
+    }
+  }
   take(key: string) {
     const now = this.now();
     for (const [k, v] of this.entries) if (v.until <= now) this.entries.delete(k);

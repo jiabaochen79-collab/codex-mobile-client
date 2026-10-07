@@ -14,7 +14,7 @@ const compiler = values.compiler ?? process.env.INNO_SETUP_COMPILER ?? [resolve(
 if (!existsSync(compiler)) throw new Error('Set INNO_SETUP_COMPILER to a verified Inno Setup ISCC.exe installation.');
 for (const name of ['RemoteCompanion.exe', 'node.exe', 'companion.ico', 'icons', 'dist/agent.mjs', 'dist/web/index.html', 'node_modules', 'relay.json', 'package.json']) if (!existsSync(join(packageDir, name))) throw new Error(`Incomplete Windows package: ${name}`);
 assertClientDist(join(packageDir, 'dist'));
-const allowed = new Set(['node.exe', 'RemoteCompanion.exe', 'companion.ico', 'icons', 'dist', 'node_modules', 'package.json', 'package-lock.json', 'relay.json', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'NODE-LICENSE.txt', 'INSTALLER.md', 'REMEMBERED-LOGIN.md', 'COMPATIBILITY.md', 'PLAN-MODE.md', 'QUEUED-SEND.md']);
+const allowed = new Set(['node.exe', 'RemoteCompanion.exe', 'companion.ico', 'icons', 'dist', 'node_modules', 'package.json', 'package-lock.json', 'relay.json', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'NODE-LICENSE.txt', 'INSTALLER.md', 'REMEMBERED-LOGIN.md', 'COMPATIBILITY.md', 'PLAN-MODE.md', 'QUEUED-SEND.md', 'CLIENT-RECOVERY.md']);
 for (const name of readdirSync(packageDir)) if (!allowed.has(name)) throw new Error(`Unexpected installer file: ${name}`);
 const origin = originUrl(JSON.parse(readFileSync(join(packageDir, 'relay.json'), 'utf8')).origin);
 if (!origin.startsWith('https:')) throw new Error('The user installer must contain an HTTPS server origin.');

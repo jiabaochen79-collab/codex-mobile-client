@@ -21,8 +21,11 @@ import { HelperUpdater } from './updater.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { CompletionMonitor } from './notifications.js';
+import { DesktopRecovery, NativeRecoveryBackend, type RecoveryBackend } from './desktop-recovery.js';
 
 export class Agent {
+  private recovery?: DesktopRecovery;
+  private recoveryBlocked = false;
   private updater?: HelperUpdater;
   private updateFrozen = false;
   readonly localToken = token();
@@ -78,13 +81,16 @@ export class Agent {
   private stopping = new Set<string>();
   private subscriptions: string[] = [];
   private queueAuthorizations = new Map<string, { resolve: (value: { allowed: boolean; validForMs: number; retryable?: boolean }) => void; timer: NodeJS.Timeout }>();
-  constructor(private options: { origin: string; dir: string; nativeExe?: string; root?: string; adapter: DesktopAdapter }) {
+  constructor(private options: { origin: string; dir: string; nativeExe?: string; root?: string; adapter: DesktopAdapter; recoveryBackend?: RecoveryBackend }) {
     if (!isAbsolute(options.dir) || /%[^%]+%/.test(options.dir)) throw new Error('Agent data directory must be an absolute resolved path.');
     this.origin = originUrl(options.origin); this.store = new AgentStore(options.dir, options.nativeExe);
+    this.recoveryBlocked = this.store.get(`recovery:${hash(this.origin)}:disabled`) === 'true';
     this.sends = new SendQueue(this.store, this.origin);
     this.uploads = new UploadStore(options.dir, this.store.db);
     this.completionMonitor = new CompletionMonitor(this.store, taskIds => this.options.adapter.notificationSources?.(taskIds) ?? []);
-    if (options.root && process.platform === 'win32' && this.origin.startsWith('https:')) this.updater = new HelperUpdater({ dir: options.dir, root: options.root, version: packageInfo.version, store: this.store, request: (path, init) => this.serviceRequest(path, init), blockers: () => this.updateBlockers(), freeze: v => { this.updateFrozen = v; } });
+    const recoveryBackend = options.recoveryBackend ?? (process.platform === 'win32' && options.nativeExe && options.adapter.desktopProcess ? new NativeRecoveryBackend(options.nativeExe) : undefined);
+    if (recoveryBackend) this.recovery = new DesktopRecovery({ store: this.store, key: `recovery:${hash(this.origin)}`, backend: recoveryBackend, dir: options.dir, interrupted: () => { for (const id of this.sends.pause('电脑客户端异常退出，请核对原任务后继续队列。')) this.notifyQueue(id); } });
+    if (options.root && process.platform === 'win32' && this.origin.startsWith('https:')) this.updater = new HelperUpdater({ dir: options.dir, root: options.root, version: packageInfo.version, store: this.store, request: (path, init) => this.serviceRequest(path, init), blockers: () => this.updateBlockers(), freeze: v => { this.updateFrozen = v; this.syncRecoveryAccess(); } });
     this.enabled = this.store.get(`enabled:${hash(this.origin)}`) === 'true';
     if (this.enabled) this.grants = this.store.grants(this.origin); else this.store.clearGrants(this.origin);
     const password = this.store.passwordSettings(this.origin);
@@ -145,7 +151,9 @@ export class Agent {
     }
     if (this.codeExpires !== null && Date.now() >= this.codeExpires) this.refreshCode();
     this.client = await this.options.adapter.status();
-    this.client = { ...this.client, capabilities: [...new Set([...(this.client.capabilities ?? []), 'queued-send', 'multi-terminal', 'command-status'])] };
+    if (this.recovery) { this.syncRecoveryAccess(); this.recovery.observe(this.options.adapter.desktopProcess?.(), this.client.available); this.recovery.tick(); }
+    if (this.recovery?.blocksCommands) this.client = { ...this.client, available: false, reason: this.recovery.state.reason };
+    this.client = { ...this.client, ...(this.recovery ? { recovery: { ...this.recovery.state } } : {}), capabilities: [...new Set([...(this.client.capabilities ?? []), 'queued-send', 'multi-terminal', 'command-status', ...(this.recovery ? ['desktop-recovery'] : [])])] };
     if (this.closing) { this.options.adapter.close(); return; }
     for (const [id, until] of this.grants) if (until <= Date.now()) { this.store.deleteGrant(this.origin, id); this.grants.delete(id); }
     const frame = { type: 'status', helperVersion: packageInfo.version, enabled: this.enabled, status: this.client, update: this.updater?.state, authorizedSessions: [...this.grants.keys()] };
@@ -174,7 +182,7 @@ export class Agent {
       }
       return;
     }
-    if (m.type === 'subscription') { const parsed = subscriptionSchema.safeParse(m.subscription); if (parsed.success) { this.subscriptionRevision++; this.subscription = parsed.data; this.store.syncNotificationClock(this.origin, parsed.data.serverTime); void this.flushNotifications(); } return; }
+    if (m.type === 'subscription') { const parsed = subscriptionSchema.safeParse(m.subscription); if (parsed.success) { this.subscriptionRevision++; this.subscription = parsed.data; this.syncRecoveryAccess(); this.store.syncNotificationClock(this.origin, parsed.data.serverTime); void this.flushNotifications(); } return; }
     if (m.type === 'control') {
       const lease = z.object({ sessionId: uid, clientId: uid, epoch: uid, expires: z.number().int() }).nullable().safeParse(m.lease);
       if (!lease.success || lease.data && (this.grants.get(lease.data.sessionId) ?? 0) <= Date.now()) { this.send({ type: 'control-result', id: m.id, ok: false }); return; }
@@ -221,12 +229,14 @@ export class Agent {
         const authorize = () => {
           if (this.closing || !this.enabled || (this.grants.get(sessionId) ?? 0) <= Date.now()) throw new RemoteError('AUTH', '远控授权已失效。');
           if (this.subscription && !this.subscription.access && !isSafetyCommand(frame.command)) throw new RemoteError('SUBSCRIPTION_REQUIRED', '订阅未开通或已到期。');
+          if (this.recovery?.blocksCommands && !readMethods.has(frame.command.method) && !isSafetyCommand(frame.command) && frame.command.method !== 'client.recover') throw new RemoteError('CLIENT_UNAVAILABLE', '电脑客户端正在恢复，请等待状态同步后再操作。');
           if (!supportsDesktopCommand(this.client.capabilities, frame.command)) throw new RemoteError('UNSUPPORTED', '当前客户端的此项接口尚未适配，操作未执行。');
           if (!readMethods.has(frame.command.method) || frame.command.method === 'read' && frame.command.params.activate) this.authorizeControl(sessionId, m.clientId, frame.controlEpoch);
         };
         authorize(); const command = frame.command;
         let result: unknown;
-        if (command.method === 'upload.begin') {
+        if (command.method === 'client.recover') result = this.recoverClient(command.params.action, authorize);
+        else if (command.method === 'upload.begin') {
           const available = await this.options.adapter.execute({ method: 'activity', params: { ids: [command.params.id] } }, frame.id) as any;
           if (!available.activities?.length) throw new RemoteError('NOT_FOUND', '目标任务不存在。');
           authorize(); result = this.uploads.begin(frame.id, sessionId, command.params);
@@ -368,12 +378,22 @@ export class Agent {
     if (!this.enabled || this.closing || (this.grants.get(sessionId) ?? 0) <= Date.now()) throw new RemoteError('AUTH', '远控授权已失效。');
     if (!this.control || this.control.sessionId !== sessionId || this.control.clientId !== clientId || this.control.epoch !== epoch || (this.controlDeadline === undefined ? this.control.expires <= Date.now() : this.controlDeadline <= performance.now())) throw new RemoteError('CONTROL_LOST', '当前为查看模式，请先接管控制权。');
   }
+  private syncRecoveryAccess() {
+    if (this.subscription && this.recoveryBlocked !== !!this.subscription.disabled) { this.recoveryBlocked = !!this.subscription.disabled; this.store.set(`recovery:${hash(this.origin)}:disabled`, String(this.recoveryBlocked)); }
+    this.recovery?.setAllowed(this.enabled && !this.updateFrozen && !this.recoveryBlocked);
+  }
+  recoverClient(action: 'launch' | 'pause' | 'enable', authorize: () => void = () => {}) {
+    if (this.updateFrozen) throw new RemoteError('UPDATING', '助手正在更新，请稍后恢复客户端');
+    if (this.closing || this.recoveryBlocked || this.subscription?.disabled) throw new RemoteError('AUTH', '设备已停用，无法恢复客户端');
+    if (!this.recovery) throw new RemoteError('UNSUPPORTED', '请更新 Windows 助手以恢复电脑客户端');
+    const state = this.recovery.request(action, () => { if (this.closing || this.updateFrozen || this.recoveryBlocked || this.subscription?.disabled) throw new RemoteError('AUTH', '设备已停用或正在更新'); authorize(); }); void this.refresh(); return state;
+  }
   private uploadChunk(frame: Buffer) {
     let header: ReturnType<typeof parseUploadFrame>['header'] | undefined;
     try { const parsed = parseUploadFrame(frame); header = parsed.header; this.authorizeControl(header.sessionId, header.clientId, header.controlEpoch); if (this.subscription && !this.subscription.access) throw new RemoteError('SUBSCRIPTION_REQUIRED', '订阅未开通或已到期。'); this.send({ type: 'upload-result', id: header.id, result: this.uploads.write(header.attachmentId, header.sessionId, header.offset, parsed.bytes) }); }
     catch (e) { if (header) this.send({ type: 'upload-result', id: header.id, error: publicError(e) }); }
   }
-  state() { return { helperVersion: packageInfo.version, deviceId: this.credentials?.id ?? null, code: this.code, passwordMode: this.passwordMode, codeExpires: this.codeExpires, enabled: this.enabled, connection: this.connection, connectionError: this.connectionError, client: this.client, authorizedCount: this.grants.size, url: this.origin, subscription: this.subscription, update: this.updater?.state, feedbackUnread: this.feedbackUnread }; }
+  state() { return { helperVersion: packageInfo.version, deviceId: this.credentials?.id ?? null, code: this.code, passwordMode: this.passwordMode, codeExpires: this.codeExpires, enabled: this.enabled, connection: this.connection, connectionError: this.connectionError, client: { ...this.client, ...(this.recovery?.blocksCommands ? { available: false, reason: this.recovery.state.reason } : {}), ...(this.recovery ? { recovery: { ...this.recovery.state } } : {}) }, authorizedCount: this.grants.size, url: this.origin, subscription: this.subscription, update: this.updater?.state, feedbackUnread: this.feedbackUnread }; }
   async refreshFeedbackUnread(force = false) {
     if (this.closing || this.feedbackReading || !this.credentials || this.subscription?.disabled || !force && Date.now() - this.feedbackCheckedAt < 30000) return;
     this.feedbackReading = true; this.feedbackCheckedAt = Date.now();
@@ -414,7 +434,7 @@ export class Agent {
     try { await this.serviceRequest('/api/subscription/device/computer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fingerprint }) }); } catch {}
   }
   async trial(value: unknown) { await this.registerComputer(); const revision = ++this.subscriptionRevision; const input = z.object({ termsVersion: z.string(), requestId: uid }).strict().parse(value); const result = await (await this.serviceRequest('/api/subscription/device/trial', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) })).json() as any; const subscription = subscriptionSchema.parse(result.subscription); if (!this.closing && revision === this.subscriptionRevision) this.subscription = subscription; return { ...result, subscription: this.subscription ?? subscription }; }
-  diagnostics() { return { source: 'desktop', helperVersion: packageInfo.version, ...(this.client.version && /^[\d.]+$/.test(this.client.version) ? { clientVersion: this.client.version } : {}), system: 'Windows', connection: this.connection, ...(this.connectionError?.code ? { errorCode: this.connectionError.code } : {}) }; }
+  diagnostics() { const exit = this.recovery?.state.lastExit; const errorCode = this.connectionError?.code ?? (exit?.cause === 'crash' && exit.code !== 'unknown' ? 'DESKTOP_EXIT_' + exit.code.slice(2).toUpperCase() : undefined); return { source: 'desktop', helperVersion: packageInfo.version, ...(this.client.version && /^[\d.]+$/.test(this.client.version) ? { clientVersion: this.client.version } : {}), system: 'Windows', connection: this.connection, ...(errorCode ? { errorCode } : {}) }; }
   async update(action: string, value?: unknown) {
     if (action === 'state') return this.updater?.state ?? { phase: 'error', progress: 0, autoDownload: false, message: '请安装包含在线更新器的新版本 Windows 助手。', notes: '' };
     if (!this.updater) throw new RemoteError('UNSUPPORTED', '请安装完整的新版 Windows 助手以使用在线更新。');
@@ -477,12 +497,14 @@ export class Agent {
   setEnabled(enabled: boolean) {
     if (!enabled) this.store.clearGrants(this.origin);
     this.enabled = enabled; this.store.set(`enabled:${hash(this.origin)}`, String(enabled));
+    this.syncRecoveryAccess();
     if (!enabled) { this.rotate(); this.options.adapter.close(); }
     void this.refresh();
   }
   async close() {
     this.updater?.close();
     this.closing = true; this.enabled = false; clearTimeout(this.reconnect); clearTimeout(this.changeTimer); clearInterval(this.timer); clearInterval(this.queueTimer); clearInterval(this.notificationTimer); this.completionMonitor.close();
+    await this.recovery?.close();
     for (const pending of this.queueAuthorizations.values()) { clearTimeout(pending.timer); pending.resolve({ allowed: false, validForMs: 0, retryable: true }); } this.queueAuthorizations.clear();
     this.socket?.close(1000); this.options.adapter.close(); await this.queue; await this.mediaQueue; this.store.close();
   }
@@ -507,6 +529,7 @@ export async function createLocalServer(agent: Agent, options: { port: number; w
   app.post('/local/license', async req => agent.subscriptionInfo(redeemSchema.parse(req.body)));
   app.post('/local/trial', async req => agent.trial(req.body));
   app.get('/local/diagnostics', async () => agent.diagnostics());
+  app.post('/local/client/recovery', async req => { const input = z.object({ action: z.enum(['launch', 'pause', 'enable']) }).strict().parse(req.body); return agent.recoverClient(input.action); });
   app.get('/local/update/state', async () => agent.update('state'));
   app.post('/local/update/:action', async req => agent.update(z.object({ action: z.enum(['check', 'download', 'cancel', 'install', 'settings']) }).parse(req.params).action, req.body));
   for (const path of ['/local/feedback', '/local/feedback/*']) app.route({ url: path, method: ['GET', 'POST'], bodyLimit: 22 * 1024 * 1024, handler: async (req, reply) => {

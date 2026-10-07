@@ -53,6 +53,8 @@ internal static class Program {
                 using (var writer = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false))) writer.Write(args[0] == "--protect" ? Convert.ToBase64String(result) : Encoding.UTF8.GetString(result)); return 0;
             }
             if (args.Length > 0 && args[0] == "--discover") { Discover(); return 0; }
+            if (args.Length == 3 && args[0] == "--desktop-watch") { DesktopRecovery.Watch(args[1], args[2]); return 0; }
+            if (args.Length == 1 && args[0] == "--desktop-launch") { DesktopRecovery.Launch(); return 0; }
             if (args.Length > 0 && args[0] == "--power-status") { using (var writer = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false))) writer.Write(Json.Serialize(PowerSettings.Read())); return 0; }
             using (var showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\CodexMobileCompanion.Show"))
             using (var closeSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\CodexMobileCompanion.Exit"))
@@ -120,7 +122,9 @@ internal static class Program {
         try { toolPipes.AddRange(Directory.GetFiles(@"\\.\pipe\", "codex-browser-use-*")); } catch (IOException) { }
         var pipe = DesktopToolsPipe.Find(toolOwnerProcessIds, toolPipes);
         var cliPaths = cliExecutables.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        Console.Write(Program.Json.Serialize(new { version = version, processId = pid, toolsPipe = pipe, executablePath = executable, cliExecutablePath = cliPaths.Length == 1 ? cliPaths[0] : null }));
+        string startedAt;
+        using (var process = Process.GetProcessById(pid)) startedAt = process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        Console.Write(Program.Json.Serialize(new { version = version, processId = pid, startedAt = startedAt, toolsPipe = pipe, executablePath = executable, cliExecutablePath = cliPaths.Length == 1 ? cliPaths[0] : null }));
     }
 }
 
@@ -156,6 +160,7 @@ internal sealed class CompanionForm : Form {
     private ToolStripMenuItem updateMenu;
     private ToolStripMenuItem helpUpdateMenu;
     private ToolStripMenuItem helpFeedbackMenu;
+    private ToolStripMenuItem helpRecoveryMenu;
     private ToolStripMenuItem trayFeedbackMenu;
     private readonly NotifyIcon tray = new NotifyIcon();
     private readonly HttpClient http = new HttpClient();
@@ -206,7 +211,8 @@ internal sealed class CompanionForm : Form {
         var help = new ToolStripMenuItem("帮助");
         helpUpdateMenu = new ToolStripMenuItem("检查更新", LoadImage("refresh"), async (s, e) => await CheckForUpdate());
         helpFeedbackMenu = new ToolStripMenuItem("问题反馈", LoadImage("feedback"), (s, e) => OpenPanel("feedback"));
-        help.DropDownItems.Add(helpUpdateMenu); help.DropDownItems.Add(new ToolStripSeparator()); help.DropDownItems.Add(helpFeedbackMenu); menu.Items.Add(help); MainMenuStrip = menu;
+        helpRecoveryMenu = new ToolStripMenuItem("客户端恢复", LoadImage("refresh"), (s, e) => OpenPanel("recovery"));
+        help.DropDownItems.Add(helpUpdateMenu); help.DropDownItems.Add(helpRecoveryMenu); help.DropDownItems.Add(new ToolStripSeparator()); help.DropDownItems.Add(helpFeedbackMenu); menu.Items.Add(help); MainMenuStrip = menu;
         var iconFile = Path.Combine(root, "companion.ico"); if (File.Exists(iconFile)) Icon = new Icon(iconFile);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 90)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 1)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 96)); Controls.Add(layout); Controls.Add(menu);
@@ -493,9 +499,13 @@ internal sealed class CompanionForm : Form {
         var client = state["client"] as Dictionary<string, object>;
         bool available = client != null && Convert.ToBoolean(client["available"]);
         string clientVersion = client == null ? "" : Convert.ToString(client["version"]), clientReason = client == null ? "" : Convert.ToString(client["reason"]);
+        var recovery = client != null && client.ContainsKey("recovery") ? client["recovery"] as Dictionary<string, object> : null;
+        string recoveryPhase = recovery == null ? "" : Convert.ToString(recovery["phase"]);
+        bool recovering = recoveryPhase == "backoff" || recoveryPhase == "launching" || recoveryPhase == "connecting";
+        if (!available && recovery != null) clientReason = Convert.ToString(recovery["reason"]);
         clientStatus.Text = client == null ? "正在检查" : (String.IsNullOrEmpty(clientVersion) ? "" : "Codex " + clientVersion + (String.IsNullOrEmpty(clientReason) ? "" : "  ")) + clientReason;
         tooltips.SetToolTip(clientStatus, clientStatus.Text);
-        clientBadge.Text = available ? String.IsNullOrEmpty(clientReason) ? "就绪" : "部分兼容" : "未就绪"; clientBadge.ForeColor = available && String.IsNullOrEmpty(clientReason) ? Color.FromArgb(35, 130, 93) : Color.FromArgb(146, 106, 48);
+        clientBadge.Text = recovering ? "正在恢复" : available ? String.IsNullOrEmpty(clientReason) ? "就绪" : "部分兼容" : "未就绪"; clientBadge.ForeColor = available && String.IsNullOrEmpty(clientReason) ? Color.FromArgb(35, 130, 93) : Color.FromArgb(146, 106, 48);
         authorization.Text = Get("authorizedCount") + " 个有效授权"; serverAddress.Text = Get("url");
         var subscription = state.ContainsKey("subscription") ? state["subscription"] as Dictionary<string, object> : null;
         string subscriptionState = subscription != null && subscription.ContainsKey("status") ? Convert.ToString(subscription["status"]) : "";
@@ -516,6 +526,8 @@ internal sealed class CompanionForm : Form {
         if (updateMenu != null) updateMenu.Enabled = token != null && !working && !updateBusy;
         if (helpUpdateMenu != null) helpUpdateMenu.Enabled = token != null && !working && !updateBusy;
         if (helpFeedbackMenu != null) helpFeedbackMenu.Enabled = token != null;
+        var entitlement = state != null && state.ContainsKey("subscription") ? state["subscription"] as Dictionary<string, object> : null;
+        if (helpRecoveryMenu != null) helpRecoveryMenu.Enabled = token != null && !(entitlement != null && entitlement.ContainsKey("disabled") && Convert.ToBoolean(entitlement["disabled"]));
         if (trayFeedbackMenu != null) trayFeedbackMenu.Enabled = token != null;
         copyId.Enabled = copyPassword.Enabled = reveal.Enabled = state != null && !String.IsNullOrEmpty(Get("deviceId"));
         copyAll.Enabled = openWeb.Enabled = state != null && !String.IsNullOrEmpty(Get("url"));
