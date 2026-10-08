@@ -2,6 +2,36 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.48 - 2026-10-08
+
+### Fixed
+
+- Select the highest eligible update version independently of upload order and legacy sequence values.
+- Restore unconfirmed sends as editable drafts after a browser restart and clear device-scoped pending records on logout.
+- Replace authoritative recent conversation messages after desktop undo while retaining loaded older history.
+- Keep subscription dialogs closable during slow background reads and reject stale reads after activation.
+- Preserve explicit default reasoning settings and tolerate disappearing desktop processes during recovery.
+- Check both update volumes and clean owned failed copies after verified recovery; retain the local backup and user data.
+- Record feedback resolution time separately from later ticket edits in the relay backend.
+
+## 0.4.47 - 2026-10-08
+
+### Changed
+
+- Publish Windows updates by uploading only the EXE; the server reads its embedded version and generates update metadata.
+- Remove separate release manifests, publisher keys and release signature verification; keep HTTPS, size and SHA-256 validation, allowed download paths and version replay checks.
+- Retain local program backup and recovery without downloading an older installer. Existing signed-metadata updaters require one manual upgrade.
+- Restrict update process discovery to the current Windows session and tolerate processes that exit during discovery; keep identity checks before stopping a helper.
+
+## 0.4.46 - 2026-10-08
+
+### Fixed
+
+- Download only the new signed installer; a server-hosted recovery installer is no longer required.
+- Verify a local backup of the installed program before installation and restore it if installation or local health checks fail, without restoring user data or stopping Codex.
+- Verify helper and connection process identities before recovery, including Windows short paths; retain the backup when safe recovery cannot be completed.
+- Clients with the earlier mandatory recovery-package check require one manual upgrade to this version.
+
 ## 0.4.33 - 2026-10-06
 
 ### Fixed

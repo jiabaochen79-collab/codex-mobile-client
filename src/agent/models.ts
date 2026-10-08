@@ -49,7 +49,8 @@ export function threadSettings(state: any): ThreadSettings {
   const settings = state.latestThreadSettings;
   const mode = settings?.collaborationMode ?? state.latestCollaborationMode;
   const model = settings?.model ?? mode?.settings?.model ?? state.latestModel ?? '';
-  const effort = settings?.effort ?? mode?.settings?.reasoning_effort ?? state.latestReasoningEffort ?? null;
+  const effort = settings && Object.prototype.hasOwnProperty.call(settings, 'effort') ? settings.effort ?? null
+    : mode?.settings && Object.prototype.hasOwnProperty.call(mode.settings, 'reasoning_effort') ? mode.settings.reasoning_effort ?? null : state.latestReasoningEffort ?? null;
   const permissionState = {
     activePermissionProfile: settings?.activePermissionProfile,
     sandboxPolicy: settings?.sandboxPolicy,

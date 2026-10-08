@@ -10,7 +10,7 @@ import { UploadStore } from '../src/agent/uploads.js';
 import { CodexDesktop, normalizeSnapshot } from '../src/agent/desktop.js';
 import { DesktopActivity } from '../src/agent/activity.js';
 import { HelperUpdater } from '../src/agent/updater.js';
-import { generateKeyPairSync, sign } from 'node:crypto';
+import { sign } from 'node:crypto';
 import { NativeIpc } from '../src/agent/ipc.js';
 import { compactJson } from '../src/agent/compact-json.js';
 
@@ -83,11 +83,10 @@ it('Regression: a complete terminal record larger than the activity tail preserv
 
 it('Regression: downloaded update is advertised ready while pending telemetry does not prevent the installation safety check', async () => {
   const d = dir(), store = new AgentStore(d); cleanup.push(() => store.close());
-  const keys = generateKeyPairSync('ed25519');
-  const envelope = (version: string, sequence: number) => { const bytes = Buffer.from(version); const sha256 = createHash('sha256').update(bytes).digest('hex'); const payload = Buffer.from(JSON.stringify({ version, sequence, platform: 'win32-x64', size: bytes.length, sha256, path: '/api/updates/download/' + sha256, notes: 'fixture', issuedAt: Date.now() })); return { payload: payload.toString('base64'), signature: sign(null, payload, keys.privateKey).toString('base64') }; };
+const envelope = (version: string, sequence: number) => { const bytes = Buffer.from(version); const sha256 = createHash('sha256').update(bytes).digest('hex'); return { version, sequence, platform: 'win32-x64', size: bytes.length, sha256, path: '/api/updates/download/' + sha256, notes: 'fixture', issuedAt: Date.now() }; };
   let resolve!: (value: Response) => void; const report = new Promise<Response>(r => resolve = r);
   const request = vi.fn(async (path: string) => path.includes('/check') ? Response.json({ current: envelope('0.4.36', 36), release: envelope('0.4.37', 37) }) : path.endsWith('/result') ? report : new Response(path.includes(createHash('sha256').update('0.4.36').digest('hex')) ? '0.4.36' : '0.4.37', { headers: { 'Content-Length': '6' } }));
-  const updater = new HelperUpdater({ dir: d, root: d, version: '0.4.36', store, request, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), blockers: async () => ['fixture pending approval'], freeze: () => {} }); cleanup.push(() => updater.close());
+  const updater = new HelperUpdater({ dir: d, root: d, version: '0.4.36', store, request, blockers: async () => ['fixture pending approval'], freeze: () => {} }); cleanup.push(() => updater.close());
   const checking = updater.check();
   await vi.waitFor(() => expect(updater.state).toMatchObject({ phase: 'ready', progress: 100 }));
   await checking; await expect(updater.install()).rejects.toMatchObject({ code: 'UPDATE_BLOCKED' });

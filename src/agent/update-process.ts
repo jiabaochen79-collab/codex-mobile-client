@@ -3,9 +3,13 @@ import { readFileSync, readlinkSync } from 'node:fs';
 import { basename } from 'node:path';
 import { promisify } from 'node:util';
 
-export type UpdateProcess = { pid: number; name: string; path: string; startedAt: string };
-export async function updateProcesses(ids: number[] = []): Promise<UpdateProcess[]> {
+export type UpdateProcess = { pid: number; name: string; path: string; startedAt: string; parentPid?: number };
+export async function updateProcesses(ids: number[] = [], nativeExe = process.env.NATIVE_EXE): Promise<UpdateProcess[]> {
   if (process.platform === 'win32') {
+    if (nativeExe) {
+      const { stdout } = await promisify(execFile)(nativeExe, ['--update-processes', ids.join(',')], { windowsHide: true, timeout: 10000, maxBuffer: 1024 * 1024 });
+      return JSON.parse(stdout);
+    }
     const filter = ids.length ? ` -Filter '${ids.map(id => `ProcessId=${id}`).join(' OR ')}'` : '';
     const command = `$ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process${filter} | ForEach-Object { @{pid=[int]$_.ProcessId;name=[string]$_.Name;path=[string]$_.ExecutablePath;startedAt=$(if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')} else {''})} }) | ConvertTo-Json -Compress`;
     const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024 });

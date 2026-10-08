@@ -54,8 +54,9 @@ It does **not** contain the relay server, administrator console, payment impleme
 ### Windows integration
 
 - Preserve the local device identity and remembered authorization during an upgrade.
-- Check and download signed release metadata when the separately operated service provides it.
+- Read update metadata from the service over HTTPS and download only the new installer, verifying its size and SHA-256. Publishing requires only the EXE.
 - Install a prepared update only after the user confirms; Codex and active desktop tasks are not intentionally stopped by an assistant update.
+- Back up the installed program locally before updating and restore that verified copy on failure; user data is not rolled back. Older updaters need one manual upgrade to 0.4.48 first.
 - Report helper version and compatibility capabilities to the mobile interface.
 
 ### Service access and support

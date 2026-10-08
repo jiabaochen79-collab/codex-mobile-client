@@ -12,34 +12,35 @@ const catalog = ref<Catalog>(); const subscription = ref<Subscription>();
 watch(() => subscription.value?.disabled, disabled => { if (disabled) { ordersOpen.value = false; purchasePlan.value = undefined; } }, { flush: 'sync' });
 const trial = ref<TrialEligibility>(); const trialRequest = crypto.randomUUID();
 async function claimTrial() {
-  if (!accepted.value || !trial.value?.available || !catalog.value) return; busy.value = true; error.value = '';
+  if (busy.value || !accepted.value || !trial.value?.available || !catalog.value) return; loadRevision++; reading.value = false; busy.value = true; error.value = '';
   try { const result = await api(props.mode === 'desktop' ? '/local/trial' : '/api/subscription/trial', { requestId: trialRequest, termsVersion: catalog.value.termsVersion }); subscription.value = result.subscription; trial.value = result.trial; emit('changed', result.subscription); }
   catch (e: any) { error.value = e.message; } finally { busy.value = false; }
 }
 const code = ref(''); const accepted = ref(false); const showCode = ref(false); const busy = ref(false); const error = ref(''); const success = ref(false);
-const readError = ref('');
+const readError = ref(''); const reading = ref(false);
 watch(code, () => { error.value = ''; success.value = false; }, { flush: 'sync' });
 let loadRevision = 0;
 let polling: ReturnType<typeof setInterval> | undefined; let disposed = false;
 const valid = computed(() => accepted.value && licenseCodeSchema.safeParse(code.value).success && !!catalog.value);
 const expiry = computed(() => subscription.value?.expiresAt ? new Date(subscription.value.expiresAt).toLocaleString('zh-CN', { hour12: false }) : null);
 async function load() {
+  if (disposed || busy.value) return;
   const revision = ++loadRevision;
-  busy.value = true; readError.value = '';
+  reading.value = true; readError.value = '';
   try {
     if (props.mode === 'guest') { const result = await api('/api/plans'); if (revision === loadRevision) catalog.value = result; }
     else { const result = await api(props.mode === 'desktop' ? '/local/subscription' : '/api/subscription'); if (revision === loadRevision) { catalog.value = result.catalog; subscription.value = result.subscription; trial.value = result.trial; } }
-  } catch (e: any) { if (revision === loadRevision) readError.value = e.message; } finally { if (revision === loadRevision) busy.value = false; }
+  } catch (e: any) { if (revision === loadRevision) readError.value = e.message; } finally { if (revision === loadRevision) reading.value = false; }
 }
 async function activate() {
-  if (!valid.value || busy.value) return; busy.value = true; error.value = ''; success.value = false;
+  if (!valid.value || busy.value) return; loadRevision++; reading.value = false; busy.value = true; error.value = ''; success.value = false;
   try {
     const submitted = code.value;
     const result = await api(props.mode === 'desktop' ? '/local/license' : '/api/subscription/redeem', { code: submitted.trim(), termsVersion: catalog.value!.termsVersion });
     catalog.value = result.catalog; subscription.value = result.subscription; trial.value = result.trial; if (code.value === submitted) code.value = ''; accepted.value = false; success.value = true; emit('changed', result.subscription);
   } catch (e: any) { error.value = e.message; } finally { busy.value = false; }
 }
-function refreshEligibility() { if (!disposed && !busy.value && !ordersOpen.value && document.visibilityState === 'visible') void load(); }
+function refreshEligibility() { if (!disposed && !busy.value && !reading.value && !ordersOpen.value && document.visibilityState === 'visible') void load(); }
 onMounted(() => { void load(); polling = setInterval(refreshEligibility, 15000); document.addEventListener('visibilitychange', refreshEligibility); window.addEventListener('online', refreshEligibility); });
 onUnmounted(() => { disposed = true; loadRevision++; clearInterval(polling); document.removeEventListener('visibilitychange', refreshEligibility); window.removeEventListener('online', refreshEligibility); });
 </script>
@@ -50,7 +51,7 @@ onUnmounted(() => { disposed = true; loadRevision++; clearInterval(polling); doc
       <div v-if="subscription" class="subscription-current"><strong :class="subscription.access ? 'good' : 'warning'">{{ subscriptionLabel(subscription) }}</strong><span v-if="expiry">有效至 {{ expiry }}</span></div>
       <div v-if="subscription?.disabled" class="subscription-disabled" role="alert"><strong>该设备已被管理员封禁</strong><p>远程功能、购买、试用、授权码、更新和问题反馈均已禁用，请联系运营方处理。</p><span v-if="catalog?.supportContact">联系方式：{{ catalog.supportContact }}</span></div>
       <div v-if="!subscription?.disabled && mode !== 'guest' && trial && !trial.used" class="trial-offer"><p v-if="trial.reason" class="small muted">{{ trial.reason }}</p><label v-if="trial.available" class="trial-accept"><input v-model="accepted" type="checkbox">我已阅读并同意服务与隐私说明</label><button class="button primary" :disabled="busy || !accepted || !trial.available" @click="claimTrial"><Check :size="17"/>免费试用七天</button></div>
-      <div v-if="busy && !catalog" class="subscription-loading" role="status"><RefreshCw class="spin" :size="20"/>正在读取</div>
+      <div v-if="reading && !catalog" class="subscription-loading" role="status"><RefreshCw class="spin" :size="20"/>正在读取</div>
       <template v-if="catalog && !subscription?.disabled">
         <p v-if="!catalog.salesOpen" class="muted small sales-state">购买暂未开放</p>
         <form v-if="mode !== 'guest'" class="license-form" @submit.prevent="activate"><label for="license-code">授权码</label><div class="password-field"><input id="license-code" v-model="code" :type="showCode ? 'text' : 'password'" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" class="large-input license-input"><button type="button" class="icon-button" :title="showCode ? '隐藏授权码' : '显示授权码'" @click="showCode = !showCode"><EyeOff v-if="showCode" :size="18"/><Eye v-else :size="18"/></button></div><label class="terms-accept"><input v-model="accepted" type="checkbox">我已阅读并同意上述服务与隐私说明</label><button class="button primary" :disabled="busy || !valid"><RefreshCw v-if="busy" class="spin" :size="17"/><KeyRound v-else :size="17"/>激活授权</button></form>

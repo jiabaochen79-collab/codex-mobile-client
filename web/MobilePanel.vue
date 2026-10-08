@@ -533,7 +533,7 @@ function showConversation(conversation: Conversation, activate = false) {
   invalidateMode();
   queuedMessages.value = []; sendMenu.value = false;
   if(selected.value)drafts.set(selected.value.id,draft.value);
-  selected.value = conversation; drawer.value = false; moreMenu.value = false; snapshot.value = null; readError.value = ''; error.value = ''; limit.value = 100; draft.value = drafts.get(conversation.id)??''; chatScroll.reset();
+  selected.value = conversation; drawer.value = false; moreMenu.value = false; snapshot.value = null; readError.value = ''; error.value = ''; limit.value = 100; draft.value = drafts.get(conversation.id) ?? pendingSends[conversation.id]?.text ?? ''; chatScroll.reset();
   if (pendingSends[conversation.id]) attachments.restore(conversation.id, pendingSends[conversation.id].attachments);
 }
 function resetReadRecovery() { clearTimeout(readRetry); readRetry = undefined; readFailures = 0; readRecovering.value = false; }
@@ -563,7 +563,7 @@ async function read(activate = false) {
       }
       if (!previous.length || !next.hasMore) { historyCursor = next.historyCursor; historyMore = next.hasMore; if (!next.hasMore) { historyGaps = []; imageRefresh = undefined; } }
       else if (next.hasMore && next.historyCursor && next.messages.length && !next.messages.some((message: Message) => previous.some(old => old.id === message.id)) && !historyGaps.includes(next.historyCursor)) historyGaps.push(next.historyCursor);
-      next.messages = mergeMessages(previous, next.messages, !next.hasMore); next.hasMore = historyMore || historyGaps.length > 0;
+      next.messages = mergeMessages(previous, next.messages, !next.hasMore, true); next.hasMore = historyMore || historyGaps.length > 0;
     } snapshot.value = next; queuedMessages.value = next.queued ?? []; }, initial ? 'bottom' : 'auto'); if (!modeChanging.value && cycle === modeSyncCycle) { modeSynced.value = !!snapshot.value?.settings?.mode; taskSynced.value = true; } if (historyGaps.length && !historyError.value) void loadHistory(); void refreshHistoryImages(); void markSeen(); void reconcileSends(); } }
   catch (e: any) {
     if (selected.value?.id !== id || cycle !== modeSyncCycle) return;
@@ -588,8 +588,13 @@ async function read(activate = false) {
     }
   } finally { reading = false; if (dirty) { dirty = false; void read(); } }
 }
-function mergeMessages(previous: Message[], incoming: Message[], complete = false) {
+function mergeMessages(previous: Message[], incoming: Message[], complete = false, tail = false) {
   if (complete) return incoming;
+  if (tail) {
+    const incomingIds = new Set(incoming.map(message => message.id));
+    const boundary = previous.findIndex(message => incomingIds.has(message.id));
+    if (boundary >= 0) return previous.slice(0, boundary).concat(incoming);
+  }
   const updates = new Map(incoming.map(message => [message.id, message]));
   const ids = new Set(previous.map(message => message.id));
   return previous.map(message => updates.get(message.id) ?? message).concat(incoming.filter(message => !ids.has(message.id)));
@@ -670,6 +675,7 @@ function clearPendingSend(id: string, attempt: PendingSend, outcome: 'succeeded'
 function syncPendingSend(event: StorageEvent) {
   const prefix = `pending-send:${props.deviceId}:`; if (!event.key?.startsWith(prefix)) return;
   const id = event.key.slice(prefix.length); if (!/^[a-f0-9-]{36}$/.test(id)) return;
+  if (event.newValue === null) { delete pendingSends[id]; return; }
   const saved = storedPendingSend(event.newValue);
   if (saved) { pendingSends[id] = saved; return; }
   try {
@@ -685,7 +691,7 @@ function settleSend(id: string, attempt: PendingSend, failure?: { message: strin
     if (selected.value?.id === id && draft.value === attempt.text) draft.value = '';
     if (drafts.get(id) === attempt.text) drafts.delete(id);
     attachments.clear(id);
-  } else if (selected.value?.id === id) error.value = failure.message;
+  } else { recoverPendingDraft(id, attempt); if (selected.value?.id === id) error.value = failure.message; }
   clearPendingSend(id, attempt, failure ? 'failed' : 'succeeded');
   const awaiting = pending.get(attempt.requestId);
   if (awaiting) { pending.delete(attempt.requestId); clearTimeout(awaiting.timer); if (failure) awaiting.reject(Object.assign(new Error(failure.message), { code: 'SEND_REJECTED' })); else awaiting.resolve({ accepted: true }); }
@@ -701,9 +707,15 @@ async function reconcileSends() {
     }
   } catch {} finally { checkingSend.value = false; }
 }
+function recoverPendingDraft(id: string, attempt: PendingSend) {
+  if (selected.value?.id === id && !draft.value) draft.value = attempt.text;
+  if (!drafts.get(id)) drafts.set(id, attempt.text);
+  attachments.restore(id, attempt.attachments);
+}
 function keepUnconfirmedDraft() {
   const id = selected.value?.id;
   if (!id || busy.value || !pendingSends[id] || !confirm('请先核对电脑端及待发送队列。保留为草稿后再次发送，可能重复执行；确定已完成核对？')) return;
+  recoverPendingDraft(id, pendingSends[id]);
   clearPendingSend(id, pendingSends[id], 'released');
 }
 async function perform(command: Command) {
@@ -813,6 +825,7 @@ function clearNavigation(preserveDrafts = false) {
   readError.value = ''; navigationError.value = ''; searchError.value = '';
   pendingActivations.clear(); activateSelected = false;
   if (!preserveDrafts) {
+    try { for (let index = localStorage.length - 1; index >= 0; index--) { const key = localStorage.key(index); if (key?.startsWith(`pending-send:${props.deviceId}:`)) localStorage.removeItem(key); } } catch {}
     for (const id of Object.keys(pendingSends)) delete pendingSends[id];
     pendingCreate.value = undefined;
     try { sessionStorage.removeItem('pending-sends:' + props.deviceId); sessionStorage.removeItem('chat-drafts:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); localStorage.removeItem('pending-sends:' + props.deviceId); localStorage.removeItem('pending-create:' + props.deviceId); } catch {}

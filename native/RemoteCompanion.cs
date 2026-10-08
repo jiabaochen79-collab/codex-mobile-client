@@ -36,6 +36,18 @@ internal static class Program {
     private static int Main(string[] args) {
         try {
             if (args.Length > 0 && args[0] == "--version") { Console.Write(HelperVersion); return 0; }
+            if (args.Length == 2 && args[0] == "--update-processes") { UpdateProcesses(args[1]); return 0; }
+            if (args.Length == 4 && args[0] == "--update-stop") { StopUpdateHelper(args[1], args[2], args[3]); return 0; }
+            if (args.Length == 3 && args[0] == "--update-registration") {
+                var package = Json.Deserialize<Dictionary<string, object>>(File.ReadAllText(Path.Combine(args[1], "package.json")));
+                if (!Regex.IsMatch(args[2], @"^\d+\.\d+\.\d+$") || Convert.ToString(package["name"]) != "codex-mobile" || Convert.ToString(package["version"]) != args[2]) throw new InvalidOperationException("Restored package identity changed");
+                bool changed = false;
+                using (var registry = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.CurrentUser, Microsoft.Win32.RegistryView.Registry64))
+                using (var key = registry.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{B98F4E8B-9CF9-4C68-9718-376041F08A25}_is1", true)) {
+                    if (key != null && String.Equals(Path.GetFullPath(Convert.ToString(key.GetValue("InstallLocation"))).TrimEnd('\\'), Path.GetFullPath(args[1]).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) { key.SetValue("DisplayVersion", args[2]); changed = true; }
+                }
+                Console.Write(Json.Serialize(new { changed = changed })); return 0;
+            }
             if (args.Length > 0 && args[0] == "--computer-id") {
                 using (var key = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64).OpenSubKey(@"SOFTWARE\Microsoft\Cryptography")) {
                     var value = key == null ? "" : Convert.ToString(key.GetValue("MachineGuid")); Guid parsed;
@@ -81,6 +93,52 @@ internal static class Program {
             if (args.Length > 0) { Console.Error.WriteLine(e.GetType().Name + (args[0] == "--discover" ? ": " + e.Message : "")); return 1; }
             MessageBox.Show("助手未能启动：" + e.Message, ProductName, MessageBoxButtons.OK, MessageBoxIcon.Error); return 1;
         }
+    }
+    private static string ProcessCreated(ManagementObject process) { return ManagementDateTimeConverter.ToDateTime(Convert.ToString(process["CreationDate"])).ToUniversalTime().ToString("o"); }
+    private static bool OwnProcess(ManagementObject process) {
+        var owner = process.InvokeMethod("GetOwnerSid", null, null);
+        return owner != null && Convert.ToString(owner["Sid"]) == WindowsIdentity.GetCurrent().User.Value && Convert.ToInt32(process["SessionId"]) == Process.GetCurrentProcess().SessionId;
+    }
+    private static void UpdateProcesses(string ids) {
+        if (!Regex.IsMatch(ids, @"^(\d+(,\d+)*)?$")) throw new ArgumentException("Invalid process IDs");
+        var filter = " WHERE SessionId=" + Process.GetCurrentProcess().SessionId;
+        if (ids.Length > 0) filter += " AND (" + String.Join(" OR ", ids.Split(',').Select(id => "ProcessId=" + Int32.Parse(id))) + ")";
+        var rows = new List<object>();
+        using (var query = new ManagementObjectSearcher("SELECT * FROM Win32_Process" + filter)) {
+            foreach (ManagementObject process in query.Get()) {
+                try {
+                    if (!OwnProcess(process)) continue;
+                    rows.Add(new { pid = Convert.ToInt32(process["ProcessId"]), name = Convert.ToString(process["Name"]), path = Convert.ToString(process["ExecutablePath"]), startedAt = ProcessCreated(process), parentPid = Convert.ToInt32(process["ParentProcessId"]) });
+                } catch (ManagementException e) { if (e.ErrorCode != ManagementStatus.NotFound) throw; }
+            }
+        }
+        Console.Write(Json.Serialize(rows));
+    }
+    private static void StopUpdateHelper(string pidText, string startedAt, string path) {
+        int pid; if (!Int32.TryParse(pidText, out pid) || pid <= 0 || Path.GetFileName(path) != "RemoteCompanion.exe") throw new ArgumentException("Invalid helper identity");
+        using (var process = Process.GetProcessById(pid))
+        using (var row = new ManagementObject("Win32_Process.Handle='" + pid + "'")) {
+            row.Get();
+            var command = Convert.ToString(row["CommandLine"]);
+            if (!OwnProcess(row) || ProcessCreated(row) != startedAt || !String.Equals(Path.GetFullPath(Convert.ToString(row["ExecutablePath"])), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase) || (command.Contains(" --") && !command.Contains(" --update-health "))) throw new InvalidOperationException("Helper identity changed");
+            var nodes = new List<Tuple<int, string>>();
+            using (var children = new ManagementObjectSearcher("SELECT * FROM Win32_Process WHERE ParentProcessId=" + pid + " AND Name='node.exe'")) {
+                foreach (ManagementObject child in children.Get()) if (OwnProcess(child) && String.Equals(Path.GetFullPath(Convert.ToString(child["ExecutablePath"])), Path.GetFullPath(Path.Combine(Path.GetDirectoryName(path), "node.exe")), StringComparison.OrdinalIgnoreCase)) nodes.Add(Tuple.Create(Convert.ToInt32(child["ProcessId"]), ProcessCreated(child)));
+            }
+            try { using (var signal = EventWaitHandle.OpenExisting("Local\\CodexMobileCompanion.UpdateExit." + pid)) signal.Set(); }
+            catch (WaitHandleCannotBeOpenedException) { try { using (var signal = EventWaitHandle.OpenExisting("Local\\CodexMobileCompanion.Exit")) signal.Set(); } catch (WaitHandleCannotBeOpenedException) { } }
+            if (!process.WaitForExit(15000)) { process.Kill(); if (!process.WaitForExit(5000)) throw new InvalidOperationException("Helper did not exit"); }
+            foreach (var node in nodes) {
+                try {
+                    using (var child = Process.GetProcessById(node.Item1)) {
+                        if (child.WaitForExit(5000)) continue;
+                        using (var current = new ManagementObject("Win32_Process.Handle='" + node.Item1 + "'")) { current.Get(); if (!OwnProcess(current) || ProcessCreated(current) != node.Item2 || !String.Equals(Path.GetFullPath(Convert.ToString(current["ExecutablePath"])), Path.GetFullPath(Path.Combine(Path.GetDirectoryName(path), "node.exe")), StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Connection identity changed"); }
+                        child.Kill(); if (!child.WaitForExit(5000)) throw new InvalidOperationException("Connection did not exit");
+                    }
+                } catch (ArgumentException) { }
+            }
+        }
+        Console.Write("{\"stopped\":true}");
     }
     private static void Discover() {
         int session = Process.GetCurrentProcess().SessionId;
@@ -196,6 +254,8 @@ internal sealed class CompanionForm : Form {
     private readonly EventWaitHandle closeSignal;
     private RegisteredWaitHandle showRegistration;
     private RegisteredWaitHandle closeRegistration;
+    private EventWaitHandle updateExitSignal;
+    private RegisteredWaitHandle updateExitRegistration;
 
     internal CompanionForm(EventWaitHandle showSignal) : this(showSignal, null) { }
     internal CompanionForm(EventWaitHandle showSignal, EventWaitHandle closeSignal) {
@@ -275,7 +335,7 @@ internal sealed class CompanionForm : Form {
         tray.Icon = Icon; tray.Text = Program.ProductName; tray.Visible = true; tray.DoubleClick += (s, e) => ShowWindow();
         var trayMenu = new ContextMenuStrip(); trayMenu.Items.Add("打开", null, (s, e) => ShowWindow()); updateMenu = new ToolStripMenuItem("检查更新", LoadImage("refresh"), async (s, e) => await CheckForUpdate()); trayMenu.Items.Add(updateMenu); trayFeedbackMenu = new ToolStripMenuItem("问题反馈", LoadImage("feedback"), (s, e) => OpenPanel("feedback")); trayMenu.Items.Add(trayFeedbackMenu); trayMenu.Items.Add("退出助手", null, (s, e) => { exiting = true; Close(); }); tray.ContextMenuStrip = trayMenu;
         FormClosing += (s, e) => { if (!exiting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
-        FormClosed += (s, e) => { exiting = true; if (showRegistration != null) showRegistration.Unregister(null); if (closeRegistration != null) closeRegistration.Unregister(null); timer.Stop(); updateAnimationTimer.Stop(); tray.Visible = false; tray.Dispose(); StopAgent(); http.Dispose(); tooltips.Dispose(); if (updateButtonImage != null) updateButtonImage.Dispose(); foreach (var image in images.Values) image.Dispose(); };
+        FormClosed += (s, e) => { exiting = true; if (showRegistration != null) showRegistration.Unregister(null); if (closeRegistration != null) closeRegistration.Unregister(null); if (updateExitRegistration != null) updateExitRegistration.Unregister(null); if (updateExitSignal != null) updateExitSignal.Dispose(); timer.Stop(); updateAnimationTimer.Stop(); tray.Visible = false; tray.Dispose(); StopAgent(); http.Dispose(); tooltips.Dispose(); if (updateButtonImage != null) updateButtonImage.Dispose(); foreach (var image in images.Values) image.Dispose(); };
         Shown += async (s, e) => { RefreshPowerSettings(); timer.Start(); await Poll(); };
         Activated += (s, e) => RefreshPowerSettings();
         powerTimer.Interval = 60000; powerTimer.Tick += (s, e) => RefreshPowerSettings(); powerTimer.Start();
@@ -335,6 +395,10 @@ internal sealed class CompanionForm : Form {
     protected override void OnHandleCreated(EventArgs e) {
         base.OnHandleCreated(e);
         if (showRegistration != null) return;
+        updateExitSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\CodexMobileCompanion.UpdateExit." + Process.GetCurrentProcess().Id);
+        updateExitRegistration = ThreadPool.RegisterWaitForSingleObject(updateExitSignal, (state, timedOut) => {
+            try { if (!IsDisposed && !Disposing) BeginInvoke((Action)ExitForInstall); } catch (InvalidOperationException) { }
+        }, null, Timeout.Infinite, false);
         // AutoReset retains an early second-launch signal until the UI handle exists.
         showRegistration = ThreadPool.RegisterWaitForSingleObject(showSignal, (state, timedOut) => {
             try { if (!IsDisposed && !Disposing) BeginInvoke((Action)ShowWindow); }

@@ -13,7 +13,8 @@ function inspect(path, content) {
   if (secret.test(text)) throw new Error(`Potential credential in ${path}; value withheld.`);
   if (/\.(?:ts|js|cjs|mjs|vue)$/.test(path) && relayImport.test(text)) throw new Error(`Server import in ${path}`);
 }
-for (const path of git(['ls-files', '-z', '--cached', '--others', '--exclude-standard']).toString('utf8').split('\0').filter(Boolean)) {
+const deleted = new Set(git(['ls-files', '-z', '--deleted']).toString('utf8').split('\0').filter(Boolean));
+for (const path of git(['ls-files', '-z', '--cached', '--others', '--exclude-standard']).toString('utf8').split('\0').filter(path => path && !deleted.has(path))) {
   inspect(path, readFileSync(path));
 }
 const revisions = git(['rev-list', '--all']).toString('utf8').trim().split('\n').filter(Boolean);

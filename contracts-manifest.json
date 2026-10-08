@@ -1,15 +1,14 @@
 {
   "schemaVersion": 1,
   "source": "codex-mobile-contracts",
-  "sourceRevision": "077c401cfebdd4bc453d52a7de269bc5753141cb",
+  "sourceRevision": "0bec9a3ff04fa0b74af42f067af3d2f58008ff80",
   "files": [
     "commerce.ts",
     "feedback.ts",
     "notifications.ts",
     "paired-devices.ts",
     "protocol.ts",
-    "release-public-key.ts",
-    "release-signature.ts",
+    "release-metadata.ts",
     "security.ts",
     "session.ts",
     "subscription.ts",

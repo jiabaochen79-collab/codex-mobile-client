@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { generateKeyPairSync, sign, createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { copyFileSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { Writable } from 'node:stream';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -14,16 +14,14 @@ vi.mock('node:fs', async importOriginal => { const fs = await importOriginal<typ
 describe('helper updater', () => {
   const directories: string[] = [];
   const updaters: HelperUpdater[] = [];
-  const keys = generateKeyPairSync('ed25519');
-  const release = (version: string, sequence: number, bytes = Buffer.from(version)) => {
+const release = (version: string, sequence: number, bytes = Buffer.from(version)) => {
     const sha256 = createHash('sha256').update(bytes).digest('hex');
-    const payload = Buffer.from(JSON.stringify({ version, sequence, platform: 'win32-x64', size: bytes.length, sha256, path: '/api/updates/download/' + sha256, notes: version, issuedAt: Date.now() }));
-    return { payload: payload.toString('base64'), signature: sign(null, payload, keys.privateKey).toString('base64') };
+    return { version, sequence, platform: 'win32-x64', size: bytes.length, sha256, path: '/api/updates/download/' + sha256, notes: version, issuedAt: Date.now() };
   };
   const fixture = (request: (path: string, init?: RequestInit) => Promise<Response>, options: Partial<Pick<ConstructorParameters<typeof HelperUpdater>[0], 'blockers' | 'freeze'>> = {}) => {
     const dir = mkdtempSync(join(process.cwd(), '.runtime-updater-test-')); directories.push(dir);
     const stored = new Map<string, string>();
-    const updater = new HelperUpdater({ dir, root: dir, version: '0.4.16', store: { get: (key: string) => stored.get(key) ?? null, set: (key: string, value: string) => stored.set(key, value) } as any, request, blockers: async () => [], freeze: () => {}, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), ...options });
+    const updater = new HelperUpdater({ dir, root: dir, version: '0.4.16', store: { get: (key: string) => stored.get(key) ?? null, set: (key: string, value: string) => stored.set(key, value) } as any, request, blockers: async () => [], freeze: () => {}, ...options });
     updaters.push(updater); return updater;
   };
   const latest = () => Response.json({ current: null, release: null });
@@ -52,7 +50,7 @@ describe('helper updater', () => {
       let timer: ReturnType<typeof setTimeout>;
       return new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes); timer = setTimeout(() => controller.close(), 30); }, cancel() { clearTimeout(timer); } }), { headers: { 'content-length': String(bytes.length) } });
     });
-    const updater = fixture(request); const sha = JSON.parse(Buffer.from(previous.payload, 'base64').toString()).sha256;
+    const updater = fixture(request); const sha = previous.sha256;
     writeFileSync(join(directories.at(-1)!, 'updates', sha + '.exe'), '0.4.16');
     const output = new Writable({ highWaterMark, write(_chunk, _encoding, callback) { setTimeout(() => callback(Object.assign(new Error('disk full'), { code: 'ENOSPC' })), 5); } });
     vi.mocked(createWriteStream).mockImplementationOnce(() => output as ReturnType<typeof createWriteStream>);
@@ -74,17 +72,18 @@ describe('helper updater', () => {
     await checking;
     expect(request).toHaveBeenCalledTimes(1); expect(updater.state.phase).toBe('idle'); expect(updater.state.message).toBe('下载已暂停');
   });
-  it('prunes superseded packages and partials while preserving rollback and unrelated files', async () => {
+  it('prunes superseded packages and partials without retaining old installers', async () => {
     let candidate = release('0.4.17', 17); const previous = release('0.4.16', 16);
     const updater = fixture(async path => path.includes('/check?') ? Response.json({ current: previous, release: candidate }) : Response.json({}));
     updater.setting(false); const dir = join(directories.at(-1)!, 'updates');
-    const save = (envelope: ReturnType<typeof release>, suffix = '') => { const m = JSON.parse(Buffer.from(envelope.payload, 'base64').toString()); const name = m.sha256 + '.exe' + suffix; writeFileSync(join(dir, name), m.version); return name; };
+    const save = (envelope: ReturnType<typeof release>, suffix = '') => { const m = envelope; const name = m.sha256 + '.exe' + suffix; writeFileSync(join(dir, name), m.version); return name; };
     const rollback = save(previous); let retained = save(candidate);
     writeFileSync(join(dir, 'user-notes.txt'), 'keep'); mkdirSync(join(dir, 'runner'));
     for (const version of [18, 19, 20]) {
       const old = retained; save(candidate, '.part'); candidate = release('0.4.' + version, version); retained = save(candidate);
       await updater.check(); expect(existsSync(join(dir, old))).toBe(false); expect(existsSync(join(dir, old + '.part'))).toBe(false);
-      expect(readdirSync(dir).filter(name => name.endsWith('.exe')).sort()).toEqual([rollback, retained].sort());
+      expect(readdirSync(dir).filter(name => name.endsWith('.exe')).sort()).toEqual([retained]);
+      expect(existsSync(join(dir, rollback))).toBe(false);
       expect(readFileSync(join(dir, 'user-notes.txt'), 'utf8')).toBe('keep');
     }
   });
@@ -92,7 +91,7 @@ describe('helper updater', () => {
     const previous = release('0.4.16', 16), candidate = release('0.4.18', 18), active = release('0.4.17', 17);
     const updater = fixture(async () => Response.json({ current: previous, release: candidate })); updater.setting(false);
     const dir = join(directories.at(-1)!, 'updates'); mkdirSync(join(dir, 'runner'));
-    const sha = JSON.parse(Buffer.from(active.payload, 'base64').toString()).sha256; writeFileSync(join(dir, sha + '.exe'), 'active');
+    const sha = active.sha256; writeFileSync(join(dir, sha + '.exe'), 'active');
     writeFileSync(join(dir, 'runner/job.json'), JSON.stringify({ previous, next: active, version: '0.4.17' }));
     await updater.check(); expect(existsSync(join(dir, sha + '.exe'))).toBe(true);
     writeFileSync(join(dir, 'runner/job.json'), 'invalid'); await updater.check(); expect(existsSync(join(dir, sha + '.exe'))).toBe(true);
@@ -107,7 +106,7 @@ describe('helper updater', () => {
     const request = vi.fn(async (path: string) => path.startsWith('/api/updates/device/check') ? Response.json({ current: previous, release: candidate }) : Response.json({}));
     const updater = fixture(request, { blockers, freeze }); const dir = directories.at(-1)!;
     for (const envelope of [previous, candidate]) {
-      const manifest = JSON.parse(Buffer.from(envelope.payload, 'base64').toString());
+      const manifest = envelope;
       writeFileSync(join(dir, 'updates', manifest.sha256 + '.exe'), manifest.version);
     }
     await updater.check(); expect(updater.state.phase).toBe('ready'); request.mockClear();
@@ -137,7 +136,7 @@ describe('helper updater', () => {
     const first = updater.install(); const second = updater.install().then(() => 'accepted', error => error.code);
     resume([]); await expect(first).resolves.toEqual({ accepted: true });
     expect(await second).toBe('UPDATE_NOT_READY');
-    expect(spawn).toHaveBeenCalledTimes(1); expect(copyFileSync).toHaveBeenCalledTimes(2);
+    expect(spawn).toHaveBeenCalledTimes(1); expect(copyFileSync).toHaveBeenCalledTimes(3);
     expect(freeze).toHaveBeenCalledExactlyOnceWith(true);
     expect(JSON.parse(readFileSync(join(dir, 'updates/runner/job.json'), 'utf8'))).toMatchObject({ root: dir, dataDir: dir });
   });
@@ -219,7 +218,7 @@ describe('helper updater', () => {
     const request = vi.fn().mockRejectedValueOnce(new TypeError('fetch failed')).mockImplementation(() => new Promise<Response>(resolve => { finish = resolve; }));
     const updater = fixture(request); updater.start();
     writeFileSync(join(directories.at(-1)!, 'updates/result.json'), JSON.stringify({ phase: 'rolled_back', version: '0.4.17', at: Date.now() }));
-    await vi.advanceTimersByTimeAsync(2000); expect(request).toHaveBeenCalledTimes(1); expect(updater.state.message).toContain('已恢复上一版本');
+    await vi.advanceTimersByTimeAsync(2000); expect(request).toHaveBeenCalledTimes(1); expect(updater.state.message).toContain('从本机备份恢复上一版本');
     await vi.advanceTimersByTimeAsync(2000); expect(request).toHaveBeenCalledTimes(2);
     const connection = updater.reportPrevious(); await vi.advanceTimersByTimeAsync(2000);
     const calls = request.mock.calls.length; finish(Response.json({})); await connection;
@@ -269,7 +268,7 @@ describe('helper updater', () => {
     expect(request).toHaveBeenCalledTimes(7);
   });
 
-  it('does not report latest or blame the network for an invalid release signature', async () => {
+  it('does not report latest or blame the network for an invalid release metadata', async () => {
     const updater = fixture(async () => Response.json({ current: null, release: { payload: 'e30=', signature: 'AA==' } }));
     await updater.check();
     expect(updater.state.phase).toBe('error');
@@ -284,7 +283,7 @@ describe('helper updater', () => {
     expect(updater.state.checkedAt).toBeNull();
   });
 
-  it.each(['0.4.15', '0.4.16'])('still rejects a signed replay of version %s', async version => {
+  it.each(['0.4.15', '0.4.16'])('still rejects a replay of version %s', async version => {
     const updater = fixture(async () => Response.json({ current: release('0.4.16', 16), release: release(version, 17) }));
     await updater.check();
     expect(updater.state.phase).toBe('error');
@@ -300,27 +299,30 @@ describe('helper updater', () => {
     expect(updater.state).toMatchObject({ phase: 'idle', message: '已是最新版本', version: undefined, notes: '', progress: 0 });
   });
 
-  it('identifies a missing rollback package without blaming the disk or network', async () => {
-    const updater = fixture(async () => Response.json({ current: null, release: release('0.4.17', 17) }));
+  it('downloads only the candidate when no old release exists on the server', async () => {
+    const candidate = release('0.4.17', 17);
+    const sha = candidate.sha256;
+    const request = vi.fn(async (path: string) => path.includes('/check?') ? Response.json({ current: null, rollback: null, release: candidate }) : path.endsWith(sha) ? new Response('0.4.17', { headers: { 'content-length': '6' } }) : Response.json({}));
+    const updater = fixture(request);
     await updater.check();
-    expect(updater.state.phase).toBe('error');
-    expect(updater.state.message).toContain('恢复包');
-    expect(updater.state.message).not.toMatch(/网络|磁盘/);
+    expect(updater.state).toMatchObject({ phase: 'ready', progress: 100 });
+    expect(request.mock.calls.filter(([path]) => path.startsWith('/api/updates/download/')).map(([path]) => path)).toEqual(['/api/updates/download/' + sha]);
   });
-  it('upgrades a withdrawn installed build using an approved older rollback', async () => {
+  it('uses the installed program version rather than a server rollback package', async () => {
     const rollback=release('0.4.15',15),candidate=release('0.4.17',17);
     const updater=fixture(async path=>path.startsWith('/api/updates/device/check') ? Response.json({current:null,rollback,release:candidate}) : Response.json({}));
     const dir=directories.at(-1)!;
-    for(const envelope of [rollback,candidate]){const m=JSON.parse(Buffer.from(envelope.payload,'base64').toString());writeFileSync(join(dir,'updates',m.sha256+'.exe'),m.version);}
+    for(const m of [rollback,candidate]){writeFileSync(join(dir,'updates',m.sha256+'.exe'),m.version);}
     await updater.check();expect(updater.state.phase).toBe('ready');
     vi.mocked(spawn).mockImplementation(()=>{const child=Object.assign(new EventEmitter(),{unref:vi.fn()});queueMicrotask(()=>child.emit('spawn'));return child as unknown as ChildProcess;});
     await updater.install();
-    expect(JSON.parse(readFileSync(join(dir,'updates/runner/job.json'),'utf8')).previous).toEqual(rollback);
+    const job=JSON.parse(readFileSync(join(dir,'updates/runner/job.json'),'utf8'));
+    expect(job.currentVersion).toBe('0.4.16'); expect(job.previous).toBeUndefined();
   });
-  it.each(['forged','newer'])('rejects an unsafe %s rollback', async kind => {
+  it.each(['forged','newer'])('ignores unused legacy %s rollback metadata', async kind => {
     const rollback=kind==='newer'?release('0.4.17',17):{payload:'e30=',signature:'AA=='};
     const updater=fixture(async()=>Response.json({current:null,rollback,release:release('0.4.18',18)}));
-    await updater.check();expect(updater.state.phase).toBe('error');expect(spawn).not.toHaveBeenCalled();
+    updater.setting(false); await updater.check();expect(updater.state.phase).toBe('available');expect(spawn).not.toHaveBeenCalled();
   });
 
   it('identifies a download failure after a successful version check', async () => {
@@ -349,22 +351,19 @@ describe('helper updater', () => {
     expect(updater.state.message).toContain('检查更新');
   });
 
-  it('reports combined rollback and candidate progress while downloading', async () => {
+  it('reports candidate-only progress without downloading the old package', async () => {
     const dir = mkdtempSync(join(process.cwd(), '.runtime-updater-test-')); directories.push(dir);
-    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-    const makeRelease = (version: string, sequence: number, bytes: Buffer) => {
+const makeRelease = (version: string, sequence: number, bytes: Buffer) => {
       const sha256 = createHash('sha256').update(bytes).digest('hex');
       const manifest = { version, sequence, platform: 'win32-x64' as const, size: bytes.length, sha256, path: '/api/updates/download/' + sha256, notes: version, issuedAt: Date.now() };
-      const payload = Buffer.from(JSON.stringify(manifest));
-      return { payload: payload.toString('base64'), signature: sign(null, payload, privateKey).toString('base64') };
+      return manifest;
     };
     const previousBytes = Buffer.from('previous-release');
     const candidateBytes = Buffer.from('candidate-release');
     const previous = makeRelease('0.4.10', 10, previousBytes);
     const candidate = makeRelease('0.4.11', 11, candidateBytes);
     const paths = new Map([
-      ['/api/updates/download/' + JSON.parse(Buffer.from(previous.payload, 'base64').toString()).sha256, previousBytes],
-      ['/api/updates/download/' + JSON.parse(Buffer.from(candidate.payload, 'base64').toString()).sha256, candidateBytes]
+      ['/api/updates/download/' + candidate.sha256, candidateBytes]
     ]);
     const request = async (path: string, init?: RequestInit) => {
       if (path.startsWith('/api/updates/device/check')) return new Response(JSON.stringify({ current: previous, release: candidate }), { headers: { 'content-type': 'application/json' } });
@@ -382,8 +381,7 @@ describe('helper updater', () => {
     };
     const updater = new HelperUpdater({
       dir, root: dir, version: '0.4.10', store: { get: (key: string) => key === 'update:auto' ? 'false' : null, set: () => {} } as any,
-      request, blockers: async () => [], freeze: () => {}, publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString()
-    });
+      request, blockers: async () => [], freeze: () => {}, });
     await updater.check();
     expect(updater.state.phase).toBe('available');
     const downloading = updater.download();

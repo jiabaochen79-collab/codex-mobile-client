@@ -87,9 +87,12 @@ internal static class DesktopRecovery {
         string sid = WindowsIdentity.GetCurrent().User.Value;
         using (var query = new ManagementObjectSearcher("SELECT ProcessId,ExecutablePath,CommandLine,SessionId FROM Win32_Process WHERE Name='ChatGPT.exe' OR Name='Codex.exe'")) {
             foreach (ManagementObject record in query.Get()) {
+                try {
                 if (Convert.ToInt32(record["SessionId"]) != session || !Convert.ToString(record["ExecutablePath"]).Contains("OpenAI.Codex_") || Convert.ToString(record["CommandLine"]).Contains("--type=")) continue;
                 var owner = record.InvokeMethod("GetOwnerSid", null, null);
                 if (owner != null && Convert.ToString(owner["Sid"]) == sid) return true;
+                } catch (InvalidOperationException) { }
+                catch (ManagementException e) { if (e.ErrorCode != ManagementStatus.NotFound) throw; }
             }
         }
         return false;

@@ -1,6 +1,6 @@
 # Windows 安装版与电源提醒
 
-当前安装包版本：0.4.7。安装与电源策略沿用原实现；新版客户端检查见[桌面兼容说明](./desktop-compatibility.md)。
+当前安装包版本：0.4.47。安装与电源策略沿用原实现；新版客户端检查见[桌面兼容说明](./desktop-compatibility.md)。
 
 主界面品牌副标题显示“助手 v0.4.7”，Codex 版本仍在独立状态区域展示。安装包、EXE 文件属性与运行程序的版本统一从 `package.json` 生成，打包拒绝混入旧版程序。`RemoteCompanion.exe --version` 输出助手版本。窗口标题保持不变，重复启动仍拉起已有实例。
 
@@ -38,6 +38,16 @@
 - 阻止将程序安装进助手数据目录，避免程序与用户数据混放。不要只分发 `RemoteCompanion.exe`，应分发生成的 Setup EXE。
 - 目前没有代码签名证书，安装包不得被描述成已签名、已获 Microsoft/OpenAI 认证的商业安装程序。SHA-256 用于核对文件，不替代代码签名。
 
+## 在线更新与本机恢复
+
+0.4.47 起后台只需上传新版 EXE，服务器读取安装器内嵌版本、生成发布序号并校验大小和 SHA-256。管理员填写更新说明后，可以指定设备试发或正式发布；不再上传签名清单 JSON，也不再配置独立发布密钥。客户端通过 HTTPS 获取更新信息，保留下载路径、大小、SHA-256 和版本回放检查；更新信任依赖服务器及管理员权限，SHA-256 不代替发布签名或 Windows 代码签名。
+
+0.4.46 起不再要求服务器提供旧版本恢复包，也不下载旧版安装包。安装前在 `%LOCALAPPDATA%\CodexMobile\updates\program-backups` 备份当前程序，并校验文件清单、版本和 SHA-256；备份失败时不开始安装。
+
+安装失败或新版本机健康检查持续失败时，核验并退出助手及其连接进程，从本机备份恢复程序，再检查恢复版本。服务器暂时离线不触发回退。设备身份、密码、授权、订阅、排队消息和其他用户数据不参与程序恢复；Codex 和正在执行的桌面任务不被停止。恢复无法安全完成时保留备份，避免启动未核验的程序。
+
+旧版更新器中的强制恢复包检查和签名校验无法通过服务器发布新版消除。0.4.46 及更早版本需要先手动运行一次 0.4.47 安装包覆盖升级，无需卸载或删除数据。后续自动更新只下载新版 EXE，不必补传或下载旧版安装包。
+
 ## 重复构建
 
 需要 Windows x64、Node 22.13+、.NET Framework 4.8 和 Inno Setup。构建工具只需安装在开发环境，终端用户不需要安装 Inno Setup。
@@ -45,13 +55,13 @@
 ```sh
 npm run build
 npm run native
-node --import tsx deploy/tencent/package-windows.ts
+npm run package:windows
 npm run installer:windows -- --compiler "C:/path/to/Inno Setup/ISCC.exe"
 ```
 
 也可通过 `INNO_SETUP_COMPILER` 指定编译器，或用 `--package` 指向独立暂存的完整公网包。不要覆盖正在运行的便携版目录，先在暂存目录生成完整包。
 
-默认产物：`release/ChatGPT-Remote-Assistant-Setup-0.4.7.exe` 及同名 `.sha256`。安装源必须预置 HTTPS 服务器地址，防止把仅连接 localhost 的开发包发给用户。
+默认产物：`release/ChatGPT-Remote-Assistant-Setup-0.4.47.exe` 及同名 `.sha256`。SHA-256 文件只用于用户手动核对，不是后台发布必需文件。打包前通过 `RELAY_URL` 预置 HTTPS 服务器地址，防止把仅连接 localhost 的开发包发给用户。
 
 编译工具来源：Inno Setup 官方 `jrsoftware/issrc` 的 `is-7_1_0` 发布，文件 `innosetup-7.1.0-x64.exe`，SHA-256 为 `0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f`。官方随附许可允许商业使用；保留上游归属，不把安装引擎冒称为本项目原创。
 
