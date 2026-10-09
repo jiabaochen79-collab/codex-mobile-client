@@ -2,6 +2,15 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.49 - 2026-10-09
+
+### Fixed
+
+- Detect asynchronous desktop questions carried by agent messages, including questions outside the visible message page.
+- Submit option and custom answers using the native steering protocol; retain unanswered questions after rejection and clear them only after accepted replies or turn completion.
+- Keep pending question subscriptions and installation blockers, and render answer text without exposing native reply metadata.
+- Allow a complete Windows recovery process scan up to 30 seconds; keep targeted identity queries limited to 10 seconds.
+
 ## 0.4.48 - 2026-10-08
 
 ### Fixed

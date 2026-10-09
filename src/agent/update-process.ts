@@ -7,7 +7,7 @@ export type UpdateProcess = { pid: number; name: string; path: string; startedAt
 export async function updateProcesses(ids: number[] = [], nativeExe = process.env.NATIVE_EXE): Promise<UpdateProcess[]> {
   if (process.platform === 'win32') {
     if (nativeExe) {
-      const { stdout } = await promisify(execFile)(nativeExe, ['--update-processes', ids.join(',')], { windowsHide: true, timeout: 10000, maxBuffer: 1024 * 1024 });
+      const { stdout } = await promisify(execFile)(nativeExe, ['--update-processes', ids.join(',')], { windowsHide: true, timeout: ids.length ? 10000 : 30000, maxBuffer: 1024 * 1024 });
       return JSON.parse(stdout);
     }
     const filter = ids.length ? ` -Filter '${ids.map(id => `ProcessId=${id}`).join(' OR ')}'` : '';
