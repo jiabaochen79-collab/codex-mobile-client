@@ -24,7 +24,7 @@ async function pay() {
   } catch (e: any) { operationError.value = e.message; } finally { loading.value = false; }
 }
 async function recheck() { loading.value = true; operationError.value = ''; try { await api('/api/payments/recheck', { orderId: intendedOrder.value }); await load(); } catch (e: any) { operationError.value = e.message; } finally { loading.value = false; } }
-async function copy() { try { await navigator.clipboard.writeText(externalLink.value); copied.value = true; } catch { operationError.value = '无法复制链接。'; } }
+async function copy() { copied.value = false; try { await navigator.clipboard.writeText(externalLink.value); copied.value = true; operationError.value = ''; } catch { operationError.value = '无法复制链接。'; } }
 async function initialize() {
   loading.value = true; readError.value = '';
   try {

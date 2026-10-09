@@ -3,12 +3,13 @@ import { resolve } from 'node:path';
 import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc';
 import { transformSync } from 'esbuild';
 import * as vue from 'vue';
+import { renderToString } from '@vue/server-renderer';
 import * as protocol from '../src/shared/protocol.js';
 import * as subscription from '../src/shared/subscription.js';
 import * as commerce from '../src/shared/commerce.js';
 import { conversationTurns } from '../web/conversation-model.js';
 import { mergeNotificationCount } from '../web/notification-count.js';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const scopes: vue.EffectScope[] = [], cleanup: (() => void)[] = [];
 let api: (...args: any[]) => Promise<any> = async () => ({});
@@ -18,7 +19,7 @@ Object.assign(globalThis, {
   window: { addEventListener() {}, removeEventListener() {}, matchMedia: () => ({ matches: true }) },
   document: { visibilityState: 'visible', querySelector: () => null, documentElement: { classList: { toggle() {}, remove() {} } }, addEventListener() {}, removeEventListener() {} },
   location: { href: 'http://127.0.0.1/', origin: 'http://127.0.0.1', search: '', hash: '', pathname: '/', protocol: 'http:', host: '127.0.0.1' },
-  history: { replaceState() {} }, localStorage: storage, sessionStorage: { getItem: (k: string) => sessions.get(k) ?? null, setItem: (k: string, v: string) => sessions.set(k, v), removeItem: (k: string) => sessions.delete(k) }, cancelAnimationFrame() {}, confirm: () => true
+  history: { replaceState() {} }, localStorage: storage, sessionStorage: { get length() { return sessions.size; }, key: (i: number) => [...sessions.keys()][i] ?? null, getItem: (k: string) => sessions.get(k) ?? null, setItem: (k: string, v: string) => sessions.set(k, v), removeItem: (k: string) => sessions.delete(k) }, cancelAnimationFrame() {}, confirm: () => true
 });
 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Fixture', platform: 'Fixture', maxTouchPoints: 0 } });
 let socketReply: (command: any) => any = () => ({});
@@ -42,6 +43,8 @@ function setup(file: string, props: any) {
     if (id === './use-attachments') return { useAttachments: () => ({ current: vue.ref([]), hasPending: vue.ref(false), uploading: vue.ref(false), restore() {}, clear() {}, suspend() {} }) };
     if (id === './conversation-model') return { conversationTurns };
     if (id === './notification-count') return { mergeNotificationCount };
+    if (id === 'qrcode') return { toDataURL: async () => 'data:fixture' };
+    if (id === './push-registration') return { pushRegistration: async () => { throw new Error('No push provider in this fixture'); } };
     if (id === 'lucide-vue-next' || id.endsWith('.vue') || id === './mobile-viewport') return {};
     throw new Error('Unexpected import: ' + id);
   }, module, module.exports);
@@ -100,4 +103,89 @@ it('keeps subscription closing enabled during polling and ignores a stale read a
   api = async () => ({ catalog: p.catalog.value, subscription: { access: true }, trial: { used: true } });
   await p.activate(); finish({ catalog: p.catalog.value, subscription: { access: false } }); await polling;
   expect(p.subscription.value.access).toBe(true);
+});
+
+it.each(['activate', 'claimTrial'])('clears a stale subscription read failure after successful %s', async operation => {
+  const p = setup('SubscriptionPanel.vue', { mode: 'mobile', deviceId: '123456789' });
+  p.catalog.value = { plans: [], termsVersion: subscription.TERMS_VERSION }; p.trial.value = { available: true };
+  api = async () => { throw new Error('Temporary read failure'); }; await p.load();
+  expect(p.readError.value).toBe('Temporary read failure');
+  p.code.value = 'CM1_' + 'a'.repeat(32); p.accepted.value = true;
+  api = async () => ({ catalog: p.catalog.value, subscription: { access: true }, trial: { used: true } });
+  await p[operation](); expect(p.subscription.value.access).toBe(true); expect(p.readError.value).toBe('');
+});
+it('clears payment clipboard failure after recovery and removes a stale success on later failure', async () => {
+  const p = setup('PayApp.vue', {});
+  const writeText = vi.fn().mockRejectedValueOnce(new Error('Denied')).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('Denied'));
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText } } });
+  p.externalLink.value = 'https://example.test/payment';
+  await p.copy(); expect(p.copied.value).toBe(false); expect(p.error.value).toBeTruthy();
+  await p.copy(); expect(p.copied.value).toBe(true); expect(p.error.value).toBe('');
+  await p.copy(); expect(p.copied.value).toBe(false); expect(p.error.value).toBeTruthy();
+});
+it('keeps history pagination consistent when a delayed older page races an order-close refresh', async () => {
+  const p = setup('OrdersPanel.vue', { mode: 'mobile', deviceId: '123456789' });
+  const head = { ownerRevision: 'owner', historyRevision: 'old-history', orders: [], licenses: [{ id: 'new' }], refunds: [], hasMore: true, readiness: { channels: [] } };
+  p.data.value = structuredClone(head); p.hasMore.value = true;
+  let finishSubscription!: (value: any) => void, finishOlder!: (value: any) => void;
+  api = async (path: string) => path.endsWith('/close') ? {} : path === '/api/subscription' ? new Promise(resolve => finishSubscription = resolve) : path.includes('page=2') ? new Promise(resolve => finishOlder = resolve) : { ...structuredClone(head), historyRevision: 'new-history' };
+  const older = p.loadMore(), closing = p.closeOrder({ id: 'pending-order' });
+  await vi.waitFor(() => expect(finishSubscription).toBeTypeOf('function'));
+  finishOlder({ ...head, licenses: [{ id: 'old' }], hasMore: false }); await older;
+  finishSubscription({ catalog: { plans: [] }, subscription: { serverTime: Date.now() } }); await closing;
+  expect(p.historyPage.value).toBe(1); expect(p.hasMore.value).toBe(true);
+  api = async path => { expect(path).toContain('page=2'); return { ...head, historyRevision: 'new-history', licenses: [{ id: 'old' }], hasMore: false }; };
+  await p.loadMore(); expect(p.data.value.licenses.map((row: any) => row.id)).toEqual(['new', 'old']); expect(p.historyPage.value).toBe(2);
+});
+it('preserves a slow older-page request through an unchanged ordinary poll', async () => {
+  const p = setup('OrdersPanel.vue', { mode: 'mobile', deviceId: '123456789' });
+  const head = { ownerRevision: 'owner', historyRevision: 'history', orders: [], licenses: [{ id: 'new' }], refunds: [], hasMore: true, readiness: { channels: [] } };
+  p.data.value = structuredClone(head); p.hasMore.value = true;
+  let finishOlder!: (value: any) => void;
+  api = async path => path.includes('page=2') ? new Promise(resolve => finishOlder = resolve) : path === '/api/subscription' ? { catalog: { plans: [] }, subscription: {} } : structuredClone(head);
+  const older = p.loadMore(); await p.load(); finishOlder({ ...head, licenses: [{ id: 'old' }], hasMore: false }); await older;
+  expect(p.data.value.licenses.map((row: any) => row.id)).toEqual(['new', 'old']); expect(p.historyPage.value).toBe(2);
+});
+it('clears only the logged-out device plan drafts and preserves them during session recovery', () => {
+  const props = { deviceId: '123456789', conversationId: crypto.randomUUID(), request: { id: 'request', detail: 'Private plan body' }, disabled: false, supported: true };
+  const form = setup('PlanRequest.vue', props); form.feedback.value = 'Private unsent revision';
+  const key = `plan-feedback:${props.deviceId}:${props.conversationId}:${props.request.id}`;
+  sessions.set('plan-feedback:987654321:other:request', 'other device');
+  const p = setup('MobilePanel.vue', { deviceId: props.deviceId, deviceName: 'Fixture' });
+  p.clearNavigation(true); expect(sessions.get(key)).toContain('Private unsent revision');
+  p.clearNavigation(false); expect(sessions.has(key)).toBe(false); expect(sessions.get('plan-feedback:987654321:other:request')).toBe('other device');
+});
+async function render(file: string, state: any) {
+  const descriptor = parse(readFileSync(resolve('web', file), 'utf8')).descriptor, script = compileScript(descriptor, { id: file });
+  const template = compileTemplate({ source: descriptor.template!.content, filename: file, id: file, compilerOptions: { bindingMetadata: script.bindings } });
+  const module = { exports: {} as any };
+  new Function('require', 'module', 'exports', transformSync(template.code, { loader: 'ts', format: 'cjs' }).code)(() => vue, module, module.exports);
+  return renderToString(vue.createSSRApp({ setup: () => state, render: module.exports.render }));
+}
+it('recovers a failed notification list together with settings and keeps the retry control on continued failure', async () => {
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Fixture', platform: 'Fixture', maxTouchPoints: 0 } });
+  const p = setup('NotificationCenter.vue', { deviceId: '123456789', taskLabels: {}, resolveTasks: async () => {}, openTask: async () => true });
+  const settings = { settings: { enabled: false, completed: true, failed: true }, revision: 'fixture', pushConfigured: false };
+  let listCalls = 0;
+  api = async path => { if (path.endsWith('/settings')) return settings; listCalls++; throw new Error('List network failure'); };
+  await p.load(); await p.refreshSettings();
+  expect(listCalls).toBe(2); expect(p.listReady.value).toBe(false);
+  p.settingsReady.value = true;
+  const failed = await render('NotificationCenter.vue', p); expect(failed).toContain('重试读取'); expect(failed).not.toContain('暂无任务完成提醒');
+  const item = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), status: 'completed', occurredAt: Date.now(), createdAt: Date.now(), readAt: null };
+  api = async path => path.endsWith('/settings') ? settings : { items: [item], unread: 1 };
+  await p.refreshSettings(); expect(p.items.value[0].id).toBe(item.id); expect(p.listReady.value).toBe(true); expect(p.error.value).toBe('');
+});
+it('renders plan and source names without reporting distribution entitlements as cash receipts', async () => {
+  const p = setup('OrdersPanel.vue', { mode: 'mobile', deviceId: '123456789' });
+  const now = Date.now();
+  p.data.value = { orders: [], refunds: [], readiness: { channels: [] }, licenses: [
+    { id: 'license', sku: 'year', source: 'license', price_fen: 0, starts: now, ends: now + 365 * subscription.DAY },
+    { id: 'trial', sku: 'trial', source: 'self_trial', price_fen: 0, starts: now, ends: now + 7 * subscription.DAY },
+    { id: 'compensation', sku: 'month', source: 'compensation', price_fen: 0, starts: now, ends: now + subscription.DAY },
+    { id: 'paid', sku: 'month', source: 'online', price_fen: 600, starts: now, ends: now + 30 * subscription.DAY }
+  ] };
+  const html = await render('OrdersPanel.vue', p);
+  expect(html).toContain('年付 · 分销授权码兑换'); expect(html).toContain('七天试用 · 自助试用'); expect(html).toContain('故障补偿');
+  expect(html).toContain('月付 · 在线购买'); expect(html).toContain('¥6.00'); expect(html).not.toContain('¥0.00');
 });

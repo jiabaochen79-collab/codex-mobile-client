@@ -16,6 +16,7 @@ const nextCursor = ref<string | null>(null);
 const loadingMore = ref(false);
 const settings = ref<NotificationSettings>({ enabled: false, completed: true, failed: true });
 const settingsReady = ref(false); let settingsRevision: string | undefined;
+const listReady = ref(false);
 const pushConfigured = ref(false);
 const vapidPublicKey = ref<string | null>(null);
 const systemPushState = ref<'unknown' | 'enabled' | 'needed'>('unknown');
@@ -102,9 +103,10 @@ async function load(preserveHistory = false) {
     latestReceipt = mergeNotificationCount(latestReceipt, listResult);
     updateUnread(snapshotUnread((Number(listResult.unread) || 0) + [...incomingDuringLoad.values()].filter(item => !item.readAt && (typeof listResult.throughSequence === 'number' && typeof item.sequence === 'number' ? item.sequence > listResult.throughSequence : !snapshotIds.has(item.id))).length, items.value));
     incomingDuringLoad.clear();
+    listReady.value = true;
     void props.resolveTasks(items.value.map(item => item.taskId));
     await refreshSystemPushState();
-  } catch (e: any) { if (!disposed && revision === loadRevision) { if (!preserveHistory) settingsReady.value = false; error.value = e.message; } }
+  } catch (e: any) { if (!disposed && revision === loadRevision) { if (!preserveHistory) settingsReady.value = false; listReady.value = false; error.value = e.message; } }
   finally { if (revision === loadRevision) { loading.value = false; refreshing.value = false; } }
 }
 async function refreshSystemPushState() {
@@ -287,6 +289,7 @@ function resume() { if (!disposed && !busy.value && document.visibilityState ===
 let settingsReading = false; let settingsTimer: ReturnType<typeof setInterval> | undefined;
 async function refreshSettings() {
   if (disposed || busy.value || refreshing.value || loading.value || settingsReading || document.visibilityState !== 'visible') return;
+  if (!listReady.value) { await load(true); return; }
   const revision = loadRevision, previous = settingsRevision; settingsReading = true;
   try { const result = await api('/api/notifications/settings', undefined, headers()); if (disposed || busy.value || revision !== loadRevision || previous !== settingsRevision) return; settings.value = result.settings; settingsRevision = result.revision; settingsReady.value = true; pushConfigured.value = result.pushConfigured === true; vapidPublicKey.value = result.vapidPublicKey ?? null; await refreshSystemPushState(); }
   catch {} finally { settingsReading = false; }
@@ -307,11 +310,11 @@ onUnmounted(() => { disposed = true; loadRevision++; pushStateRevision++; clearI
         <p v-if="browserMessage" class="notification-info"><Smartphone v-if="isIos" :size="16"/><ShieldAlert v-else :size="16"/><span>{{ browserMessage }}</span></p>
         <p v-if="info || systemPushState === 'enabled'" class="notification-success" role="status"><Check :size="16"/>{{ info || '系统推送已开启。' }}</p>
         <div class="notification-list-heading"><strong>最近提醒</strong><button v-if="unread" class="text-button" :disabled="busy" @click="readAll">全部标为已读</button></div>
-        <div v-if="!items.length" class="notification-empty">暂无任务完成提醒</div>
+        <div v-if="!items.length && listReady" class="notification-empty">暂无任务完成提醒</div>
         <div v-else class="notification-list"><button v-for="item in items" :key="item.id" class="notification-item" :class="{ unread: !item.readAt }" :disabled="busy" @click="readOne(item)"><span class="notification-status" :class="item.status"><Check v-if="item.status === 'completed'" :size="15"/><ShieldAlert v-else :size="15"/></span><span class="notification-item-text"><strong :title="taskLabels[item.taskId]?.title || item.taskId">{{ taskLabels[item.taskId]?.title || `任务 ${item.taskId.slice(0, 8)}` }}</strong><small v-if="taskLabels[item.taskId]?.project" class="notification-project">{{ taskLabels[item.taskId].project }}</small><small>{{ statusLabel(item.status) }} · {{ formatTime(item.occurredAt) }}</small></span><ExternalLink :size="15"/></button></div>
         <button v-if="nextCursor" class="button" :disabled="busy || refreshing || loadingMore" @click="loadMore"><RefreshCw v-if="loadingMore" class="spin" :size="16"/>{{ loadingMore ? '正在读取' : '加载更多提醒' }}</button>
       </template>
-      <p v-if="error" class="alert" role="alert">{{ error }}<button v-if="!settingsReady" class="text-button" :disabled="busy || loading" @click="load(true)">重试读取</button></p>
+      <p v-if="error" class="alert" role="alert">{{ error }}<button v-if="!settingsReady || !listReady" class="text-button" :disabled="busy || loading" @click="load(true)">重试读取</button></p>
       <p class="notification-footnote">系统通知只显示状态和时间；登录后的提醒列表显示任务及项目名称，无法读取名称时显示任务编号。站内记录保留 30 天。</p>
     </section>
   </div>

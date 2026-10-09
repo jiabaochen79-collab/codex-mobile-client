@@ -829,6 +829,7 @@ function clearNavigation(preserveDrafts = false) {
     for (const id of Object.keys(pendingSends)) delete pendingSends[id];
     pendingCreate.value = undefined;
     try { sessionStorage.removeItem('pending-sends:' + props.deviceId); sessionStorage.removeItem('chat-drafts:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); localStorage.removeItem('pending-sends:' + props.deviceId); localStorage.removeItem('pending-create:' + props.deviceId); } catch {}
+    try { for (let index = sessionStorage.length - 1; index >= 0; index--) { const key = sessionStorage.key(index); if (key?.startsWith(`plan-feedback:${props.deviceId}:`)) sessionStorage.removeItem(key); } } catch {}
     attachments.clear(); drafts.clear();
   }
   modelModal.value=false;takeoverModal.value=false;draft.value='';for(const key of Object.keys(activities))delete activities[key];

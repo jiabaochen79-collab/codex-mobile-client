@@ -4,7 +4,7 @@ import { ArrowLeft, ArrowUpRight, Check, ClipboardList, Copy, CreditCard, QrCode
 import QRCode from 'qrcode';
 import { api as requestApi } from './api';
 import { money, paymentStatusNames, refundStatusNames, type PaymentOrder } from '../src/shared/commerce';
-import { PAYMENT_TERMS_VERSION, type Catalog } from '../src/shared/subscription';
+import { PAYMENT_TERMS_VERSION, PLANS, type Catalog } from '../src/shared/subscription';
 const props = defineProps<{ mode: 'desktop' | 'mobile'; initialPlan?: string; deviceId?: string }>();
 const api = (path: string, body?: unknown) => requestApi(path, body, props.mode === 'mobile' && props.deviceId ? { 'X-Remote-Device': props.deviceId } : undefined);
 const emit = defineEmits<{ close: []; changed: [] }>();
@@ -16,11 +16,12 @@ const refundTarget = ref<any>(); const refundReason = ref('first_purchase'); con
 const serverClock = ref<{ time: number; monotonic: number }>();
 function serviceTime() { return serverClock.value ? serverClock.value.time + performance.now() - serverClock.value.monotonic : Date.now(); }
 const historyPage = ref(1); const hasMore = ref(false); const loadingMore = ref(false);
+let historyLoadRevision = 0;
 function mergeRecords(previous: any[], incoming: any[]) { const ids = new Set(incoming.map(row => row.id)); return [...incoming, ...previous.filter(row => !ids.has(row.id))]; }
 async function loadMore() {
   if (loadingMore.value || !hasMore.value || disposed) return;
-  const target = historyPage.value + 1, owner = data.value?.ownerRevision, history = data.value?.historyRevision; loadingMore.value = true; error.value = '';
-  try { const page = await api(`${base}?page=${target}`); if (disposed || !data.value || owner !== data.value.ownerRevision || history !== data.value.historyRevision || page.ownerRevision !== owner || page.historyRevision !== history) return; for (const key of ['orders', 'licenses', 'refunds']) { const ids = new Set(data.value[key].map((row: any) => row.id)); data.value[key].push(...page[key].filter((row: any) => !ids.has(row.id))); } historyPage.value = target; hasMore.value = page.hasMore === true; }
+  const target = historyPage.value + 1, owner = data.value?.ownerRevision, history = data.value?.historyRevision, revision = historyLoadRevision; loadingMore.value = true; error.value = '';
+  try { const page = await api(`${base}?page=${target}`); if (disposed || revision !== historyLoadRevision || !data.value || owner !== data.value.ownerRevision || history !== data.value.historyRevision || page.ownerRevision !== owner || page.historyRevision !== history) return; for (const key of ['orders', 'licenses', 'refunds']) { const ids = new Set(data.value[key].map((row: any) => row.id)); data.value[key].push(...page[key].filter((row: any) => !ids.has(row.id))); } historyPage.value = target; hasMore.value = page.hasMore === true; }
   catch (e: any) { if (!disposed) error.value = e.message; }
   finally { loadingMore.value = false; }
 }
@@ -30,6 +31,8 @@ const canBuy = computed(() => data.value?.readiness.ready && plan.value?.availab
 function changedChoice() { accepted.value = false; key.value = crypto.randomUUID(); }
 watch(() => JSON.stringify([selected.value, channel.value, data.value?.ownerRevision, plan.value?.revision, plan.value?.priceFen, plan.value?.days, plan.value?.name, plan.value?.available, catalog.value?.termsVersion]), changedChoice, { flush: 'sync' });
 const date = (value: number | null) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-';
+const serviceSources: Record<string, string> = { online: '在线购买', manual: '人工授权', license: '分销授权码兑换', self_trial: '自助试用', compensation: '故障补偿' };
+function servicePlan(sku: string) { return catalog.value?.plans.find(plan => plan.id === sku)?.name ?? PLANS.find(plan => plan.id === sku)?.name ?? (sku === 'beta_month' ? '历史月付' : '订阅权益'); }
 let polling: ReturnType<typeof setInterval> | undefined;
 let readRevision = 0, reading = false, disposed = false;
 let paymentRevision = 0;
@@ -41,6 +44,7 @@ async function load(force = false) {
     const ownerChanged = data.value?.ownerRevision !== undefined && orders.ownerRevision !== data.value.ownerRevision;
     if (ownerChanged) { historyPage.value = 1; returnToOrders(); refundTarget.value = undefined; }
     const refreshHistory = force || data.value?.historyRevision !== undefined && data.value.historyRevision !== orders.historyRevision;
+    if (ownerChanged || refreshHistory) historyLoadRevision++;
     if (refreshHistory) {
       const head = { orders: [...orders.orders], licenses: [...orders.licenses], refunds: [...orders.refunds], hasMore: orders.hasMore };
       for (let page = 2; page <= historyPage.value; page++) {
@@ -133,7 +137,7 @@ onUnmounted(() => { disposed = true; readRevision++; paymentRevision++; clearInt
         </form>
         <div v-else class="purchase-order-list">
           <div v-for="order in data?.orders ?? []" :key="order.id" class="purchase-order"><div><strong>{{ order.planName }} · ¥{{ money(order.priceFen) }}</strong><span>{{ date(order.created) }}</span><span>{{ paymentStatusNames[order.status] }} · {{ order.serviceStatus }}</span></div><div class="purchase-order-actions"><button v-if="['pending','confirming'].includes(order.status)" class="icon-button" title="打开付款" :disabled="loading" @click="open(order)"><QrCode :size="20"/></button><button v-if="['pending','confirming'].includes(order.status)" class="icon-button" title="关闭待支付订单" :disabled="loading" @click="closeOrder(order)"><X :size="19"/></button></div></div>
-          <h3 v-if="data?.licenses.length">服务记录</h3><div v-for="item in data?.licenses ?? []" :key="item.id" class="purchase-order"><div><strong>¥{{ money(item.price_fen) }} · {{ item.source === 'online' ? '在线购买' : '人工授权' }}</strong><span>{{ item.refunded ? '已退款' : !item.ends ? '未激活' : item.starts > serviceTime() ? '待生效 · ' + date(item.starts) : item.ends <= serviceTime() ? '已到期 · ' + date(item.ends) : '有效至 ' + date(item.ends) }}</span></div><button v-if="item.price_fen && !item.refunded && !item.refund_pending && !data.refunds.some((r:any) => r.billing_order_id === item.id && r.state !== 'rejected')" class="icon-button" title="申请退款" @click="refundTarget = item"><Wallet :size="18"/></button></div>
+          <h3 v-if="data?.licenses.length">服务记录</h3><div v-for="item in data?.licenses ?? []" :key="item.id" class="purchase-order"><div><strong>{{ servicePlan(item.sku) }} · {{ serviceSources[item.source] ?? '授权权益' }}<template v-if="item.price_fen"> · ¥{{ money(item.price_fen) }}</template></strong><span>{{ item.refunded ? '已退款' : !item.ends ? '未激活' : item.starts > serviceTime() ? '待生效 · ' + date(item.starts) : item.ends <= serviceTime() ? '已到期 · ' + date(item.ends) : '有效至 ' + date(item.ends) }}</span></div><button v-if="item.price_fen && !item.refunded && !item.refund_pending && !data.refunds.some((r:any) => r.billing_order_id === item.id && r.state !== 'rejected')" class="icon-button" title="申请退款" @click="refundTarget = item"><Wallet :size="18"/></button></div>
           <div v-for="item in data?.refunds ?? []" :key="item.id" class="purchase-order"><span>退款 · {{ refundStatusNames[item.state] }}</span><span>{{ item.amount_fen == null ? '待审核' : '¥' + money(item.amount_fen) }}</span></div>
           <p v-if="data && !data.orders.length && !data.licenses.length" class="empty-state">暂无订单</p>
           <button v-if="hasMore" class="button" :disabled="loadingMore || loading" @click="loadMore"><RefreshCw v-if="loadingMore" :size="16" class="spin"/>{{ loadingMore ? '正在读取' : '加载更早的记录' }}</button>

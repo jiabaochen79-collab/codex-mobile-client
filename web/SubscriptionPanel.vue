@@ -13,7 +13,7 @@ watch(() => subscription.value?.disabled, disabled => { if (disabled) { ordersOp
 const trial = ref<TrialEligibility>(); const trialRequest = crypto.randomUUID();
 async function claimTrial() {
   if (busy.value || !accepted.value || !trial.value?.available || !catalog.value) return; loadRevision++; reading.value = false; busy.value = true; error.value = '';
-  try { const result = await api(props.mode === 'desktop' ? '/local/trial' : '/api/subscription/trial', { requestId: trialRequest, termsVersion: catalog.value.termsVersion }); subscription.value = result.subscription; trial.value = result.trial; emit('changed', result.subscription); }
+  try { const result = await api(props.mode === 'desktop' ? '/local/trial' : '/api/subscription/trial', { requestId: trialRequest, termsVersion: catalog.value.termsVersion }); subscription.value = result.subscription; trial.value = result.trial; readError.value = ''; emit('changed', result.subscription); }
   catch (e: any) { error.value = e.message; } finally { busy.value = false; }
 }
 const code = ref(''); const accepted = ref(false); const showCode = ref(false); const busy = ref(false); const error = ref(''); const success = ref(false);
@@ -37,7 +37,7 @@ async function activate() {
   try {
     const submitted = code.value;
     const result = await api(props.mode === 'desktop' ? '/local/license' : '/api/subscription/redeem', { code: submitted.trim(), termsVersion: catalog.value!.termsVersion });
-    catalog.value = result.catalog; subscription.value = result.subscription; trial.value = result.trial; if (code.value === submitted) code.value = ''; accepted.value = false; success.value = true; emit('changed', result.subscription);
+    catalog.value = result.catalog; subscription.value = result.subscription; trial.value = result.trial; readError.value = ''; if (code.value === submitted) code.value = ''; accepted.value = false; success.value = true; emit('changed', result.subscription);
   } catch (e: any) { error.value = e.message; } finally { busy.value = false; }
 }
 function refreshEligibility() { if (!disposed && !busy.value && !reading.value && !ordersOpen.value && document.visibilityState === 'visible') void load(); }
