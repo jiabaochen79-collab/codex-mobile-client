@@ -15,7 +15,8 @@ import { DesktopActivity, DesktopRuntimeActivity, runtimeRunning } from './activ
 import { errorText } from './error-text.js';
 import { ConversationImages, markdownImages, userImageContent } from './images.js';
 import { snapshotResponse } from './snapshot-response.js';
-import { asyncInputReplies, asyncInputReply, asyncUserInputRequests, hasPendingInteractions } from './async-user-input.js';
+import { asyncInputReplies, asyncInputAccepted, asyncUserInputRequests, hasPendingInteractions } from './async-user-input.js';
+import { submitDesktopQuestion } from './desktop-question.js';
 import { RemoteError, supportsDesktopCommand, uid, type ClientStatus, type Command, type DesktopAdapter, type Snapshot, type Interaction, type Conversation, type Message, type LocalAttachment, type Activity, type PermissionMode } from '../shared/protocol.js';
 
 enablePatches();
@@ -640,16 +641,22 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
         if ((request.questions ?? []).some(q => !answers[q.id]?.some(a => a.trim())) || Object.keys(answers).some(id => !request.questions?.some(q => q.id === id))) throw new RemoteError('INVALID', '请回答当前请求中的所有问题。');
         if (asyncUserInputRequests(this.current!.state).some(input => input.id === request.id)) {
           if ((request.questions ?? []).some(question => answers[question.id]?.length !== 1)) throw new RemoteError('INVALID', '请为当前问题提交一个回答。');
-          const text = asyncInputReply(request, answers);
-          if (snap.busy) {
-            if (!snap.turnId) throw new RemoteError('STALE', '任务轮次正在变化，请重新查看提问后回复。');
-            if (!supportsDesktopCommand(this.checkedStatus?.capabilities, { method: 'send', params: { id: snap.id, epoch: snap.epoch, text: '', mode: 'steer', turnId: snap.turnId } })) throw new RemoteError('UNSUPPORTED', '当前客户端的运行中提问回复接口尚未适配，请在电脑端回答。');
-            method = 'thread-follower-steer-turn'; params = this.steeringParams(snap.id, text, commandId);
-          } else {
-            if (!supportsDesktopCommand(this.checkedStatus?.capabilities, { method: 'send', params: { id: snap.id, epoch: snap.epoch, text: '' } })) throw new RemoteError('UNSUPPORTED', '当前客户端的提问回复接口尚未适配，请在电脑端回答。');
-            method = 'thread-follower-start-turn'; version = 2;
-            params = { conversationId: snap.id, turnStart: { request: { threadId: snap.id, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: commandId }, context: { inheritThreadSettings: true, attachments: [], commentAttachments: [] } } };
-          }
+          if (!this.discovery) throw new RemoteError('CLIENT_UNAVAILABLE', '电脑客户端身份尚未同步，请稍后重试。');
+          await this.appTool('navigate_to_codex_page', { threadId: snap.id }, snap.id, authorize);
+          const check = async () => {
+            authorize?.();
+            const current = await this.snapshot();
+            if (current.id !== snap.id || current.epoch !== snap.epoch || JSON.stringify(current.requests.find(input => input.id === request.id)) !== JSON.stringify(request)) throw new RemoteError('STALE', '电脑提问已变化，请重新查看后回答。');
+            authorize?.();
+          };
+          const result = await submitDesktopQuestion(this.nativeExe, this.discovery, snap.title, request, answers, check);
+          const deadline = Date.now() + 5000;
+          do {
+            if (!result.closed) break;
+            if (asyncInputAccepted(this.followed.get(snap.id)?.state ?? {}, request, answers)) return { accepted: true };
+            await new Promise(resolve => setTimeout(resolve, 100));
+          } while (Date.now() < deadline);
+          throw new RemoteError('OUTCOME_UNKNOWN', '回答已提交，但电脑卡片状态尚未确认，请核对原会话，勿重复提交。');
         } else { method = 'thread-follower-submit-user-input'; params.response = { answers: Object.fromEntries(Object.entries(answers).map(([k, v]) => [k, { answers: v }])) }; }
       } else throw new RemoteError('UNSUPPORTED', '请在电脑端处理此请求。');
     }

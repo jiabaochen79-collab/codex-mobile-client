@@ -10,7 +10,7 @@ describe.skipIf(process.platform !== 'win32')('isolated native update process op
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), 'update-native-')); exe = join(dir, 'RemoteCompanion.exe');
     copyFileSync(process.execPath, join(dir, 'node.exe'));
-    execFileSync('C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe', ['/nologo', '/target:exe', '/platform:x64', '/utf8output', '/main:UpdateFixture', `/out:${exe}`, ...['System.Windows.Forms', 'System.Drawing', 'System.Net.Http', 'System.Web.Extensions', 'System.Management', 'System.Security'].map(name => `/reference:${name}.dll`), ...['tests/update-native-fixture.cs', 'native/RemoteCompanion.cs', 'native/PowerSettings.cs', 'native/DesktopToolsPipe.cs', 'native/DesktopRecovery.cs'].map(file => resolve(file))], { windowsHide: true, stdio: 'inherit' });
+    execFileSync('C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe', ['/nologo', '/target:exe', '/platform:x64', '/utf8output', '/main:UpdateFixture', `/out:${exe}`, ...['System.Windows.Forms', 'System.Drawing', 'System.Net.Http', 'System.Web.Extensions', 'System.Management', 'System.Security', 'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/WPF/UIAutomationClient', 'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/WPF/UIAutomationTypes', 'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/WPF/WindowsBase'].map(name => `/reference:${name}.dll`), ...['tests/update-native-fixture.cs', 'native/RemoteCompanion.cs', 'native/PowerSettings.cs', 'native/DesktopToolsPipe.cs', 'native/DesktopRecovery.cs', 'native/DesktopQuestion.cs'].map(file => resolve(file))], { windowsHide: true, stdio: 'inherit' });
   });
   afterAll(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
   async function fixture() {

@@ -102,6 +102,23 @@ test('isolates answers and field IDs between requests with the same question ID'
   expect(f.commands.find(command => command.method === 'respond').params).toMatchObject({ requestId: 'second', answers: { choice: ['second custom'] } });
 });
 
+test('submits a completed async question batch together without losing the chat draft', async ({ page }) => {
+  const f = await fixture(page, { mode: 'default', inputRequest: true });
+  const completed = normalizeSnapshot({ id: f.snapshot.id, threadRuntimeStatus: { type: 'idle' }, turns: [{ turnId: 'completed-turn', status: 'completed', turnStartedAtMs: 1, items: [{ id: 'batch-question', type: 'agentMessage', questions: [{ title: 'First batch question?', options: ['Test A', 'Test B'] }, { title: 'Second batch question?', options: [] }] }] }] }, 'fixture');
+  Object.assign(f.snapshot, completed); f.update();
+  await expect(page.locator('.questions')).toHaveCount(1);
+  await page.getByLabel('消息', { exact: true }).fill('保留消息草稿');
+  await page.getByLabel('First batch question?', { exact: true }).selectOption('0');
+  await expect(page.locator('.questions').getByRole('button', { name: '提交', exact: true })).toBeDisabled();
+  await page.getByLabel('Second batch question?', { exact: true }).fill('Handwritten answer');
+  await page.locator('.questions').getByRole('button', { name: '提交', exact: true }).click();
+  await expect(page.locator('.questions')).toHaveCount(0);
+  const ids = [0, 1].map(index => JSON.stringify(['request_user_input_async', 'batch-question', index]));
+  expect(f.commands.filter(command => command.method === 'respond')).toEqual([{ method: 'respond', params: { id: f.snapshot.id, epoch: 'fixture', requestId: ids[0], answers: { [ids[0]]: ['Test A'], [ids[1]]: ['Handwritten answer'] } } }]);
+  expect(f.commands.some(command => command.method === 'send' || command.method === 'stop')).toBe(false);
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('保留消息草稿');
+});
+
 test('shows unanswered async questions after completion and reload, and submits a custom answer without losing the message draft', async ({ page }, info) => {
   const f = await fixture(page, { mode: 'default', inputRequest: true });
   const question = '任务已经完成，这笔测试收款是否实际发生？';

@@ -2,6 +2,8 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { CodexDesktop, normalizeSnapshot } from '../src/agent/desktop.js';
 import { NativeIpc } from '../src/agent/ipc.js';
+import * as nativeQuestion from '../src/agent/desktop-question.js';
+import { asyncInputAccepted } from '../src/agent/async-user-input.js';
 
 afterEach(() => vi.restoreAllMocks());
 const questionId = (item = 'question-message', index = 0) => JSON.stringify(['request_user_input_async', item, index]);
@@ -16,8 +18,9 @@ it('detects message questions even when there is no legacy request and the histo
 });
 it('assigns desktop-compatible identities to every question and preserves manual-only questions', () => {
   const result = normalizeSnapshot(state([{ ...question, questions: [...question.questions, { title: 'Anything else?', options: [] }] }]), 'epoch');
-  expect(result.requests.map(r => r.id)).toEqual([questionId(), questionId('question-message', 1)]);
-  expect(result.requests[1].questions?.[0]).toMatchObject({ question: 'Anything else?', options: [] });
+  expect(result.requests.map(r => r.id)).toEqual([questionId()]);
+  expect(result.requests[0].questions?.map(q => q.id)).toEqual([questionId(), questionId('question-message', 1)]);
+  expect(result.requests[0].questions?.[1]).toMatchObject({ question: 'Anything else?', options: [] });
 });
 it.each(['pending', 'rejected', 'interrupted'])('keeps a question after a %s steering response', status => {
   expect(normalizeSnapshot(state([question, reply(status)]), 'epoch').requests).toHaveLength(1);
@@ -61,39 +64,37 @@ it('retains legacy blocking questions alongside new message questions', () => {
 function desktop() {
   const adapter = new CodexDesktop('unused');
   const current = state();
-  Reflect.set(adapter, 'current', { id: current.id, owner: 'owner', revision: 1, state: current });
+  const followed = { id: current.id, owner: 'owner', revision: 1, state: current };
+  Reflect.set(adapter, 'current', followed);
+  Reflect.get(adapter, 'followed').set(current.id, followed);
   vi.spyOn(adapter as any, 'ready').mockResolvedValue(undefined);
   vi.spyOn(adapter as any, 'follow').mockResolvedValue(undefined);
   vi.spyOn(adapter as any, 'snapshot').mockImplementation(() => normalizeSnapshot(current, 'epoch'));
+  Reflect.set(adapter, 'discovery', { processId: 42, startedAt: 'ticks', executablePath: 'desktop' });
+  const navigate = vi.spyOn(adapter as any, 'appTool').mockResolvedValue({ navigated: true });
+  const submit = vi.spyOn(nativeQuestion, 'submitDesktopQuestion').mockImplementation(async (_exe, _identity, _title, _request, _answers, check) => { await check(); current.turns[0].items.push(reply('accepted', 'Custom address')); return { closed: true }; });
   const request = vi.spyOn(NativeIpc.prototype, 'request').mockResolvedValue({ resultType: 'success' });
-  return { adapter, current, request, command: { method: 'respond' as const, params: { id: current.id, epoch: 'epoch', requestId: questionId(), answers: { [questionId()]: ['Custom address'] } } } };
+  return { adapter, current, request, submit, navigate, command: { method: 'respond' as const, params: { id: current.id, epoch: 'epoch', requestId: questionId(), answers: { [questionId()]: ['Custom address'] } } } };
 }
-it('submits a free-text async answer through steering with the native question identity and inherited settings', async () => {
-  const { adapter, current, request, command } = desktop(); const id = randomUUID();
+it.each(['inProgress', 'completed'])('submits a %s async answer once through the native card and verifies the accepted answer', async status => {
+  const { adapter, current, request, submit, navigate, command } = desktop();
+  current.turns[0].status = status;
+  if (status === 'completed') current.threadRuntimeStatus.type = 'idle';
   try {
-    await expect(adapter.execute(command, id)).resolves.toEqual({ accepted: true });
-    expect(request).toHaveBeenCalledTimes(1);
-    const [method, params, version, owner] = request.mock.calls[0] as any;
-    expect([method, version, owner]).toEqual(['thread-follower-steer-turn', 1, 'owner']);
-    expect(params.clientUserMessageId).toBe(id);
-    expect(params.input).toEqual([{ type: 'text', text: '<send_user_message_question_reply>\n' + JSON.stringify([{ questionItemId: questionId(), question: 'Which address?', answer: 'Custom address' }]) + '\n</send_user_message_question_reply>', text_elements: [] }]);
-    expect(params.restoreMessage.context).toMatchObject({ addedFiles: [], workspaceRoots: [current.cwd] });
-    expect(params).not.toHaveProperty('turnStart'); expect(params).not.toHaveProperty('threadSettings');
+    await expect(adapter.execute(command, randomUUID())).resolves.toEqual({ accepted: true });
+    expect(request).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledWith('navigate_to_codex_page', { threadId: current.id }, current.id, undefined);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0].slice(2, 5)).toEqual(['Input fixture', normalizeSnapshot(state(), 'epoch').requests[0], command.params.answers]);
   } finally { adapter.close(); }
 });
-it('starts a new turn to answer a completed question, with the original question identity and inherited settings', async () => {
-  const { adapter, current, request, command } = desktop();
-  current.turns[0].status = 'completed'; current.threadRuntimeStatus.type = 'idle';
-  const id = randomUUID();
+it('checks authorization and question freshness again before clicking submit', async () => {
+  const { adapter, current, command, submit, request } = desktop();
+  const authorize = vi.fn().mockImplementation(() => { current.turns[0].items.push(reply()); });
+  submit.mockImplementation(async (_exe, _identity, _title, _request, _answers, check) => { await check(); return { closed: true }; });
   try {
-    await expect(adapter.execute(command, id)).resolves.toEqual({ accepted: true });
-    expect(request).toHaveBeenCalledTimes(1);
-    const [method, params, version, owner] = request.mock.calls[0] as any;
-    expect([method, version, owner]).toEqual(['thread-follower-start-turn', 2, 'owner']);
-    expect(params.conversationId).toBe(current.id);
-    expect(params.turnStart.request).toEqual({ threadId: current.id, clientUserMessageId: id, input: [{ type: 'text', text: '<send_user_message_question_reply>\n' + JSON.stringify([{ questionItemId: questionId(), question: 'Which address?', answer: 'Custom address' }]) + '\n</send_user_message_question_reply>', text_elements: [] }] });
-    expect(params.turnStart.context).toEqual({ inheritThreadSettings: true, attachments: [], commentAttachments: [] });
-    expect(params.turnStart.request).not.toHaveProperty('collaborationMode');
+    await expect(adapter.execute(command, randomUUID(), authorize)).rejects.toMatchObject({ code: 'STALE' });
+    expect(request).not.toHaveBeenCalled();
   } finally { adapter.close(); }
 });
 it.each(['new turn', 'answered', 'other question', 'empty answer', 'extra answer', 'decline'])('rejects %s async replies before native dispatch', async kind => {
@@ -108,10 +109,10 @@ it.each(['new turn', 'answered', 'other question', 'empty answer', 'extra answer
   finally { adapter.close(); }
 });
 it.each(['inProgress', 'completed'])('keeps a %s answer retryable after a native rejection and leaves the original question unchanged', async status => {
-  const { adapter, current, request, command } = desktop(); request.mockResolvedValue({ resultType: 'error' });
+  const { adapter, current, request, submit, command } = desktop(); submit.mockRejectedValue({ code: 'CLIENT_UNAVAILABLE' });
   current.turns[0].status = status;
   if (status === 'completed') current.threadRuntimeStatus.type = 'idle';
-  try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'CLIENT_REJECTED' }); expect(normalizeSnapshot(current, 'epoch').requests).toHaveLength(1); }
+  try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'CLIENT_UNAVAILABLE' }); expect(normalizeSnapshot(current, 'epoch').requests).toHaveLength(1); expect(request).not.toHaveBeenCalled(); }
   finally { adapter.close(); }
 });
 it.each(['inProgress', 'completed'])('retains a %s question subscription and installation blocker until the reply is accepted', async status => {
@@ -145,13 +146,32 @@ it('ignores plain option text and malformed reply metadata', () => {
   const malformed = { ...reply(), input: [{ type: 'text', text: '<send_user_message_question_reply>{invalid}</send_user_message_question_reply>' }] };
   expect(normalizeSnapshot(state([question, malformed]), 'epoch').requests).toHaveLength(1);
 });
-it.each(['inProgress', 'completed'])('fails closed when the %s answer protocol is incompatible', async status => {
-  const { adapter, current, command, request } = desktop();
-  current.turns[0].status = status;
-  if (status === 'completed') current.threadRuntimeStatus.type = 'idle';
-  Reflect.set(adapter, 'checkedStatus', { capabilities: ['compatibility-checked', 'respond-approval'] });
-  try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'UNSUPPORTED' }); expect(request).not.toHaveBeenCalled(); }
+it('fails closed when the desktop process identity is unavailable', async () => {
+  const { adapter, command, request, submit } = desktop();
+  Reflect.set(adapter, 'discovery', undefined);
+  try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'CLIENT_UNAVAILABLE' }); expect(request).not.toHaveBeenCalled(); expect(submit).not.toHaveBeenCalled(); }
   finally { adapter.close(); }
+});
+it('accepts only exact question identities, text, and answers in native history', () => {
+  const request = normalizeSnapshot(state(), 'epoch').requests[0];
+  for (const item of [reply('pending', 'Custom address'), reply('accepted', 'Wrong answer'), reply('accepted', 'Custom address', 'wrong-id')]) {
+    expect(asyncInputAccepted(state([question, item]), request, { [questionId()]: ['Custom address'] })).toBe(false);
+  }
+  const current = state(); current.turns.push({ turnId: 'next', status: 'completed', turnStartedAtMs: 2, items: [{ type: 'userMessage', content: reply('accepted', 'Custom address').input }] });
+  expect(asyncInputAccepted(current, request, { [questionId()]: ['Custom address'] })).toBe(true);
+});
+it.each(['missing reply', 'card still open', 'unknown outcome'])('never falls back to raw transport after %s', async kind => {
+  vi.useFakeTimers();
+  const { adapter, command, submit, request } = desktop();
+  submit.mockImplementation(async () => {
+    if (kind === 'unknown outcome') throw { code: 'OUTCOME_UNKNOWN' };
+    return { closed: kind !== 'card still open' };
+  });
+  try {
+    const assertion = expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+    await vi.advanceTimersByTimeAsync(6000); await assertion;
+    expect(request).not.toHaveBeenCalled(); expect(submit).toHaveBeenCalledTimes(1);
+  } finally { adapter.close(); vi.useRealTimers(); }
 });
 it('continues using the legacy response protocol for blocking user input', async () => {
   const { adapter, current, request } = desktop();

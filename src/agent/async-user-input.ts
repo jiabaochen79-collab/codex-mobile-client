@@ -34,11 +34,28 @@ export function asyncUserInputRequests(state: any): Interaction[] {
       }
     }
   }
-  return [...pending.values()];
+  const groups = new Map<string, Interaction>();
+  for (const request of pending.values()) {
+    const [, itemId] = JSON.parse(String(request.id));
+    const group = groups.get(itemId);
+    if (group) group.questions!.push(...request.questions!);
+    else groups.set(itemId, request);
+  }
+  return [...groups.values()];
 }
 
 export function hasPendingInteractions(state: any) { return !!state?.requests?.length || !!state && asyncUserInputRequests(state).length > 0; }
-export function asyncInputReply(request: Interaction, answers: Record<string, string[]>) {
-  const replies = (request.questions ?? []).map(question => ({ questionItemId: question.id, question: question.question, answer: answers[question.id][0].trim() }));
-  return open + '\n' + JSON.stringify(replies) + '\n' + close;
+export function asyncInputAccepted(state: any, request: Interaction, answers: Record<string, string[]>) {
+  const turns: any[] = state.turnHistory?.history?.entitiesByKey ? Object.values(state.turnHistory.history.entitiesByKey) : state.turns ?? [];
+  const accepted = new Map<string, Reply>();
+  for (const turn of turns) for (const item of turn.items ?? []) {
+    if (item.type !== 'userMessage' && !(item.type === 'steeringUserMessage' && item.status === 'accepted')) continue;
+    const content = item.type === 'userMessage' ? item.content : item.input;
+    if (content?.length !== 1 || content[0]?.type !== 'text' || typeof content[0].text !== 'string') continue;
+    for (const reply of asyncInputReplies(content[0].text) ?? []) accepted.set(reply.questionItemId, reply);
+  }
+  return !!request.questions?.length && request.questions.every(question => {
+    const reply = accepted.get(question.id);
+    return reply?.question === question.question && reply.answer === answers[question.id][0].trim();
+  });
 }

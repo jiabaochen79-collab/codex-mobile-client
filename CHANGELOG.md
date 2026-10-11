@@ -2,6 +2,14 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.52 - 2026-10-11
+
+### Fixed
+
+- Submit mobile answers through the desktop question card so its answered state also closes correctly.
+- Keep questions from one asynchronous batch together and send every answer in a single native submission.
+- Verify the accepted question identities and answers; preserve desktop drafts and never resend through another transport after an uncertain native result.
+
 ## 0.4.51 - 2026-10-11
 
 ### Fixed
