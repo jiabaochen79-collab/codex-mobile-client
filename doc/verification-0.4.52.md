@@ -23,4 +23,17 @@
 
 以上真实测试采用本机独立测试任务，没有回答用户业务问题。本次尚未进行 iPhone/Android 真机点击到桌面的端到端验收。
 
-安装包版本、摘要、生产发布和本机升级结果在交付验证后补记。
+## 安装包与交付
+
+- 修复源码提交：`17eb967`；版本为 `0.4.52`。
+- 安装包：`release/ChatGPT-Remote-Assistant-Setup-0.4.52.exe`，43,016,790 字节。
+- 安装包 SHA-256：`074f8e3a3e6ea8e74eed89fe23addc0dfd5c84a28a6247058a2d1ef1526848b9`。
+- 公开 ZIP SHA-256：`3805d7a62c983f1e114cfee238c27fe90e0f9035944d99333a65fa15d478ed3a`。
+- 安装器元数据、原生助手及 agent 版本一致；ZIP 与安装器使用相同客户端构建，9,094 个 ZIP 条目通过公开包边界检查。安装包仍未进行 Windows Authenticode 签名。
+- 本机从 0.4.51 覆盖升级至 0.4.52。安装前检查未处理提问、原生队列、远程队列和上传，并完成程序及一致性数据备份。设备身份、密码、开关、两份记住授权及队列数据校验一致，SQLite 完整性为 `ok`。
+- 11 个原有 Codex/ChatGPT 进程的 PID 与创建时间全部保留，仅重启助手及其 agent；安装文件与构建摘要一致，本机 HTTP 健康检查和生产认证重连通过。
+- 生产更新服务已正式发布 0.4.52，发布序号为 49。真实更新器通过认证 HTTPS 校验 65,536 字节的 Range 请求，从该位置续传完整安装包，21.306 秒后达到 `ready`，完整文件摘要一致。只下载新版本，没有下载旧版恢复包，也没有再次安装本机助手。
+- 0.4.51 查询获得 0.4.52；0.4.52 查询不返回更新。安装允许状态、服务器持久化文件摘要及安装结果上报均验证通过。生产健康检查、原有服务进程、收费与试用配置保持一致。
+- 修复及交付记录仅提交本地 Git，未推送远程仓库。
+
+详细验收证据保存在本地忽略目录：`.runtime/acceptance/input52-batch.json`、`.runtime/acceptance/input52-busy.json`、`.runtime/acceptance/input52-artifacts/artifacts.json`、`.runtime/acceptance/local-upgrade-20261011-0.4.52`、`.runtime/acceptance/production-update-0.4.52.json` 和 `.runtime/acceptance/production-release-0.4.52.json`。
