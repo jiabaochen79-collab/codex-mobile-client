@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { mockPairedBrowser } from './paired-browser-fixture';
+import { normalizeSnapshot } from '../src/agent/desktop';
 
 const webkit = process.env.TEST_BROWSER === 'webkit';
 test.use({ browserName: webkit ? 'webkit' : 'chromium', viewport: { width: 390, height: 844 }, launchOptions: webkit ? {} : { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
@@ -99,6 +100,30 @@ test('isolates answers and field IDs between requests with the same question ID'
   await page.locator('.questions').nth(1).getByRole('button', { name: '提交', exact: true }).click();
   await expect.poll(() => f.commands.filter(command => command.method === 'respond').length).toBe(1);
   expect(f.commands.find(command => command.method === 'respond').params).toMatchObject({ requestId: 'second', answers: { choice: ['second custom'] } });
+});
+
+test('shows unanswered async questions after completion and reload, and submits a custom answer without losing the message draft', async ({ page }, info) => {
+  const f = await fixture(page, { mode: 'default', inputRequest: true });
+  const question = '任务已经完成，这笔测试收款是否实际发生？';
+  const requestId = JSON.stringify(['request_user_input_async', 'completed-question', 0]);
+  const completed = normalizeSnapshot({ id: f.snapshot.id, threadRuntimeStatus: { type: 'idle' }, turnHistory: { history: { entitiesByKey: { latest: { turnId: 'completed-turn', status: 'completed', turnStartedAtMs: 1, items: [
+    { id: 'completed-question', type: 'agentMessage', questions: [{ title: question, options: ['未发生', '确实发生'] }], text: '请核对测试收款。' },
+    { id: 'final', type: 'agentMessage', text: '执行完成，仍需要你的确认。', phase: 'final' }
+  ] } } } } }, 'fixture', 1);
+  Object.assign(f.snapshot, completed); f.update();
+  await expect(page.getByLabel(question, { exact: true })).toBeVisible();
+  expect(f.snapshot.busy).toBe(false); expect(f.snapshot.turnId).toBeNull();
+  await page.reload(); await page.getByRole('button', { name: '计划模式验收', exact: true }).click();
+  await expect(page.getByLabel(question, { exact: true })).toBeVisible();
+  await page.getByLabel('消息', { exact: true }).fill('保留普通消息草稿');
+  await page.getByLabel(question, { exact: true }).selectOption('custom');
+  await page.getByLabel(question + '：其他', { exact: true }).fill('测试手写确认');
+  await page.screenshot({ path: info.outputPath('completed-question.png') });
+  await page.locator('.questions').getByRole('button', { name: '提交', exact: true }).click();
+  await expect(page.locator('.questions')).toHaveCount(0);
+  expect(f.commands.filter(c => c.method === 'respond')).toEqual([{ method: 'respond', params: { id: f.snapshot.id, requestId, epoch: 'fixture', answers: { [requestId]: ['测试手写确认'] } } }]);
+  expect(f.commands.some(c => c.method === 'send' || c.method === 'stop')).toBe(false);
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('保留普通消息草稿');
 });
 test('closes task-bound model and permission dialogs when a notification opens another task', async ({ page }) => {
   const f = await fixture(page, { mode: 'default', secondTask: true });

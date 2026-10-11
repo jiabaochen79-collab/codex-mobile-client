@@ -2,6 +2,14 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.51 - 2026-10-11
+
+### Fixed
+
+- Keep unanswered questions from the latest desktop turn visible after its final response and completion, including after a mobile reload.
+- Submit answers to completed turns using a new native turn while preserving the question identity and inherited task settings; continue steering answers during execution.
+- Respect desktop-accepted skips, preserve rejected answers for retry, and prevent older questions from reappearing in a newer turn.
+
 ## 0.4.49 - 2026-10-09
 
 ### Fixed

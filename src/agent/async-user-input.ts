@@ -1,4 +1,3 @@
-import { runtimeRunning } from './activity.js';
 import type { Interaction } from '../shared/protocol.js';
 
 const open = '<send_user_message_question_reply>';
@@ -16,9 +15,10 @@ export function asyncInputReplies(text: string): Reply[] | undefined {
 }
 
 export function asyncUserInputRequests(state: any): Interaction[] {
-  if (runtimeRunning(state.threadRuntimeStatus) === false) return [];
   const turns: any[] = state.turnHistory?.history?.entitiesByKey ? Object.values(state.turnHistory.history.entitiesByKey) : state.turns ?? [];
-  const turn = turns.filter(turn => turn.status === 'inProgress').sort((a, b) => (a.turnStartedAtMs ?? 0) - (b.turnStartedAtMs ?? 0)).at(-1);
+  // Completing a turn does not answer its questions. Limit requests to the
+  // latest turn so historical questions cannot leak into a newer task round.
+  const turn = [...turns].sort((a, b) => (a.turnStartedAtMs ?? 0) - (b.turnStartedAtMs ?? 0)).at(-1);
   const pending = new Map<string, Interaction>();
   for (const item of turn?.items ?? []) {
     if (item.type === 'agentMessage' && typeof item.id === 'string' && Array.isArray(item.questions)) {
@@ -30,7 +30,7 @@ export function asyncUserInputRequests(state: any): Interaction[] {
     } else if (item.type === 'userMessage' || item.type === 'steeringUserMessage' && item.status === 'accepted') {
       const content = item.type === 'userMessage' ? item.content : item.input;
       if (content?.length === 1 && content[0]?.type === 'text' && typeof content[0].text === 'string') {
-        for (const reply of asyncInputReplies(content[0].text) ?? []) if (reply.answer.trim()) pending.delete(reply.questionItemId);
+        for (const reply of asyncInputReplies(content[0].text) ?? []) pending.delete(reply.questionItemId);
       }
     }
   }

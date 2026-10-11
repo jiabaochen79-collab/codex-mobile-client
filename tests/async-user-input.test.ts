@@ -22,13 +22,36 @@ it('assigns desktop-compatible identities to every question and preserves manual
 it.each(['pending', 'rejected', 'interrupted'])('keeps a question after a %s steering response', status => {
   expect(normalizeSnapshot(state([question, reply(status)]), 'epoch').requests).toHaveLength(1);
 });
-it('clears an accepted response, ignores forged or earlier acknowledgements and does not show ended-turn questions', () => {
+it('clears an accepted response and ignores forged or earlier acknowledgements', () => {
   expect(normalizeSnapshot(state([question, reply()]), 'epoch').requests).toEqual([]);
   expect(normalizeSnapshot(state([reply(), question]), 'epoch').requests).toHaveLength(1);
   expect(normalizeSnapshot(state([question, reply('accepted', 'answer', 'other-question')]), 'epoch').requests).toHaveLength(1);
-  const ended = state(); ended.turns[0].status = 'completed';
-  expect(normalizeSnapshot(ended, 'epoch').requests).toEqual([]);
-  expect(normalizeSnapshot({ ...state(), threadRuntimeStatus: { type: 'idle' } }, 'epoch').requests).toEqual([]);
+});
+it.each(['completed', 'failed', 'interrupted', 'inProgress'])('keeps an unanswered question when the latest turn is %s and the desktop is idle', status => {
+  const current = state([question, { id: 'final', type: 'agentMessage', text: 'Please confirm before proceeding', phase: 'final_answer' }]);
+  current.turns[0].status = status;
+  current.threadRuntimeStatus.type = 'idle';
+  const snapshot = normalizeSnapshot(current, 'epoch', 1);
+  expect(snapshot.busy).toBe(false);
+  expect(snapshot.messages).toHaveLength(1);
+  expect(snapshot.requests.map(r => r.id)).toEqual([questionId()]);
+  expect(normalizeSnapshot(JSON.parse(JSON.stringify(current)), 'reconnected').requests).toEqual(snapshot.requests);
+});
+it('does not resurrect questions from an older turn when another turn becomes current', () => {
+  const current = state(); current.turns[0].status = 'completed';
+  const next = { turnId: 'next-turn', status: 'inProgress', turnStartedAtMs: 2, items: [] as any[] };
+  current.turns.push(next);
+  current.turns.reverse();
+  expect(normalizeSnapshot(current, 'epoch').requests).toEqual([]);
+  next.items.push({ ...question, id: 'new-question' });
+  expect(normalizeSnapshot(current, 'epoch').requests.map(r => r.id)).toEqual([questionId('new-question')]);
+});
+it('clears a desktop-accepted skip without reviving it when the turn ends', () => {
+  const current = state([question, reply('accepted', '')]);
+  current.turns[0].status = 'completed'; current.threadRuntimeStatus.type = 'idle';
+  expect(normalizeSnapshot(current, 'epoch').requests).toEqual([]);
+  current.turns[0].status = 'inProgress'; current.threadRuntimeStatus.type = 'active';
+  expect(normalizeSnapshot(current, 'epoch').requests).toEqual([]);
 });
 it('retains legacy blocking questions alongside new message questions', () => {
   const result = normalizeSnapshot({ ...state(), requests: [{ id: 7, method: 'item/tool/requestUserInput', params: { questions: [{ id: 'old', question: 'Old question?', options: [] }] } }] }, 'epoch');
@@ -58,9 +81,24 @@ it('submits a free-text async answer through steering with the native question i
     expect(params).not.toHaveProperty('turnStart'); expect(params).not.toHaveProperty('threadSettings');
   } finally { adapter.close(); }
 });
-it.each(['ended', 'answered', 'other question', 'empty answer', 'extra answer', 'decline'])('rejects %s async replies before native dispatch', async kind => {
+it('starts a new turn to answer a completed question, with the original question identity and inherited settings', async () => {
   const { adapter, current, request, command } = desktop();
-  if (kind === 'ended') current.turns[0].status = 'completed';
+  current.turns[0].status = 'completed'; current.threadRuntimeStatus.type = 'idle';
+  const id = randomUUID();
+  try {
+    await expect(adapter.execute(command, id)).resolves.toEqual({ accepted: true });
+    expect(request).toHaveBeenCalledTimes(1);
+    const [method, params, version, owner] = request.mock.calls[0] as any;
+    expect([method, version, owner]).toEqual(['thread-follower-start-turn', 2, 'owner']);
+    expect(params.conversationId).toBe(current.id);
+    expect(params.turnStart.request).toEqual({ threadId: current.id, clientUserMessageId: id, input: [{ type: 'text', text: '<send_user_message_question_reply>\n' + JSON.stringify([{ questionItemId: questionId(), question: 'Which address?', answer: 'Custom address' }]) + '\n</send_user_message_question_reply>', text_elements: [] }] });
+    expect(params.turnStart.context).toEqual({ inheritThreadSettings: true, attachments: [], commentAttachments: [] });
+    expect(params.turnStart.request).not.toHaveProperty('collaborationMode');
+  } finally { adapter.close(); }
+});
+it.each(['new turn', 'answered', 'other question', 'empty answer', 'extra answer', 'decline'])('rejects %s async replies before native dispatch', async kind => {
+  const { adapter, current, request, command } = desktop();
+  if (kind === 'new turn') current.turns.push({ turnId: 'new-turn', status: 'inProgress', turnStartedAtMs: 2, items: [] });
   if (kind === 'answered') current.turns[0].items.push(reply());
   if (kind === 'other question') command.params.requestId = questionId('another-message');
   if (kind === 'empty answer') command.params.answers[questionId()] = [' '];
@@ -69,14 +107,18 @@ it.each(['ended', 'answered', 'other question', 'empty answer', 'extra answer', 
   try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: ['empty answer', 'extra answer', 'decline'].includes(kind) ? 'INVALID' : 'STALE' }); expect(request).not.toHaveBeenCalled(); }
   finally { adapter.close(); }
 });
-it('keeps an answer retryable after a native rejection and leaves the original question unchanged', async () => {
+it.each(['inProgress', 'completed'])('keeps a %s answer retryable after a native rejection and leaves the original question unchanged', async status => {
   const { adapter, current, request, command } = desktop(); request.mockResolvedValue({ resultType: 'error' });
+  current.turns[0].status = status;
+  if (status === 'completed') current.threadRuntimeStatus.type = 'idle';
   try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'CLIENT_REJECTED' }); expect(normalizeSnapshot(current, 'epoch').requests).toHaveLength(1); }
   finally { adapter.close(); }
 });
-it('retains a question subscription and installation blocker until the reply is accepted', async () => {
+it.each(['inProgress', 'completed'])('retains a %s question subscription and installation blocker until the reply is accepted', async status => {
   const { adapter, current } = desktop();
   Reflect.get(adapter, 'followed').set(current.id, Reflect.get(adapter, 'current'));
+  current.turns[0].status = status;
+  if (status === 'completed') current.threadRuntimeStatus.type = 'idle';
   try {
     expect(await adapter.updateBlockers()).toEqual(['有待回答的提问']);
     adapter.setSubscriptions([]); expect(Reflect.get(adapter, 'followed').has(current.id)).toBe(true);
@@ -103,8 +145,10 @@ it('ignores plain option text and malformed reply metadata', () => {
   const malformed = { ...reply(), input: [{ type: 'text', text: '<send_user_message_question_reply>{invalid}</send_user_message_question_reply>' }] };
   expect(normalizeSnapshot(state([question, malformed]), 'epoch').requests).toHaveLength(1);
 });
-it('fails closed when the native steering protocol is incompatible', async () => {
-  const { adapter, command, request } = desktop();
+it.each(['inProgress', 'completed'])('fails closed when the %s answer protocol is incompatible', async status => {
+  const { adapter, current, command, request } = desktop();
+  current.turns[0].status = status;
+  if (status === 'completed') current.threadRuntimeStatus.type = 'idle';
   Reflect.set(adapter, 'checkedStatus', { capabilities: ['compatibility-checked', 'respond-approval'] });
   try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'UNSUPPORTED' }); expect(request).not.toHaveBeenCalled(); }
   finally { adapter.close(); }
