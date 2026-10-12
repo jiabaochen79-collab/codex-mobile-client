@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Management;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Text.RegularExpressions;
@@ -19,10 +20,38 @@ internal static class DesktopQuestion {
     private static readonly string[] Sends = { "Send", "发送" };
     private static readonly string[] Nexts = { "Next", "下一步", "下一个" };
     private static readonly string[] Skips = { "Skip", "跳过" };
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr window, int command);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    private sealed class WindowLease : IDisposable {
+        private readonly Process process;
+        private readonly IntPtr handle;
+        private readonly bool minimized;
+        internal WindowLease(Process process, IntPtr handle) {
+            this.process = process;
+            this.handle = handle;
+            try {
+                uint owner;
+                if (handle == IntPtr.Zero || GetWindowThreadProcessId(handle, out owner) == 0 || owner != process.Id) throw new InvalidOperationException();
+                minimized = IsIconic(handle);
+                // Chromium may stop updating the question view while minimized.
+                if (minimized && !ShowWindowAsync(handle, 4)) throw new InvalidOperationException();
+            } catch { process.Dispose(); throw; }
+        }
+        public void Dispose() {
+            try {
+                uint owner;
+                if (minimized && !process.HasExited && GetWindowThreadProcessId(handle, out owner) != 0 && owner == process.Id && GetForegroundWindow() != handle && !IsIconic(handle)) ShowWindowAsync(handle, 7);
+            } catch (InvalidOperationException) { }
+            finally { process.Dispose(); }
+        }
+    }
 
     internal static void Run() {
         bool submitting = false;
         string stage = "input";
+        WindowLease window = null;
         using (var reader = new StreamReader(Console.OpenStandardInput(), Encoding.UTF8))
         using (var writer = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true }) {
             try {
@@ -30,6 +59,8 @@ internal static class DesktopQuestion {
                 if (input == null || input.Length > 40000) throw new InvalidOperationException();
                 var request = Program.Json.Deserialize<Request>(input);
                 if (request == null || String.IsNullOrWhiteSpace(request.title) || request.answers == null || request.answers.Length < 1 || request.answers.Any(a => a == null || String.IsNullOrWhiteSpace(a.question) || String.IsNullOrWhiteSpace(a.answer) || a.answer.Length > 4000)) throw new InvalidOperationException();
+                stage = "window";
+                window = PrepareWindow(request);
                 stage = "card";
                 AutomationElement root = null; Card card = null;
                 var loading = Stopwatch.StartNew();
@@ -69,20 +100,37 @@ internal static class DesktopQuestion {
                     if (submitting) { writer.WriteLine("{\"submitted\":true,\"closed\":false}"); return; }
                 }
             } catch (Exception error) { writer.WriteLine(Program.Json.Serialize(new { error = submitting ? "OUTCOME_UNKNOWN" : "CLIENT_UNAVAILABLE", stage = stage, reason = error.GetType().Name })); }
+            finally { if (window != null) window.Dispose(); }
         }
     }
-    private static AutomationElement Window(Request request) {
-        using (var process = Process.GetProcessById(request.processId)) {
+    private static Process CheckedProcess(Request request) {
+        var process = Process.GetProcessById(request.processId);
+        try {
             if (process.SessionId != Process.GetCurrentProcess().SessionId || process.HasExited || !String.Equals(process.MainModule.FileName, request.executablePath, StringComparison.OrdinalIgnoreCase) || !request.executablePath.Contains("OpenAI.Codex_")) throw new InvalidOperationException();
             using (var identity = new ManagementObject("Win32_Process.Handle='" + request.processId + "'")) {
                 var owner = identity.InvokeMethod("GetOwnerSid", null, null);
                 if (owner == null || Convert.ToString(owner["Sid"]) != System.Security.Principal.WindowsIdentity.GetCurrent().User.Value || process.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture) != request.startedAt) throw new InvalidOperationException();
             }
+            return process;
+        } catch { process.Dispose(); throw; }
+    }
+    private static AutomationElement Window(Request request) {
+        using (var process = CheckedProcess(request)) {
             var windows = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, request.processId));
             var candidates = windows.Cast<AutomationElement>().Where(w => w.FindAll(TreeScope.Descendants, new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document), new PropertyCondition(AutomationElement.NameProperty, request.title))).Count == 1).ToArray();
             if (candidates.Length != 1) throw new InvalidOperationException();
             return candidates[0];
         }
+    }
+    private static WindowLease PrepareWindow(Request request) {
+        var process = CheckedProcess(request);
+        try {
+            var windows = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, request.processId)).Cast<AutomationElement>().Where(w => w.Current.NativeWindowHandle != 0).ToArray();
+            var matches = windows.Where(w => w.FindAll(TreeScope.Descendants, new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document), new PropertyCondition(AutomationElement.NameProperty, request.title))).Count == 1).ToArray();
+            var target = matches.Length == 1 ? matches[0] : matches.Length == 0 && windows.Length == 1 ? windows[0] : null;
+            if (target == null) throw new InvalidOperationException();
+            return new WindowLease(process, new IntPtr(target.Current.NativeWindowHandle));
+        } catch { process.Dispose(); throw; }
     }
     private static bool Named(AutomationElement element, ControlType type, string[] names) { return element.Current.ControlType == type && names.Contains(element.Current.Name); }
     private static string QuestionText(string text) { return Regex.Replace(System.Net.WebUtility.HtmlDecode(text), @"\s+", " ").Trim(); }

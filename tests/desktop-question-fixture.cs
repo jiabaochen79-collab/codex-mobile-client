@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows;
@@ -17,6 +19,7 @@ internal sealed class QuestionDocument : ContentControl {
     }
 }
 internal static class QuestionFixture {
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     private static readonly BindingFlags Hidden = BindingFlags.Static | BindingFlags.NonPublic;
     private static GroupBox Wrap(UIElement content) { return new GroupBox { Content = content }; }
     private static UIElement Card(string question, bool ambiguous, int depth) {
@@ -37,7 +40,7 @@ internal static class QuestionFixture {
         var requestType = type.GetNestedType("Request", BindingFlags.NonPublic);
         var request = new JavaScriptSerializer().Deserialize("{\"title\":\"fixture\",\"answers\":[{\"question\":\"单次导入 最多多少条？ 说明 & 约束\",\"answer\":\"最多10万\"}]}", requestType);
         var results = new List<string>(); var application = new Application();
-        var window = new Window { Title = "Question matcher fixture", Width = 500, Height = 400, Left = -30000, Top = -30000, ShowInTaskbar = false };
+        var window = new Window { Title = "Question matcher fixture", Width = 500, Height = 400, Left = -30000, Top = -30000, ShowInTaskbar = false, ShowActivated = false };
         var cases = new[] { "shallow", "free-form-deep", "minimized", "ambiguous", "wrong-question", "wrong-title", "document-boundary", "closed" };
         Exception failure = null;
         window.Loaded += (sender, e) => {
@@ -65,6 +68,24 @@ internal static class QuestionFixture {
                     }
                     results.Add(sample);
                 }
+                window.Dispatcher.Invoke(new Action(() => {
+                    window.Content = Document("fixture", Card("单次导入 最多多少条？ 说明 & 约束", false, 5));
+                    window.WindowState = WindowState.Minimized;
+                }));
+                Thread.Sleep(100);
+                var foreground = GetForegroundWindow();
+                var leaseType = type.GetNestedType("WindowLease", BindingFlags.NonPublic);
+                using (var lease = (IDisposable)Activator.CreateInstance(leaseType, BindingFlags.Instance | BindingFlags.NonPublic, null, new object[] { Process.GetCurrentProcess(), handle }, null)) {
+                    var ready = Stopwatch.StartNew();
+                    while ((bool)window.Dispatcher.Invoke(new Func<bool>(() => window.WindowState == WindowState.Minimized)) && ready.ElapsedMilliseconds < 2000) Thread.Sleep(20);
+                    if ((bool)window.Dispatcher.Invoke(new Func<bool>(() => window.WindowState == WindowState.Minimized))) throw new Exception("Window did not recover");
+                    if (GetForegroundWindow() != foreground) throw new Exception("Window restoration changed foreground");
+                    type.GetMethod("Find", Hidden).Invoke(null, new object[] { AutomationElement.FromHandle(handle), request, 0 });
+                }
+                var restored = Stopwatch.StartNew();
+                while (!(bool)window.Dispatcher.Invoke(new Func<bool>(() => window.WindowState == WindowState.Minimized)) && restored.ElapsedMilliseconds < 2000) Thread.Sleep(20);
+                if (!(bool)window.Dispatcher.Invoke(new Func<bool>(() => window.WindowState == WindowState.Minimized))) throw new Exception("Original minimized state was not restored");
+                results.Add("minimized-window-recovery");
             } catch (Exception error) { failure = error; }
             finally { window.Dispatcher.Invoke(new Action(() => window.Close())); }
             }) { IsBackground = true }.Start();
