@@ -52,5 +52,31 @@ submission is evidence for the background case only.
 - ZIP SHA-256: `9870cd771c356019f9ae42f16f038b907dc9994851695170d651e15414b19c28`.
 - The installer is not Windows Authenticode signed.
 
-Production publication and installed-helper verification are recorded after
-delivery. Server source is unchanged; publication only adds the Windows EXE.
+## Delivery Results
+
+Verified on 2026-10-13 local time (2026-10-12 UTC).
+
+- Source commit: `074b240`; local only, not pushed.
+- The server published 0.4.54 as release sequence 51 after a consistent MySQL
+  snapshot and protected configuration backup.
+- The actual authenticated updater resumed from 65,536 bytes and reached
+  `ready` in 21.447 seconds. The complete installer digest matched. It downloaded
+  only the candidate; no old recovery package was fetched or installed.
+- Production returns 0.4.54 to 0.4.53 and no update to 0.4.54. Installation
+  authorization and the stored installer digest passed validation.
+- Relay and MySQL remain healthy with zero restarts and no OOM. Service process
+  identities, secrets, administrator settings, prices, purchase gates and trial
+  policy are unchanged. Server implementation was not redeployed.
+- A separate real background question was submitted through the version-checked
+  0.4.54 candidate executable. Its native card closed, the exact canonical answer
+  was verified, and the model acknowledged the answer. This was a candidate run,
+  not verification of an installed 0.4.54 helper.
+- Local installation is blocked by one pending remote message in the active
+  conversation. The preflight correctly rejected installation; the queue was
+  not modified, and the installed helper remains 0.4.53. Installed 0.4.54 runtime
+  acceptance and an installation-result report are therefore still pending.
+
+Evidence lives in the local ignored `.runtime/acceptance/` directory:
+`input54-artifacts/artifacts.json`, `input54-background-result.json`,
+`production-update-0.4.54.json`, `production-release-0.4.54.json`, and
+`local-upgrade-20261012-0.4.54/blocked.json`.
