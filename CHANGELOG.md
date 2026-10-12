@@ -2,6 +2,14 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.53 - 2026-10-12
+
+### Fixed
+
+- Match desktop question text after Markdown rendering and whitespace normalization, including questions with no predefined options.
+- Locate standalone response fields within the question card while rejecting ambiguous fields and other task documents.
+- Distinguish card lookup, window availability, draft conflicts and input failures without discarding the mobile answer.
+
 ## 0.4.52 - 2026-10-11
 
 ### Fixed

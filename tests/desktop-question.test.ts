@@ -18,6 +18,25 @@ beforeEach(() => {
 });
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 const submit = (check = vi.fn().mockResolvedValue(undefined)) => submitDesktopQuestion('helper', identity, 'Task title', request, answers, check);
+it('matches the desktop display text for handwritten questions with Markdown, wrapping and extra whitespace', async () => {
+  const question = { ...request, questions: [{ id: 'q1', question: '**单次导入**最多大约有多少条资产记录？\n\n这决定是否可以直接做内存排序，  以及是否需要专门优化查询。', options: [] }] };
+  const result = submitDesktopQuestion('helper', identity, 'Task title', question, { q1: ['最多10万'] }, vi.fn().mockResolvedValue(undefined));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(JSON.parse(input)).toMatchObject({ answers: [{ question: '单次导入最多大约有多少条资产记录？ 这决定是否可以直接做内存排序， 以及是否需要专门优化查询。', answer: '最多10万' }] });
+  child.stdout.write('{"ready":true}\n'); await vi.advanceTimersByTimeAsync(0);
+  child.stdout.write('{"submitted":true,"closed":true}\n'); child.emit('close', 0); await result;
+});
+it.each([
+  ['draft', '电脑提问中已有不同的未提交回答，为避免覆盖，请先处理电脑上的草稿；手机回答已保留。'],
+  ['card', '未定位到当前电脑提问卡片，操作未提交，手机回答已保留。请稍后重试。'],
+  ['window', '电脑提问窗口暂不可用，操作未提交，手机回答已保留。请确认电脑已解锁且 ChatGPT 正常运行。'],
+  ['value-pattern', '当前 ChatGPT 提问输入框不支持自动填写，操作未提交，手机回答已保留。'],
+  ['submit', '电脑提问的提交按钮暂不可用，操作未提交，手机回答已保留。请稍后重试。']
+])('explains the native %s failure without blaming unrelated causes', async (stage, message) => {
+  const result = submit(); const assertion = expect(result).rejects.toMatchObject({ code: 'CLIENT_UNAVAILABLE', message });
+  await vi.advanceTimersByTimeAsync(0); child.stdout.write(JSON.stringify({ error: 'CLIENT_UNAVAILABLE', stage }) + '\n'); await assertion;
+  expect(spawn).toHaveBeenCalledOnce();
+});
 it('sends only the device identity and the selected question answers, then checks authorization before native submission', async () => {
   const check = vi.fn().mockResolvedValue(undefined);
   const result = submit(check); await vi.advanceTimersByTimeAsync(0);

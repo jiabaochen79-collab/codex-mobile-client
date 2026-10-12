@@ -7,6 +7,7 @@ using System.Linq;
 using System.Management;
 using System.Text;
 using System.Threading;
+using System.Text.RegularExpressions;
 using System.Windows.Automation;
 
 // Submit through the question card so the desktop also records its submission.
@@ -33,7 +34,7 @@ internal static class DesktopQuestion {
                 AutomationElement root = null; Card card = null;
                 var loading = Stopwatch.StartNew();
                 while (card == null) {
-                    try { root = Window(request); card = Find(root, request, 0); }
+                    try { stage = "window"; root = Window(request); stage = "card"; card = Find(root, request, 0); }
                     catch (InvalidOperationException) { if (loading.ElapsedMilliseconds >= 4000) throw; Thread.Sleep(100); }
                 }
                 writer.WriteLine("{\"ready\":true}");
@@ -45,8 +46,8 @@ internal static class DesktopQuestion {
                     stage = "value-pattern"; object raw;
                     if (!card.editor.TryGetCurrentPattern(ValuePattern.Pattern, out raw)) throw new InvalidOperationException();
                     var value = (ValuePattern)raw;
-                    stage = "draft";
                     var draft = value.Current.Value.Trim();
+                    stage = "draft";
                     if (!String.IsNullOrEmpty(draft) && !Editors.Contains(draft) && draft != request.answers[index].answer) throw new InvalidOperationException();
                     stage = "value";
                     value.SetValue(request.answers[index].answer);
@@ -60,7 +61,7 @@ internal static class DesktopQuestion {
                     while (deadline.ElapsedMilliseconds < 4000) {
                         Thread.Sleep(100);
                         if (submitting) {
-                            if (!HasQuestion(Window(request), request.answers[index].question)) { writer.WriteLine("{\"submitted\":true,\"closed\":true}"); return; }
+                            if (!HasQuestion(Window(request), request, index)) { writer.WriteLine("{\"submitted\":true,\"closed\":true}"); return; }
                         } else {
                             try { Find(Window(request), request, index + 1); break; } catch (InvalidOperationException) { }
                         }
@@ -84,11 +85,14 @@ internal static class DesktopQuestion {
         }
     }
     private static bool Named(AutomationElement element, ControlType type, string[] names) { return element.Current.ControlType == type && names.Contains(element.Current.Name); }
-    private static bool HasQuestion(AutomationElement root, string question) {
-        return root.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit)).Cast<AutomationElement>().Where(e => Editors.Contains(e.Current.Name)).Any(e => {
+    private static string QuestionText(string text) { return Regex.Replace(System.Net.WebUtility.HtmlDecode(text), @"\s+", " ").Trim(); }
+    private static bool HasQuestion(AutomationElement root, Request request, int index) {
+        var document = root.FindFirst(TreeScope.Descendants, new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document), new PropertyCondition(AutomationElement.NameProperty, request.title)));
+        if (document == null) throw new InvalidOperationException();
+        return document.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit)).Cast<AutomationElement>().Where(e => Editors.Contains(e.Current.Name)).Any(e => {
             var panel = TreeWalker.ControlViewWalker.GetParent(e);
-            for (int i = 0; i < 3 && panel != null; i++, panel = TreeWalker.ControlViewWalker.GetParent(panel)) {
-                if (panel.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.NameProperty, question)).Count > 0) return true;
+            for (int i = 0; i < 8 && panel != null && panel.Current.ControlType != ControlType.Document; i++, panel = TreeWalker.ControlViewWalker.GetParent(panel)) {
+                if (panel.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text)).Cast<AutomationElement>().Any(text => QuestionText(text.Current.Name) == QuestionText(request.answers[index].question))) return true;
             }
             return false;
         });
@@ -100,9 +104,9 @@ internal static class DesktopQuestion {
         foreach (AutomationElement editor in document.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit))) {
             if (!Editors.Contains(editor.Current.Name)) continue;
             var panel = TreeWalker.ControlViewWalker.GetParent(editor);
-            for (int depth = 0; depth < 3 && panel != null; depth++, panel = TreeWalker.ControlViewWalker.GetParent(panel)) {
+            for (int depth = 0; depth < 8 && panel != null && panel.Current.ControlType != ControlType.Document; depth++, panel = TreeWalker.ControlViewWalker.GetParent(panel)) {
                 var descendants = panel.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>().ToArray();
-                if (!descendants.Any(e => e.Current.ControlType == ControlType.Text && e.Current.Name == request.answers[index].question) || !descendants.Any(e => Named(e, ControlType.Button, Skips))) continue;
+                if (!descendants.Any(e => e.Current.ControlType == ControlType.Text && QuestionText(e.Current.Name) == QuestionText(request.answers[index].question)) || !descendants.Any(e => Named(e, ControlType.Button, Skips))) continue;
                 var buttons = descendants.Where(e => Named(e, ControlType.Button, index == request.answers.Length - 1 ? Sends : Nexts)).ToArray();
                 if (buttons.Length != 1 || descendants.Count(e => Named(e, ControlType.Edit, Editors)) != 1) throw new InvalidOperationException();
                 candidates.Add(new Card { editor = editor, submit = buttons[0] }); break;
