@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { goalPrompt } from '../web/goal-mode.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse, compileScript } from '@vue/compiler-sfc';
@@ -39,6 +40,7 @@ function setup(file: string, props: any = {}, emit: (...args: any[]) => void = (
     if (id === './use-chat-scroll') return { useChatScroll: () => ({ awayFromBottom: vue.ref(false), change: async (fn: any) => fn(), reset() {}, pause() {}, resume() {}, toBottom() {} }) };
     if (id === './use-attachments') return { useAttachments: () => ({ current: vue.ref([]), hasPending: vue.ref(false), restore() {}, clear() {} }) };
     if (id === './conversation-model') return { conversationTurns };
+    if (id === './goal-mode') return { goalPrompt };
     if (id === './notification-count') return { mergeNotificationCount };
     if (id === './push-registration') return { pushRegistration: () => push() };
     if (id === 'qrcode') return { default: { toDataURL: async () => 'data:fixture' } };

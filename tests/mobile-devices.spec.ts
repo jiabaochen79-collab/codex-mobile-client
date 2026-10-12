@@ -35,7 +35,7 @@ test('keeps plan mode and attachments isolated when switching computers', async 
   if (await close.count()) await close.click();
   await page.locator('input[data-attachment-source="files"]').setInputFiles({ name: 'mode.txt', mimeType: 'text/plain', buffer: Buffer.from('retained attachment') });
   await expect(page.locator('.pending-attachment')).toContainText('已上传'); await page.getByLabel('消息', { exact: true }).fill('计划草稿');
-  await page.getByTitle('添加照片、文件或计划模式').click(); await page.getByRole('menuitemcheckbox', { name: /计划模式/ }).click(); await expect(close).toBeEnabled();
+  await page.getByTitle('添加照片、文件或任务模式').click(); await page.getByRole('menuitemcheckbox', { name: /计划模式/ }).click(); await expect(close).toBeEnabled();
   await expect(page.locator('.pending-attachment')).toContainText('已上传');
   await switchTo(page, home); await task(page, '移动端验收记录'); await expect(close).toBeHidden(); await expect(page.locator('.pending-attachment')).toHaveCount(0);
   await switchTo(page, office); await expect(close).toBeEnabled(); await expect(page.getByLabel('消息', { exact: true })).toHaveValue('计划草稿'); await expect(page.locator('.pending-attachment')).toContainText('已上传');

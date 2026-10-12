@@ -3,13 +3,18 @@ import { mockPairedBrowser } from './paired-browser-fixture';
 import { normalizeSnapshot } from '../src/agent/desktop';
 
 const webkit = process.env.TEST_BROWSER === 'webkit';
-test.use({ browserName: webkit ? 'webkit' : 'chromium', viewport: { width: 390, height: 844 }, launchOptions: webkit ? {} : { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
+test.use({ browserName: webkit ? 'webkit' : 'chromium', serviceWorkers: 'block', viewport: { width: 390, height: 844 }, launchOptions: webkit ? {} : { executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe' } });
 const origin = process.env.PLAN_WEB_ORIGIN ?? 'http://127.0.0.1:18890';
-const add = (page: Page) => page.getByTitle('添加照片、文件或计划模式', { exact: true });
+const add = (page: Page) => page.getByTitle('添加照片、文件或任务模式', { exact: true });
 const planOption = (page: Page) => page.getByRole('menuitemcheckbox', { name: /计划模式/ });
 const closePlan = (page: Page) => page.getByRole('button', { name: '关闭计划模式', exact: true });
 const permissionTrigger = (page: Page) => page.locator('.permission-status');
 const permissionOption = (page: Page, name: string) => page.getByRole('radio').filter({ has: page.getByText(name, { exact: true }) });
+const goalOption = (page: Page) => page.getByRole('menuitemcheckbox', { name: /目标模式/ });
+function nativeGoal(threadId: string, status = 'active') {
+  return { threadId, objective: '完成两步验收 <script>alert(1)</script>\n' + 'LongObjective'.repeat(40), status,
+    tokenBudget: null, tokensUsed: 42, timeUsedSeconds: 2, createdAt: 1700000000, updatedAt: 1700000001, revision: 'a'.repeat(64) };
+}
 async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean; busy?: boolean; reject?: boolean; delayed?: boolean; mode?: 'plan'|'default'; unsynced?: boolean; permission?: 'ask'|'approve'|'full'|'custom'; permissionUnsynced?: boolean; secondTask?: boolean; inputRequest?: boolean; failedReason?: string | null } = {}) {
   const conversation = { id: '12345678-1234-4234-8234-123456789abc', title: '计划模式验收', cwd: 'C:/fixture', updatedAt: 1 };
   const plan = { id: 'implement-plan:turn-plan', kind: 'plan', title: '实施此计划？', detail: '# 更新计划\n\n1. 保留已有数据。\n2. 验证结果。\n\n<script>alert(1)</script>', plan: { turnId: 'turn-plan', revision: 'a'.repeat(64) } };
@@ -25,7 +30,7 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
   const secondSnapshot = { ...snapshot, ...second, requests: [], settings: { ...snapshot.settings, mode: 'default', permission: 'full', revision: 'other-settings' } };
   const status: any = { type: 'status', online: true, enabled: true, helperVersion: options.legacy ? undefined : '0.4.4', subscription: { access: true },
     control: { role: options.viewer ? 'viewer' : 'controller', epoch: '12345678-1234-4234-8234-123456789abd', terminals: [] },
-    client: { available: true, version: '26.903.61454', capabilities: options.legacy ? [] : ['task-mode', 'plan-implementation', 'model-settings', 'permission-settings', 'safety-status', 'queued-send', 'attachments'] } };
+    client: { available: true, version: '26.903.61454', capabilities: options.legacy ? [] : ['task-mode', 'plan-implementation', 'model-settings', 'permission-settings', 'goal-mode', 'safety-status', 'queued-send', 'attachments'] } };
   const commands: any[] = []; let update!: () => void; let statusUpdate!: () => void; let disconnect!: () => void; let settle!: () => void;
   const reads: (() => void)[] = []; let holdReads = false; let readFailure = '';
   await mockPairedBrowser(page);
@@ -44,9 +49,10 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
         if (command.method === 'permissions.update' && !options.reject) { snapshot.settings.permission = command.params.permission; snapshot.settings.revision = 'permission-settings-2'; }
         if (command.method === 'plan.respond' && !options.reject) { snapshot.requests = []; snapshot.busy = true; snapshot.turnId = 'next-turn'; snapshot.settings.mode = command.params.action === 'implement' ? 'default' : 'plan'; }
         if (command.method === 'respond' && !options.reject) snapshot.requests = [];
+        if (command.method === 'goal.pause' && !options.reject) snapshot.goal.status = 'paused';
         if (command.method === 'settings.update' && !options.reject) { snapshot.settings.model = command.params.model; snapshot.settings.revision = 'model-settings-2'; }
-        const result = command.method === 'list' ? { conversations: options.secondTask ? [conversation, second] : [conversation], hasMore: false } : command.method === 'read' || command.method === 'safety.status' ? command.params.id === second.id ? secondSnapshot : snapshot : command.method === 'models' ? { models: [{ id: 'fixture-model', name: 'Fixture', efforts: ['high'], defaultEffort: 'high' }, { id: 'other-model', name: 'Other', efforts: ['high'], defaultEffort: 'high' }] } : command.method === 'settings.update' ? { settings: snapshot.settings } : { accepted: true };
-        if (options.reject && ['respond', 'plan.respond', 'mode.update', 'permissions.update', 'settings.update'].includes(command.method)) socket.send(JSON.stringify({ type: 'result', id, error: { code: 'STALE', message: '计划或设置已变化，请刷新后核对。' } }));
+        const result = command.method === 'list' ? { conversations: options.secondTask ? [conversation, second] : [conversation], hasMore: false } : command.method === 'read' || command.method === 'safety.status' ? command.params.id === second.id ? secondSnapshot : snapshot : command.method === 'models' ? { models: [{ id: 'fixture-model', name: 'Fixture', efforts: ['high'], defaultEffort: 'high' }, { id: 'other-model', name: 'Other', efforts: ['high'], defaultEffort: 'high' }] } : command.method === 'settings.update' ? { settings: snapshot.settings } : command.method === 'projects' ? { projects: [{ id: 'fixture-project', name: 'Fixture project' }] } : command.method === 'create' ? { threadId: conversation.id } : command.method === 'goal.pause' ? { accepted: true, goal: snapshot.goal } : { accepted: true };
+        if (options.reject && ['respond', 'plan.respond', 'mode.update', 'permissions.update', 'settings.update', 'goal.pause'].includes(command.method)) socket.send(JSON.stringify({ type: 'result', id, error: { code: 'STALE', message: '计划或设置已变化，请刷新后核对。' } }));
         else socket.send(JSON.stringify({ type: 'result', id, result }));
       };
       if (options.delayed && ['mode.update', 'settings.update'].includes(command.method)) settle = reply;
@@ -72,6 +78,69 @@ test('clears a recovered read error without losing the draft or allowing stale s
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(page.getByTitle('发送消息', { exact: true })).toBeEnabled();
   await expect(page.getByLabel('消息', { exact: true })).toHaveValue('弱网草稿');
+});
+
+test('chooses goal mode explicitly and sends one native goal without changing task permissions', async ({ page }) => {
+  const f = await fixture(page, { mode: 'default' });
+  await page.getByLabel('消息', { exact: true }).fill('完成验收并报告结果'); await add(page).click(); await goalOption(page).click();
+  await expect(page.getByPlaceholder('描述目标及完成标准')).toHaveValue('完成验收并报告结果');
+  expect(f.commands.some(c => ['send', 'permissions.update', 'stop'].includes(c.method))).toBe(false);
+  await page.getByTitle('发送消息', { exact: true }).click();
+  await expect.poll(() => f.commands.filter(c => c.method === 'send').length).toBe(1);
+  expect(f.commands.find(c => c.method === 'send').params).toEqual({ id: f.snapshot.id, epoch: 'fixture', text: '/goal 完成验收并报告结果' });
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue(''); await expect(page.locator('.goal-draft-status')).toHaveCount(0);
+});
+test('switches out of plan mode before choosing a goal and preserves the draft on a rejected switch', async ({ page }) => {
+  const f = await fixture(page, { reject: true });
+  await page.getByLabel('消息', { exact: true }).fill('保留原始目标'); await add(page).click(); await goalOption(page).click();
+  await expect(page.getByRole('alert')).toContainText('计划或设置已变化');
+  await expect(closePlan(page)).toBeVisible(); await expect(page.locator('.goal-draft-status')).toHaveCount(0);
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('保留原始目标');
+  expect(f.commands.filter(c => c.method === 'mode.update')).toHaveLength(1); expect(f.commands.some(c => c.method === 'send')).toBe(false);
+});
+test('keeps goal detail collapsed and pauses the whole goal at 320px and 390px', async ({ page }, info) => {
+  const f = await fixture(page, { mode: 'default' }); f.snapshot.goal = nativeGoal(f.snapshot.id); f.snapshot.requests = []; f.update();
+  await expect(page.locator('.task-goal summary')).toContainText('正在执行目标');
+  expect(await page.locator('.task-goal').getAttribute('open')).toBeNull();
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.locator('.task-goal summary').click(); await expect(page.locator('.goal-detail p')).toHaveText(f.snapshot.goal.objective);
+    expect(await page.locator('.goal-detail script').count()).toBe(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath('goal-detail-' + width + '.png') });
+    await page.locator('.task-goal summary').click();
+  }
+  await page.getByLabel('消息', { exact: true }).fill('暂停后仍保留'); await page.locator('.task-goal summary').click();
+  await page.getByRole('button', { name: '暂停目标', exact: true }).click();
+  await expect(page.locator('.task-goal summary')).toContainText('目标已暂停');
+  expect(f.commands.filter(c => c.method === 'goal.pause')).toEqual([{ method: 'goal.pause', params: { id: f.snapshot.id, epoch: 'fixture', revision: 'a'.repeat(64) } }]);
+  expect(f.commands.some(c => ['send', 'stop'].includes(c.method))).toBe(false);
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('暂停后仍保留');
+});
+test('shows actual goal termination and does not confuse a stopped turn with a paused goal', async ({ page }) => {
+  const f = await fixture(page, { mode: 'default' }); f.snapshot.requests = []; f.snapshot.lastTurnStatus = 'interrupted'; f.snapshot.goal = nativeGoal(f.snapshot.id); f.update();
+  await expect(page.locator('.task-goal summary')).toContainText('本轮已停止，目标仍开启');
+  for (const [status, label] of [['complete', '目标已达成'], ['paused', '目标已暂停'], ['blocked', '目标暂时受阻'], ['budgetLimited', '目标预算已用完'], ['usageLimited', '目标达到用量限制']]) {
+    f.snapshot.goal.status = status; f.update(); await expect(page.locator('.task-goal summary')).toContainText(label);
+  }
+  expect(f.commands.some(c => ['send', 'goal.pause'].includes(c.method))).toBe(false);
+});
+test('preserves goal draft on reload and does not offer goal mode to an old helper', async ({ page }) => {
+  const f = await fixture(page, { mode: 'default' }); await page.getByLabel('消息', { exact: true }).fill('关闭前的目标');
+  await add(page).click(); await goalOption(page).click(); await page.reload(); await page.getByRole('button', { name: '计划模式验收', exact: true }).click();
+  await expect(page.getByPlaceholder('描述目标及完成标准')).toHaveValue('关闭前的目标');
+  f.status.client.capabilities = ['task-mode']; f.statusUpdate(); await add(page).click();
+  await expect(goalOption(page)).toBeDisabled(); await expect(goalOption(page)).toContainText('请更新电脑助手');
+  expect(f.commands.some(c => c.method === 'send')).toBe(false);
+});
+test('creates a native goal through the existing idempotent create operation', async ({ page }) => {
+  const f = await fixture(page, { mode: 'default' });
+  await page.getByTitle('项目与会话', { exact: true }).click(); await page.getByTitle('新建任务', { exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '新建任务', exact: true });
+  await dialog.getByLabel('目标模式', { exact: true }).check(); await dialog.getByLabel('目标', { exact: true }).fill('完成新任务目标');
+  await dialog.getByRole('button', { name: '创建任务', exact: true }).click();
+  await expect.poll(() => f.commands.filter(c => c.method === 'create').length).toBe(1);
+  expect(f.commands.find(c => c.method === 'create').params).toMatchObject({ projectId: 'fixture-project', text: '/goal 完成新任务目标' });
 });
 test('keeps unsaved model choices after an outside tap at 320px and 390px', async ({ page }, info) => {
   const f = await fixture(page, { mode: 'default' });

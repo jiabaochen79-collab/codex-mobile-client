@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onDeactivated, onUnmounted, reactive, ref, watch } from 'vue';
-import { ArrowDown, ArrowRight, ArrowUp, Bell, Check, ChevronDown, ChevronRight, CircleStop, Ellipsis, Folder, ListOrdered, LogOut, Menu, Monitor, Plus, RefreshCw, Search, X, File, Brain, MonitorSmartphone, Images, Camera, Ticket, CornerUpRight, Lightbulb, Shield, ShieldCheck, ShieldAlert } from 'lucide-vue-next';
+import { ArrowDown, ArrowRight, ArrowUp, Bell, Check, ChevronDown, ChevronRight, CircleStop, Ellipsis, Folder, ListOrdered, LogOut, Menu, Monitor, Plus, RefreshCw, Search, X, File, Brain, MonitorSmartphone, Images, Camera, Ticket, CornerUpRight, Lightbulb, Shield, ShieldCheck, ShieldAlert, Target } from 'lucide-vue-next';
 import { api } from './api';
 import MessageContent from './MessageContent.vue';
 import TurnProcess from './TurnProcess.vue';
@@ -18,6 +18,8 @@ import QueuedMessages from './QueuedMessages.vue';
 import PlanRequest from './PlanRequest.vue';
 import NotificationCenter from './NotificationCenter.vue';
 import ClientRecoveryPanel from './ClientRecoveryPanel.vue';
+import TaskGoal from './TaskGoal.vue';
+import { goalPrompt } from './goal-mode';
 import type { Subscription } from '../src/shared/subscription';
 import type { Conversation, Snapshot, Command, Interaction, Project, ModelOption, Activity, ThreadSettings, QueuedMessage, PermissionMode, Attachment, Message } from '../src/shared/protocol';
 import { commandSchema, readMethods } from '../src/shared/protocol';
@@ -49,7 +51,7 @@ const readRetryDelays = [1000, 2000, 4000];
 const retryableReadErrors = new Set(['CLIENT_REJECTED', 'CLIENT_UNAVAILABLE', 'READ_TIMEOUT', 'READ_DISCONNECTED', 'OUTCOME_UNKNOWN', 'OFFLINE', 'UNAVAILABLE', 'BUSY']);
 let readFailures = 0; let readRetry: ReturnType<typeof setTimeout> | undefined;
 const taskSynced = ref(false);
-type PendingSend = { requestId: string; text: string; message: string; attachments: Attachment[] };
+type PendingSend = { requestId: string; text: string; message: string; attachments: Attachment[]; goal?: boolean };
 const pendingSends = reactive<Record<string, PendingSend>>({});
 const checkingSend = ref(false);
 function pendingSendKey(id: string) { return `pending-send:${props.deviceId}:${id}`; }
@@ -57,7 +59,7 @@ function storedPendingSend(value: string | null): PendingSend | undefined {
   try {
     const row = JSON.parse(value ?? 'null') as PendingSend & { outcome?: string };
     if (!row || row.outcome || !/^[a-f0-9-]{36}$/.test(row.requestId) || typeof row.text !== 'string' || row.text.length > 32000) return;
-    return { requestId: row.requestId, text: row.text, message: '发送结果待核对，内容已保留，不会自动重发。', attachments: Array.isArray(row.attachments) ? row.attachments.filter(a => /^[a-f0-9-]{36}$/.test(a?.id) && typeof a.name === 'string' && a.name.length <= 180 && a.ready === true && Number.isSafeInteger(a.size) && a.size > 0 && a.size <= 25 * 1024 * 1024 && a.offset === a.size && typeof a.mediaType === 'string').slice(0,5) : [] };
+    return { requestId: row.requestId, text: row.text, message: '发送结果待核对，内容已保留，不会自动重发。', ...(row.goal === true ? { goal: true } : {}), attachments: Array.isArray(row.attachments) ? row.attachments.filter(a => /^[a-f0-9-]{36}$/.test(a?.id) && typeof a.name === 'string' && a.name.length <= 180 && a.ready === true && Number.isSafeInteger(a.size) && a.size > 0 && a.size <= 25 * 1024 * 1024 && a.offset === a.size && typeof a.mediaType === 'string').slice(0,5) : [] };
   } catch { return; }
 }
 try {
@@ -72,6 +74,11 @@ try {
 } catch {}
 const pendingSend = computed(() => selected.value ? pendingSends[selected.value.id] : undefined);
 const modeSynced = ref(false); const modeChanging = ref(false); let modeSyncCycle = 0;
+const goalDrafts = reactive(new Set<string>());
+try { const saved = JSON.parse(sessionStorage.getItem('goal-drafts:' + props.deviceId) ?? '[]'); if (Array.isArray(saved)) for (const id of saved) if (typeof id === 'string' && /^[a-f0-9-]{36}$/.test(id)) goalDrafts.add(id); } catch {}
+const goalComposer = computed(() => !!selected.value && goalDrafts.has(selected.value.id));
+watch(goalDrafts, () => { try { sessionStorage.setItem('goal-drafts:' + props.deviceId, JSON.stringify([...goalDrafts])); } catch {} });
+const newGoal = ref(false);
 const queuedMessages = ref<QueuedMessage[]>([]); const sendMenu = ref(false); let readingQueue = false;
 const navigationType = (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined)?.type;
 const clientKey = `remote-client-id:${props.deviceId}`;
@@ -108,7 +115,7 @@ const projectModal = ref(false); const projectId = ref(''); const newText = ref(
 try {
   const saved = JSON.parse(sessionStorage.getItem('new-task-draft:' + props.deviceId) ?? 'null');
   if (saved && typeof saved.text === 'string' && saved.text.length <= 32000 && typeof saved.projectId === 'string') {
-    newText.value = saved.text; projectId.value = saved.projectId;
+    newText.value = saved.text; projectId.value = saved.projectId; newGoal.value = saved.goal === true;
     if (typeof saved.model === 'string') newModel.value = saved.model;
     if (typeof saved.effort === 'string') newEffort.value = saved.effort;
   }
@@ -163,6 +170,7 @@ const canRead = computed(() => canReach.value && serviceActive.value);
 const canUse = (feature: string) => !hasCapability('compatibility-checked') || hasCapability(feature);
 const ownsControl = computed(() => canReach.value && (status.value.control ? status.value.control.role === 'controller' : true));
 const canStop = computed(() => ownsControl.value && canUse('stop-generation'));
+const canPauseGoal = computed(() => ownsControl.value && hasCapability('goal-mode') && snapshot.value?.goal?.status === 'active' && !busy.value);
 const canDecline = computed(() => ownsControl.value && canUse('respond-approval'));
 const canControl = computed(() => canRead.value && !recoveryBusy.value && !recoveryActive.value && (status.value.control ? status.value.control.role === 'controller' : true));
 const canCreate = computed(() => canControl.value && canUse('create-tasks'));
@@ -184,6 +192,7 @@ const modeReason = computed(() => {
   return '';
 });
 const canToggleMode = computed(() => !modeReason.value);
+const goalReason = computed(() => !canControl.value ? connectionLabel.value : !hasCapability('goal-mode') ? '请更新电脑助手以使用目标模式' : !modeReady.value ? '任务尚未同步' : busy.value ? '正在处理操作' : pendingSend.value ? '正在核对发送结果' : snapshot.value?.goal && snapshot.value.goal.status !== 'complete' ? '当前任务已有目标，请在消息中补充要求' : '');
 const modeReady = computed(() => taskSynced.value && (!hasCapability('task-mode') || modeSynced.value));
 const permissionNames: Record<PermissionMode | 'custom', string> = { ask: '请求批准', approve: '帮我批准', full: '完全访问', custom: '自定义' };
 const permissionSynced = computed(() => !!snapshot.value?.settings && Object.prototype.hasOwnProperty.call(snapshot.value.settings, 'permission'));
@@ -205,8 +214,8 @@ const attachmentReason = computed(() => !canControl.value ? connectionLabel.valu
 const attachments = useAttachments({request,thread:()=>selected.value?.id,deviceId:props.deviceId,control:()=>({clientId:clientId.value,epoch:status.value.control?.epoch,allowed:canControl.value})});
 const projectNavigation = computed(() => status.value.client?.capabilities?.includes('project-navigation') === true);
 const hasDraft = computed(() => !!draft.value.trim() || !!attachments.current.value.length);
-const canSend = computed(() => canControl.value && canUse('send-messages') && modeReady.value && !!snapshot.value && (!snapshot.value.busy || hasCapability('queued-send')) && !busy.value && !pendingSend.value && hasDraft.value && attachments.current.value.every(a=>a.attachment?.ready&&!a.error&&!a.removing&&!a.cancelled));
-const canSteer = computed(() => canControl.value && modeReady.value && !!snapshot.value?.busy && !!snapshot.value?.turnId && !busy.value && !pendingSend.value && !!draft.value.trim() && !attachments.current.value.length && hasCapability('steering-text'));
+const canSend = computed(() => canControl.value && canUse('send-messages') && modeReady.value && !!snapshot.value && (!snapshot.value.busy || hasCapability('queued-send')) && !busy.value && !pendingSend.value && hasDraft.value && (!goalComposer.value || !goalReason.value && !!draft.value.trim() && draft.value.trim().length <= 4000 && snapshot.value.settings?.mode !== 'plan') && attachments.current.value.every(a=>a.attachment?.ready&&!a.error&&!a.removing&&!a.cancelled));
+const canSteer = computed(() => !goalComposer.value && canControl.value && modeReady.value && !!snapshot.value?.busy && !!snapshot.value?.turnId && !busy.value && !pendingSend.value && !!draft.value.trim() && !attachments.current.value.length && hasCapability('steering-text'));
 const canRemoveQueued = computed(() => connected.value && status.value.online && status.value.enabled && !busy.value && status.value.control?.role === 'controller');
 watch([hasDraft, () => snapshot.value?.busy], () => { if (!hasDraft.value || !snapshot.value?.busy) sendMenu.value = false; });
 const connectionLabel = computed(() => !connected.value ? '正在重连' : !status.value.online ? '电脑离线' : !status.value.enabled ? '远控已关闭' : !status.value.client?.available ? recoveryActive.value ? '正在恢复客户端' : '客户端未就绪' : !serviceActive.value ? '订阅未开通或已到期' : status.value.client?.reason ? '兼容受限' : !canControl.value ? '查看模式' : '已连接');
@@ -484,7 +493,7 @@ function refreshPage() {
   if (selected.value) drafts.set(selected.value.id, draft.value);
   try {
     sessionStorage.setItem('chat-drafts:' + props.deviceId, JSON.stringify([...drafts]));
-    sessionStorage.setItem('new-task-draft:' + props.deviceId, JSON.stringify({ text: newText.value, projectId: projectId.value, model: newModel.value, effort: newEffort.value }));
+    sessionStorage.setItem('new-task-draft:' + props.deviceId, JSON.stringify({ text: newText.value, projectId: projectId.value, model: newModel.value, effort: newEffort.value, goal: newGoal.value }));
   } catch { error.value = '草稿保存失败，未刷新网页。'; return; }
   location.reload();
 }
@@ -688,6 +697,7 @@ function syncPendingSend(event: StorageEvent) {
 function settleSend(id: string, attempt: PendingSend, failure?: { message: string }) {
   if (!attempt || pendingSends[id]?.requestId !== attempt.requestId) return;
   if (!failure) {
+    if (attempt.goal && (selected.value?.id === id && draft.value === attempt.text || drafts.get(id) === attempt.text)) goalDrafts.delete(id);
     if (selected.value?.id === id && draft.value === attempt.text) draft.value = '';
     if (drafts.get(id) === attempt.text) drafts.delete(id);
     attachments.clear(id);
@@ -708,6 +718,7 @@ async function reconcileSends() {
   } catch {} finally { checkingSend.value = false; }
 }
 function recoverPendingDraft(id: string, attempt: PendingSend) {
+  if (attempt.goal && (!drafts.get(id) || drafts.get(id) === attempt.text)) goalDrafts.add(id);
   if (selected.value?.id === id && !draft.value) draft.value = attempt.text;
   if (!drafts.get(id)) drafts.set(id, attempt.text);
   attachments.restore(id, attempt.attachments);
@@ -726,12 +737,13 @@ async function perform(command: Command) {
     if (command.method === 'send') {
       const saved = storedPendingSend(localStorage.getItem(pendingSendKey(command.params.id)));
       if (saved) { pendingSends[command.params.id] = saved; return false; }
-      sendAttempt = { requestId, text: draft.value, message: '正在等待电脑确认发送，内容已保留。', attachments: attachments.current.value.flatMap(item => item.attachment ? [item.attachment] : []) };
+      sendAttempt = { requestId, text: draft.value, message: '正在等待电脑确认发送，内容已保留。', ...(goalComposer.value ? { goal: true } : {}), attachments: attachments.current.value.flatMap(item => item.attachment ? [item.attachment] : []) };
       pendingSends[command.params.id] = sendAttempt;
       try { savePendingSends(command.params.id); }
       catch { throw new Error('无法保存发送确认记录，本次未发送。草稿和附件已保留，请检查浏览器存储权限或释放空间，恢复后再次点击发送。'); }
     }
-    await request(command, requestId);
+    const result = await request(command, requestId);
+    if (command.method === 'goal.pause' && result.accepted && snapshot.value?.id === command.params.id) snapshot.value.goal = result.goal;
     if (command.method === 'send' && sendAttempt) settleSend(command.params.id, sendAttempt);
     return true;
   }
@@ -745,7 +757,7 @@ async function perform(command: Command) {
 async function send(mode?: 'steer') {
   if (!(mode === 'steer' ? canSteer.value : canSend.value) || !snapshot.value) return;
   cancelNotificationNavigation();
-  sendMenu.value = false; const id = snapshot.value.id; const text = draft.value; const queued = mode !== 'steer' && (snapshot.value.busy || queuedMessages.value.length > 0);
+  sendMenu.value = false; const id = snapshot.value.id; const text = goalComposer.value ? goalPrompt(draft.value) : draft.value; const queued = mode !== 'steer' && (snapshot.value.busy || queuedMessages.value.length > 0);
   chatScroll.toBottom();
   await perform({ method: 'send', params: { id, text, epoch: snapshot.value.epoch, ...(mode === 'steer' ? { mode, turnId: snapshot.value.turnId! } : queued ? { mode: 'queue' } : {}), ...(attachments.current.value.length ? { attachmentIds: attachments.current.value.map(a => a.attachment!.id) } : {}) } });
 }
@@ -761,6 +773,7 @@ function composerPointerdown(event: PointerEvent) {
   sendFromButton(event);
 }
 async function stop() { sendMenu.value = false; const s = snapshot.value; if (s?.turnId) await perform({ method: 'stop', params: { id: s.id, turnId: s.turnId, epoch: s.epoch } }); }
+async function pauseGoal() { const s = snapshot.value; if (s?.goal && canPauseGoal.value) await perform({ method: 'goal.pause', params: { id: s.id, epoch: s.epoch, revision: s.goal.revision } }); }
 async function respond(r: Interaction, decision?: 'accept' | 'decline') {
   const s = snapshot.value; if (!s) return;
   const accepted = await perform({ method: 'respond', params: { id: s.id, requestId: r.id, epoch: s.epoch, ...(decision ? { decision } : { answers: Object.fromEntries((r.questions ?? []).map(q => [q.id, [answers.value[answerKey(r, q)] ?? '']])) }) } });
@@ -787,11 +800,20 @@ async function setPlanMode(mode: 'plan'|'default') {
   const s = snapshot.value; const settings = s?.settings;
   if (!s || !settings || !canToggleMode.value) return;
   attachmentPicker.value = false;
-  if (settings.mode === mode) return;
+  if (settings.mode === mode) { if (mode === 'plan') goalDrafts.delete(s.id); return; }
   invalidateMode(); modeChanging.value = true; busy.value = true; error.value = '';
-  try { await request({ method: 'mode.update', params: { id: s.id, epoch: s.epoch, revision: settings.revision, mode } }); }
+  try { await request({ method: 'mode.update', params: { id: s.id, epoch: s.epoch, revision: settings.revision, mode } }); if (mode === 'plan') goalDrafts.delete(s.id); }
   catch (e: any) { if (selected.value?.id === s.id && active.value) error.value = e.message; }
   finally { invalidateMode(); modeChanging.value = false; busy.value = false; if (active.value) await read(); }
+}
+async function setGoalMode(enabled: boolean) {
+  const s = snapshot.value; if (!s || goalReason.value) return;
+  attachmentPicker.value = false;
+  if (enabled && s.settings?.mode === 'plan') {
+    await setPlanMode('default');
+    if (!active.value || snapshot.value?.id !== s.id || snapshot.value?.settings?.mode !== 'default' || goalReason.value) return;
+  }
+  if (enabled) goalDrafts.add(s.id); else goalDrafts.delete(s.id);
 }
 function openPermissionMenu(event?: Event) { if (event?.currentTarget instanceof HTMLElement) modalReturnFocus = event.currentTarget; permissionPicker.value = true; attachmentPicker.value = false; moreMenu.value = false; }
 function choosePermission(permission: PermissionMode) {
@@ -828,6 +850,8 @@ function clearNavigation(preserveDrafts = false) {
     try { for (let index = localStorage.length - 1; index >= 0; index--) { const key = localStorage.key(index); if (key?.startsWith(`pending-send:${props.deviceId}:`)) localStorage.removeItem(key); } } catch {}
     for (const id of Object.keys(pendingSends)) delete pendingSends[id];
     pendingCreate.value = undefined;
+    goalDrafts.clear(); newGoal.value = false;
+    try { sessionStorage.removeItem('goal-drafts:' + props.deviceId); } catch {}
     try { sessionStorage.removeItem('pending-sends:' + props.deviceId); sessionStorage.removeItem('chat-drafts:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); localStorage.removeItem('pending-sends:' + props.deviceId); localStorage.removeItem('pending-create:' + props.deviceId); } catch {}
     try { for (let index = sessionStorage.length - 1; index >= 0; index--) { const key = sessionStorage.key(index); if (key?.startsWith(`plan-feedback:${props.deviceId}:`)) sessionStorage.removeItem(key); } } catch {}
     attachments.clear(); drafts.clear();
@@ -849,19 +873,19 @@ async function newConversation(project?: string) {
   const revision = notificationNavigationRevision; const cycle = modeSyncCycle;
   const stillPreparing = () => active.value && canControl.value && revision === notificationNavigationRevision && cycle === modeSyncCycle;
   moreMenu.value = false; error.value = '';
-  try { const r = await request({ method: 'projects', params: {} }); if (!stillPreparing()) return; projects.value = r.projects; projectId.value = pendingCreate.value?.command.params.projectId ?? project ?? (newText.value && r.projects.some((p: Project) => p.id === projectId.value) ? projectId.value : selected.value?.projectId ?? r.projects[0]?.id ?? ''); if (pendingCreate.value) newText.value = pendingCreate.value.command.params.text; projectModal.value = true; }
+  try { const r = await request({ method: 'projects', params: {} }); if (!stillPreparing()) return; projects.value = r.projects; projectId.value = pendingCreate.value?.command.params.projectId ?? project ?? (newText.value && r.projects.some((p: Project) => p.id === projectId.value) ? projectId.value : selected.value?.projectId ?? r.projects[0]?.id ?? ''); if (pendingCreate.value) { const text = pendingCreate.value.command.params.text; newGoal.value = text.startsWith('/goal '); newText.value = newGoal.value ? text.slice(6) : text; } projectModal.value = true; }
   catch (e: any) { if (stillPreparing()) error.value = e.message; }
 }
 async function create() {
-  if (busy.value || !canControl.value || !canUse('create-tasks') || !projectId.value || !newText.value.trim()) return; cancelNotificationNavigation(); busy.value = true;
+  if (busy.value || !canControl.value || !canUse('create-tasks') || !projectId.value || !newText.value.trim() || !pendingCreate.value && newGoal.value && (!hasCapability('goal-mode') || newText.value.trim().length > 4000)) return; cancelNotificationNavigation(); busy.value = true;
   const revision = notificationNavigationRevision;
   const reconciling = !!pendingCreate.value;
-  const attempt = pendingCreate.value ?? { requestId: crypto.randomUUID(), command: { method: 'create' as const, params: { projectId: projectId.value, text: newText.value, ...(newModel.value ? { model: newModel.value, effort: newEffort.value as any } : {}) } } };
+  const attempt = pendingCreate.value ?? { requestId: crypto.randomUUID(), command: { method: 'create' as const, params: { projectId: projectId.value, text: newGoal.value ? goalPrompt(newText.value) : newText.value, ...(newModel.value ? { model: newModel.value, effort: newEffort.value as any } : {}) } } };
   try {
     pendingCreate.value = attempt; localStorage.setItem('pending-create:' + props.deviceId, JSON.stringify(attempt)); sessionStorage.removeItem('pending-create:' + props.deviceId);
     const r = await request(attempt.command, attempt.requestId);
     if (!r?.threadId) throw Object.assign(new Error('创建结果尚未确认，请在电脑端核对。'), { code: 'OUTCOME_UNKNOWN' });
-    pendingCreate.value = undefined; localStorage.removeItem('pending-create:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); sessionStorage.removeItem('new-task-draft:' + props.deviceId); newText.value = '';
+    pendingCreate.value = undefined; localStorage.removeItem('pending-create:' + props.deviceId); sessionStorage.removeItem('pending-create:' + props.deviceId); sessionStorage.removeItem('new-task-draft:' + props.deviceId); newText.value = ''; newGoal.value = false;
     const navigate = active.value && revision === notificationNavigationRevision && projectModal.value;
     if (navigate) projectModal.value = false;
     await loadNavigation();
@@ -1063,6 +1087,7 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
           <div v-if="moreMenu" class="chat-menu"><div class="menu-device"><span :title="status.client?.reason">{{ formattedId }}</span><span :class="canControl ? 'good' : 'warning'">{{ connectionLabel }}</span></div><div class="connection-versions"><span>助手 {{ status.helperVersion ? `v${status.helperVersion}` : '版本未知' }}</span><span>Codex {{ status.client?.version || '版本未知' }}</span></div><button type="button" class="notification-menu-item" @click="openNotifications"><Bell :size="17"/><span>任务完成提醒</span><span v-if="notificationUnread" class="notification-unread-dot" aria-label="有未读提醒"></span></button><button type="button" class="permission-menu-item" :class="{ full: snapshot?.settings?.permission === 'full' }" @click="openPermissionMenu"><ShieldAlert v-if="snapshot?.settings?.permission === 'full'" :size="17"/><ShieldCheck v-else-if="snapshot?.settings?.permission === 'approve'" :size="17"/><Shield v-else :size="17"/><span><strong>任务权限</strong><small>{{ permissionReason || permissionLabel }}</small></span><ChevronRight :size="16"/></button><button @click="openRecovery"><Monitor :size="17"/>客户端恢复</button><FeedbackButton mode="mobile" :device-id="deviceId" :status="status"/><button :disabled="!canRead" @click="moreMenu = false; retryRead()"><RefreshCw :size="16"/>刷新会话</button><button v-if="hasCapability('multi-terminal')" :disabled="!canClaimControl" @click="openTakeover"><MonitorSmartphone :size="17"/>在线终端 {{ status.control?.terminals.length ?? 1 }}</button><button :disabled="!canCreate" @click="newConversation()"><Plus :size="17"/>新建任务</button><button @click="logout"><LogOut :size="16"/>退出登录</button></div>
         </div>
       </header>
+      <TaskGoal v-if="selected && snapshot?.goal" :key="selected.id" :goal="snapshot.goal" :synced="taskSynced && canRead" :turn-stopped="!snapshot.busy && snapshot.lastTurnStatus === 'interrupted'" :can-pause="canPauseGoal" @pause="pauseGoal"/>
       <button v-if="moreMenu" class="chat-menu-scrim" aria-label="关闭菜单" @click="moreMenu = false"></button>
       <div v-if="selected && !canReach" class="chat-status recovery-chat-status" role="status"><span>{{ recoveryActive ? status.client.recovery.reason : connectionLabel }}</span><button v-if="connected && status.online && status.enabled && !status.client?.available" class="text-button" @click="openRecovery">客户端恢复</button></div>
       <div v-else-if="selected && snapshot && canRead && readRecovering" class="chat-status" role="status">正在同步会话</div>
@@ -1109,12 +1134,13 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
         <form class="composer compact-composer" @submit.prevent="sendFromButton()">
           <div v-if="pendingSend" class="send-confirmation" role="status"><span>{{ pendingSend.message }}</span><div><button type="button" class="text-button" :disabled="busy || checkingSend || !connected || !status.online || !hasCapability('command-status')" @click="reconcileSends"><RefreshCw :size="14"/>核对发送结果</button><button type="button" class="text-button" :disabled="busy" @click="keepUnconfirmedDraft">已核对，保留为草稿</button></div><small v-if="!hasCapability('command-status')">更新电脑助手后可自动核对。</small></div>
           <QueuedMessages :items="queuedMessages" :can-remove="canRemoveQueued" :can-resume="canControl && canUse('send-messages') && modeReady && !busy" @remove="queueAction($event, 'remove')" @resume="queueAction($event, 'resume')" @resized="queueResized"/>
+          <div v-if="goalComposer" class="goal-draft-status"><Target :size="14"/><span>目标模式</span><button type="button" class="icon-button" title="取消下一条消息的目标模式" aria-label="取消目标模式" :disabled="busy || !!pendingSend" @click="selected && goalDrafts.delete(selected.id)"><X :size="14"/></button><small v-if="goalReason || draft.trim().length > 4000">{{ goalReason || '目标最多 4000 个字符，原文已保留。' }}</small></div>
           <div v-if="attachments.current.value.length" class="attachment-strip"><div v-for="a in attachments.current.value" :key="a.key" class="pending-attachment"><img v-if="a.preview" :src="a.preview" :alt="a.file.name"><File v-else :size="20"/><div><strong :title="a.file.name">{{ a.file.name }}</strong><small :class="{ warning:a.error }">{{ a.error || (a.preparing ? '正在处理照片' : a.attachment?.ready ? '已上传' : `${a.progress}%`) }}</small></div><button v-if="a.error" type="button" class="icon-button" title="重试上传" :disabled="!!attachmentReason" @click="attachments.upload(a)"><RefreshCw :size="16"/></button><button type="button" class="icon-button" title="移除附件" :disabled="busy || !!pendingSend" @click="attachments.remove(a)"><X :size="16"/></button></div></div>
-          <div class="composer-field"><input ref="fileInput" data-attachment-source="files" type="file" multiple hidden @change="chooseFiles($event)"><input ref="photoInput" data-attachment-source="photos" type="file" accept="image/*" multiple hidden @change="chooseFiles($event,true)"><input ref="cameraInput" data-attachment-source="camera" type="file" accept="image/*" capture="environment" hidden @change="chooseFiles($event,true)"><button type="button" class="icon-button attach-button" title="添加照片、文件或计划模式" aria-haspopup="dialog" :aria-expanded="attachmentPicker" @click="openAttachmentMenu"><Plus :size="21"/></button><div v-if="snapshot?.settings?.mode === 'plan'" class="plan-chip" :title="canToggleMode ? '当前为计划模式' : `计划模式：${modeReason}`"><Lightbulb :size="15"/><span>计划</span><button type="button" class="plan-chip-close" aria-label="关闭计划模式" title="关闭计划模式" :disabled="!canToggleMode" @click="setPlanMode('default')"><X :size="14"/></button></div><textarea ref="input" v-model="draft" aria-label="消息" :placeholder="canControl ? '发送消息' : '查看模式'" rows="1" maxlength="32000" :disabled="!canRead || busy" @input="fitInput" @keydown.ctrl.enter.prevent="send()"/><button v-if="canRead && !canControl" type="button" class="send-button takeover" title="接管控制权" @click="openTakeover"><MonitorSmartphone :size="20"/></button><button v-else-if="snapshot?.busy && (!hasDraft || !hasCapability('queued-send'))" type="button" class="send-button stop" title="停止当前生成" :disabled="busy || !canStop || !snapshot.turnId" @click="stop"><CircleStop :size="23"/></button><button v-else class="send-button" :title="snapshot?.busy || queuedMessages.length ? '排队发送' : '发送消息'" :disabled="!canSend"><ArrowUp :size="22"/></button><div v-if="snapshot?.busy && hasDraft && hasCapability('queued-send')" class="send-options"><button type="button" class="icon-button" title="发送方式" :aria-expanded="sendMenu" :disabled="busy || !canControl" @click="sendMenu = !sendMenu"><ChevronDown :size="17"/></button><div v-if="sendMenu" class="send-mode-menu" role="menu"><button type="button" role="menuitem" :disabled="!canSend" @click="send()"><ListOrdered :size="17"/>排队发送</button><button type="button" role="menuitem" :disabled="!canSteer" :title="attachments.current.value.length ? '带附件的内容请排队发送' : '调整当前任务方向'" @click="send('steer')"><CornerUpRight :size="17"/>调整方向</button><button type="button" role="menuitem" :disabled="busy || !canStop" @click="sendMenu = false; stop()"><CircleStop :size="17"/>停止当前生成</button></div></div></div>
+          <div class="composer-field"><input ref="fileInput" data-attachment-source="files" type="file" multiple hidden @change="chooseFiles($event)"><input ref="photoInput" data-attachment-source="photos" type="file" accept="image/*" multiple hidden @change="chooseFiles($event,true)"><input ref="cameraInput" data-attachment-source="camera" type="file" accept="image/*" capture="environment" hidden @change="chooseFiles($event,true)"><button type="button" class="icon-button attach-button" title="添加照片、文件或任务模式" aria-haspopup="dialog" :aria-expanded="attachmentPicker" @click="openAttachmentMenu"><Plus :size="21"/></button><div v-if="snapshot?.settings?.mode === 'plan'" class="plan-chip" :title="canToggleMode ? '当前为计划模式' : `计划模式：${modeReason}`"><Lightbulb :size="15"/><span>计划</span><button type="button" class="plan-chip-close" aria-label="关闭计划模式" title="关闭计划模式" :disabled="!canToggleMode" @click="setPlanMode('default')"><X :size="14"/></button></div><textarea ref="input" v-model="draft" aria-label="消息" :placeholder="canControl ? goalComposer ? '描述目标及完成标准' : '发送消息' : '查看模式'" rows="1" maxlength="32000" :disabled="!canRead || busy" @input="fitInput" @keydown.ctrl.enter.prevent="send()"/><button v-if="canRead && !canControl" type="button" class="send-button takeover" title="接管控制权" @click="openTakeover"><MonitorSmartphone :size="20"/></button><button v-else-if="snapshot?.busy && (!hasDraft || !hasCapability('queued-send'))" type="button" class="send-button stop" title="停止当前生成" :disabled="busy || !canStop || !snapshot.turnId" @click="stop"><CircleStop :size="23"/></button><button v-else class="send-button" :title="snapshot?.busy || queuedMessages.length ? '排队发送' : '发送消息'" :disabled="!canSend"><ArrowUp :size="22"/></button><div v-if="snapshot?.busy && hasDraft && hasCapability('queued-send')" class="send-options"><button type="button" class="icon-button" title="发送方式" :aria-expanded="sendMenu" :disabled="busy || !canControl" @click="sendMenu = !sendMenu"><ChevronDown :size="17"/></button><div v-if="sendMenu" class="send-mode-menu" role="menu"><button type="button" role="menuitem" :disabled="!canSend" @click="send()"><ListOrdered :size="17"/>排队发送</button><button type="button" role="menuitem" :disabled="!canSteer" :title="attachments.current.value.length ? '带附件的内容请排队发送' : '调整当前任务方向'" @click="send('steer')"><CornerUpRight :size="17"/>调整方向</button><button type="button" role="menuitem" :disabled="busy || !canStop" @click="sendMenu = false; stop()"><CircleStop :size="17"/>停止当前生成</button></div></div></div>
         </form>
       </template>
     <button v-if="sendMenu" type="button" class="send-mode-scrim" aria-label="关闭发送方式" @click="sendMenu = false"/>
-    <div v-if="projectModal" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="new-title"><div class="modal-title"><h2 id="new-title">新建任务</h2><button class="icon-button" title="关闭" @click="projectModal = false"><X :size="20"/></button></div><form @submit.prevent="create"><label for="project">现有项目</label><select id="project" v-model="projectId" :disabled="busy || !!pendingCreate"><option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name ?? p.path }}</option></select><p v-if="!projects.length" class="muted">暂无本机项目</p><button v-if="hasCapability('model-settings')" type="button" class="text-button" :disabled="busy || !!pendingCreate" @click="openModels('new')"><Brain :size="14"/>{{ newModel || '默认模型' }} {{ effortNames[newEffort] || '' }}</button><label for="new-text">任务</label><textarea id="new-text" v-model="newText" :disabled="busy || !!pendingCreate" rows="5" maxlength="32000" required/><p v-if="pendingCreate && !busy" class="warning" role="status">创建结果待核对，原请求已保留，不会自动重复创建。</p><button class="button primary" :disabled="busy || !canCreate || !projectId || !newText.trim()">{{ pendingCreate ? '核对创建结果' : '创建任务' }}<ArrowRight :size="16"/></button><button v-if="pendingCreate" type="button" class="text-button" :disabled="busy" @click="releasePendingCreate">已核对，恢复编辑</button></form></section></div>
+    <div v-if="projectModal" class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="new-title"><div class="modal-title"><h2 id="new-title">新建任务</h2><button class="icon-button" title="关闭" @click="projectModal = false"><X :size="20"/></button></div><form @submit.prevent="create"><label for="project">现有项目</label><select id="project" v-model="projectId" :disabled="busy || !!pendingCreate"><option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name ?? p.path }}</option></select><p v-if="!projects.length" class="muted">暂无本机项目</p><button v-if="hasCapability('model-settings')" type="button" class="text-button" :disabled="busy || !!pendingCreate" @click="openModels('new')"><Brain :size="14"/>{{ newModel || '默认模型' }} {{ effortNames[newEffort] || '' }}</button><label v-if="hasCapability('goal-mode')" class="goal-new-choice"><input v-model="newGoal" type="checkbox" :disabled="busy || !!pendingCreate"><Target :size="16"/>目标模式</label><label for="new-text">{{ newGoal ? '目标' : '任务' }}</label><textarea id="new-text" v-model="newText" :placeholder="newGoal ? '描述目标及完成标准' : ''" :disabled="busy || !!pendingCreate" rows="5" maxlength="32000" required/><p v-if="pendingCreate && !busy" class="warning" role="status">创建结果待核对，原请求已保留，不会自动重复创建。</p><p v-if="newGoal && newText.trim().length > 4000" class="warning" role="status">目标最多 4000 个字符，原文已保留。</p><button class="button primary" :disabled="busy || !canCreate || !projectId || !newText.trim() || !pendingCreate && newGoal && (!hasCapability('goal-mode') || newText.trim().length > 4000)">{{ pendingCreate ? '核对创建结果' : '创建任务' }}<ArrowRight :size="16"/></button><button v-if="pendingCreate" type="button" class="text-button" :disabled="busy" @click="releasePendingCreate">已核对，恢复编辑</button></form></section></div>
     <SubscriptionPanel v-if="subscriptionOpen" mode="mobile" :device-id="deviceId" @close="subscriptionOpen = false" @changed="subscriptionChanged"/>
     <NotificationCenter v-if="notificationOpen" :device-id="deviceId" :task-labels="notificationTaskLabels" :resolve-tasks="resolveNotificationTasks" :open-task="openNotificationTask" @close="notificationOpen = false" @unread="notificationUnread = $event"/>
     <ClientRecoveryPanel v-if="recoveryOpen" :state="status.client?.recovery" :busy="recoveryBusy" :unavailable="recoveryReason" :error="recoveryError" @close="recoveryOpen = false" @action="recoverClient" @takeover="recoveryOpen = false; openTakeover()"/>
@@ -1122,11 +1148,12 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
     <div v-if="takeoverModal" class="modal-backdrop settings-backdrop" @click.self="takeoverModal=false"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="terminal-title"><div class="modal-title"><h2 id="terminal-title">在线终端</h2><button class="icon-button" title="关闭终端列表" @click="takeoverModal=false"><X :size="20"/></button></div><div v-for="t in status.control?.terminals ?? []" :key="t.id" class="terminal-row"><MonitorSmartphone :size="20"/><span>{{ t.label }}{{ t.id === clientId ? '（本终端）' : '' }}</span><small>{{ t.controlling ? '控制中' : '查看中' }}</small></div><button v-if="!canControl" class="button primary" :disabled="busy || !canClaimControl" @click="takeControl"><MonitorSmartphone :size="17"/>确认接管</button></section></div>
     <div v-if="permissionPicker" class="modal-backdrop permission-backdrop" @click.self="permissionPicker=false"><section class="modal permission-picker" role="dialog" aria-modal="true" aria-labelledby="permission-title"><div class="modal-title"><h2 id="permission-title">任务权限</h2><button class="icon-button" title="关闭任务权限" @click="permissionPicker=false"><X :size="20"/></button></div><div role="radiogroup" aria-label="选择任务权限"><button type="button" class="permission-option" role="radio" :aria-checked="snapshot?.settings?.permission === 'ask'" :disabled="!canChangePermission" @click="choosePermission('ask')"><Shield :size="22"/><span><strong>请求批准</strong><small>编辑工作区外文件和使用互联网时始终询问</small></span><Check v-if="snapshot?.settings?.permission === 'ask'" :size="18"/></button><button type="button" class="permission-option" role="radio" :aria-checked="snapshot?.settings?.permission === 'approve'" :disabled="!canChangePermission" @click="choosePermission('approve')"><ShieldCheck :size="22"/><span><strong>帮我批准</strong><small>仅对检测到的风险操作请求批准</small></span><Check v-if="snapshot?.settings?.permission === 'approve'" :size="18"/></button><button type="button" class="permission-option full" role="radio" :aria-checked="snapshot?.settings?.permission === 'full'" :disabled="!canChangePermission" @click="choosePermission('full')"><ShieldAlert :size="22"/><span><strong>完全访问权限</strong><small>可不受限制访问互联网和电脑文件</small></span><Check v-if="snapshot?.settings?.permission === 'full'" :size="18"/></button></div><p v-if="snapshot?.settings?.permission === 'custom' && !permissionReason" class="compatibility-notice">当前任务使用自定义权限配置，可切换为以上任一档。</p><p v-else-if="permissionReason" class="compatibility-notice">暂时无法更改：{{ permissionReason }}</p></section></div>
     <div v-if="fullAccessConfirm" class="modal-backdrop permission-confirm-backdrop" @click.self="fullAccessConfirm=false"><section class="modal permission-confirm" role="alertdialog" aria-modal="true" aria-labelledby="full-access-title"><div class="modal-title"><h2 id="full-access-title">启用完全访问权限？</h2><button class="icon-button" title="关闭确认" @click="fullAccessConfirm=false"><X :size="20"/></button></div><div class="permission-warning"><ShieldAlert :size="24"/><p>后续消息可不经批准访问互联网和电脑上的任意文件。仅在你信任当前任务时启用。</p></div><p v-if="permissionReason" class="compatibility-notice">暂时无法更改：{{ permissionReason }}</p><div class="permission-confirm-actions"><button type="button" class="button" @click="fullAccessConfirm=false">取消</button><button type="button" class="button confirm-full" :disabled="!canChangePermission" @click="setPermission('full')">确认启用</button></div></section></div>
-    <div v-if="attachmentPicker" class="modal-backdrop attachment-backdrop" @click.self="attachmentPicker=false"><section class="modal attachment-picker" role="dialog" aria-modal="true" aria-labelledby="attachment-title"><div class="modal-title"><h2 id="attachment-title">添加内容</h2><button class="icon-button" title="关闭添加内容" @click="attachmentPicker=false"><X :size="20"/></button></div><button class="attachment-source" :disabled="!!attachmentReason" @click="chooseAttachmentSource('photos')"><Images :size="22"/><span>照片图库</span><ChevronRight :size="16"/></button><button class="attachment-source" :disabled="!!attachmentReason" @click="chooseAttachmentSource('camera')"><Camera :size="22"/><span>拍照</span><ChevronRight :size="16"/></button><button class="attachment-source" :disabled="!!attachmentReason" @click="chooseAttachmentSource('files')"><File :size="22"/><span>文件</span><ChevronRight :size="16"/></button><button type="button" class="attachment-source plan-source" :disabled="!canToggleMode" :aria-checked="snapshot?.settings?.mode === 'plan'" role="menuitemcheckbox" @click="setPlanMode('plan')"><Lightbulb :size="22"/><span><strong>计划模式</strong><small>{{ modeReason || (snapshot?.settings?.mode === 'plan' ? '已开启' : '') }}</small></span><Check v-if="snapshot?.settings?.mode === 'plan'" :size="18"/></button><p v-if="attachmentReason" class="compatibility-notice">附件不可用：{{ attachmentReason }}</p></section></div>
+    <div v-if="attachmentPicker" class="modal-backdrop attachment-backdrop" @click.self="attachmentPicker=false"><section class="modal attachment-picker" role="dialog" aria-modal="true" aria-labelledby="attachment-title"><div class="modal-title"><h2 id="attachment-title">添加内容</h2><button class="icon-button" title="关闭添加内容" @click="attachmentPicker=false"><X :size="20"/></button></div><button class="attachment-source" :disabled="!!attachmentReason" @click="chooseAttachmentSource('photos')"><Images :size="22"/><span>照片图库</span><ChevronRight :size="16"/></button><button class="attachment-source" :disabled="!!attachmentReason" @click="chooseAttachmentSource('camera')"><Camera :size="22"/><span>拍照</span><ChevronRight :size="16"/></button><button class="attachment-source" :disabled="!!attachmentReason" @click="chooseAttachmentSource('files')"><File :size="22"/><span>文件</span><ChevronRight :size="16"/></button><button type="button" class="attachment-source plan-source" :disabled="!canToggleMode" :aria-checked="snapshot?.settings?.mode === 'plan'" role="menuitemcheckbox" @click="setPlanMode('plan')"><Lightbulb :size="22"/><span><strong>计划模式</strong><small>{{ modeReason || (snapshot?.settings?.mode === 'plan' ? '已开启' : '') }}</small></span><Check v-if="snapshot?.settings?.mode === 'plan'" :size="18"/></button><button type="button" class="attachment-source plan-source goal-source" :disabled="!!goalReason" :aria-checked="goalComposer" role="menuitemcheckbox" @click="setGoalMode(!goalComposer)"><Target :size="22"/><span><strong>目标模式</strong><small>{{ goalReason || (goalComposer ? '下一条消息作为目标' : '') }}</small></span><Check v-if="goalComposer" :size="18"/></button><p v-if="attachmentReason" class="compatibility-notice">附件不可用：{{ attachmentReason }}</p></section></div>
   </div>
 </template>
 
 <style scoped>
+.goal-draft-status{display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding:0 2px 5px;color:#526f64;font-size:12px}.goal-draft-status>svg{flex-shrink:0}.goal-draft-status .icon-button{width:24px;height:24px;flex-basis:24px}.goal-draft-status small{width:100%;overflow-wrap:anywhere;color:#926127}.goal-new-choice{display:flex;align-items:center;gap:7px;font-size:13px}.goal-new-choice input{width:auto;margin:0}
 .send-confirmation{padding:4px 0 8px;color:#835d27;font-size:12px;line-height:1.5;overflow-wrap:anywhere}.send-confirmation>div{display:flex;flex-wrap:wrap;gap:6px 14px}.send-confirmation .text-button{font-size:12px;padding:3px 0}
 .notification-menu-item{display:flex;align-items:center;gap:10px;width:100%;padding:10px;color:#38545e;background:none;border:0;text-align:left;font-size:13px}.notification-menu-item:hover{background:#f1f5f7}.notification-menu-item svg{flex-shrink:0}.notification-unread-dot{width:7px;height:7px;margin-left:auto;border-radius:50%;background:#d65738;flex:0 0 auto}
 .navigation-maintenance{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:8px 14px;border-top:1px solid #e1e7ea}.navigation-maintenance:empty{display:none}

@@ -7,17 +7,17 @@ import { Agent } from '../src/agent/agent.js';
 import { RemoteError } from '../src/shared/protocol.js';
 let agent: Agent, dir: string;
 afterEach(async () => { await agent?.close(); if (dir) rmSync(dir, { recursive: true, force: true }); vi.restoreAllMocks(); });
-it.each(['STALE', 'OUTCOME_UNKNOWN', 'INTERNAL', 'accepted'])('handles durable queued messages after a stop result: %s', async outcome => {
+it.each(['stop', 'goal.pause'].flatMap(method => ['STALE', 'OUTCOME_UNKNOWN', 'INTERNAL', 'accepted'].map(outcome => [method, outcome])))('handles durable queued messages after %s: %s', async (method, outcome) => {
   dir = mkdtempSync(join(tmpdir(), 'audit-current-agent-'));
   const execute = vi.fn(async () => { if (outcome !== 'accepted') throw new RemoteError(outcome, 'Fixture stop result'); return { stopped: true }; });
   agent = new Agent({ origin: 'http://127.0.0.1:8790', dir, adapter: { execute, close() {}, status: async () => ({ available: true, version: null, reason: null }) } });
   const a = agent as any, sessionId = randomUUID(), clientId = randomUUID(), epoch = randomUUID(), taskId = randomUUID();
   vi.spyOn(a.store, 'protect').mockImplementation(value => value);
-  a.enabled = true; a.connection = 'online'; a.client = { available: true };
+  a.enabled = true; a.connection = 'online'; a.client = { available: true, capabilities: ['goal-mode'] }; a.subscription = { access: false };
   a.grants.set(sessionId, Date.now() + 60000); a.control = { sessionId, clientId, epoch, expires: Date.now() + 60000 };
   a.notifyQueue = vi.fn(); a.updateSubscriptions = vi.fn(); const frames: any[] = []; a.send = (f: any) => frames.push(f);
   const row = a.sends.add(randomUUID(), taskId, sessionId, 'fixture', { text: 'Do not discard', attachments: [] });
-  await a.message(JSON.stringify({ type: 'command', id: randomUUID(), sessionId, clientId, controlEpoch: epoch, command: { method: 'stop', params: { id: taskId, epoch: 'fixture', turnId: 'old-turn' } } }));
+  await a.message(JSON.stringify({ type: 'command', id: randomUUID(), sessionId, clientId, controlEpoch: epoch, command: { method, params: { id: taskId, epoch: 'fixture', ...(method === 'stop' ? { turnId: 'old-turn' } : { revision: 'a'.repeat(64) }) } } }));
   await a.queue;
   expect(frames.some(f => outcome === 'accepted' ? f.result?.stopped : f.error?.code === outcome)).toBe(true);
   expect(a.sends.get(row.id, taskId).state).toBe(outcome === 'STALE' ? 'pending' : 'paused');

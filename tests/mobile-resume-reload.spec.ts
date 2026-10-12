@@ -109,7 +109,7 @@ test('does not refresh a second computer home while another computer has a cache
 });
 test('removes the HEIC footer without removing photo choices, plan mode or distributed notices', async ({ page }, info) => {
   await fixture(page); await page.getByRole('button', { name: task.title, exact: true }).first().click();
-  await page.getByTitle('添加照片、文件或计划模式', { exact: true }).click(); const menu = page.getByRole('dialog', { name: '添加内容', exact: true });
+  await page.getByTitle('添加照片、文件或任务模式', { exact: true }).click(); const menu = page.getByRole('dialog', { name: '添加内容', exact: true });
   await expect(menu.getByRole('button', { name: '照片图库', exact: true })).toBeVisible(); await expect(menu.getByRole('button', { name: '拍照', exact: true })).toBeVisible(); await expect(menu.getByRole('button', { name: '文件', exact: true })).toBeVisible(); await expect(menu.getByRole('menuitemcheckbox', { name: /计划模式/ })).toBeVisible();
   await expect(menu.locator('a')).toHaveCount(0); expect((await page.request.get(origin + '/third-party/heic-to/NOTICE.txt')).ok()).toBe(true);
   for (const width of [320, 390, 1280]) { await page.setViewportSize({ width, height: 670 }); await page.screenshot({ path: info.outputPath(`menu-${width}.png`) }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); }

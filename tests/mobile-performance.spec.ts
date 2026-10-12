@@ -76,7 +76,7 @@ test('enabling plan mode refits the narrower input and growing drafts keep the l
   const f = await fixture(page, 30);
   const input = page.getByLabel('消息', { exact: true });
   await input.fill('A request that wraps when plan mode reduces the input width');
-  await page.getByTitle('添加照片、文件或计划模式', { exact: true }).click();
+  await page.getByTitle('添加照片、文件或任务模式', { exact: true }).click();
   await page.getByRole('menuitemcheckbox', { name: '计划模式', exact: true }).click();
   await expect(page.getByLabel('关闭计划模式', { exact: true })).toBeVisible();
   await expect.poll(() => input.evaluate(element => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1);

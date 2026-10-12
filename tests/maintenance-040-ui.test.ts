@@ -11,6 +11,7 @@ import * as updates from '../src/shared/updates.js';
 import * as pairedDevices from '../src/shared/paired-devices.js';
 import { conversationTurns } from '../web/conversation-model.js';
 import { mergeNotificationCount } from '../web/notification-count.js';
+import { goalPrompt } from '../web/goal-mode.js';
 import { afterEach, expect, it } from 'vitest';
 let api: (path: string) => Promise<any> = async () => ({});
 const cleanup: (() => void)[] = [], scopes: vue.EffectScope[] = [];
@@ -30,6 +31,7 @@ function setup(file: string, props: any = {}, emit: (...args: any[]) => void = (
     if (id === './use-attachments') return { useAttachments: () => ({ current: vue.ref([]), hasPending: vue.ref(false), uploading: vue.ref(false), restore() {}, clear() {} }) };
     if (id === './conversation-model') return { conversationTurns };
     if (id === './notification-count') return { mergeNotificationCount };
+    if (id === './goal-mode') return { goalPrompt };
     if (id === './push-registration') return { pushRegistration: async () => ({}) };
     if (id === 'qrcode') return { default: { toDataURL: async () => 'data:fixture' } };
     if (id === './resume-reload') return { installResumeReload: () => ({ ready() {}, dispose() {} }) };

@@ -220,9 +220,10 @@ export class Agent {
     if (this.updateFrozen) { this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, error: { code: 'UPDATING', message: '助手正在准备更新，请稍后重试。' } }); return; }
     const image = frame.command.method === 'image.read';
     const safety = isSafetyCommand(frame.command);
+    const stopping = frame.command.method === 'stop' || frame.command.method === 'goal.pause';
     if (image ? this.mediaQueued >= 6 : safety ? this.safetyQueued >= 6 : this.queued >= 16) { this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, error: { code: 'BUSY', message: '请求过多，请稍后重试。' } }); return; }
     if (image) this.mediaQueued++; else if (safety) this.safetyQueued++; else this.queued++;
-    if (frame.command.method === 'stop') { try { this.authorizeControl(sessionId, m.clientId, frame.controlEpoch); this.stopping.add(frame.command.params.id); } catch {} }
+    if (stopping && 'id' in frame.command.params) { try { this.authorizeControl(sessionId, m.clientId, frame.controlEpoch); this.stopping.add(frame.command.params.id); } catch {} }
     const work = async () => {
       try {
         if (!this.enabled || (this.grants.get(sessionId) ?? 0) <= Date.now()) throw new RemoteError('AUTH', '远控授权已失效。');
@@ -267,7 +268,7 @@ export class Agent {
           const startedAt = Date.now();
           if (command.method === 'send' || command.method === 'plan.respond') await this.completionMonitor.watch(command.params.id, startedAt);
           let executed: unknown;
-          const pauseStoppedQueue = () => { if (command.method === 'stop') for (const id of this.sends.pause('任务已停止，待发送消息已暂停。', command.params.id)) this.notifyQueue(id); };
+          const pauseStoppedQueue = () => { if (command.method === 'stop' || command.method === 'goal.pause') for (const id of this.sends.pause('任务已停止，待发送消息已暂停。', command.params.id)) this.notifyQueue(id); };
           try { executed = command.method === 'send' ? await this.executeSend(command, frame.id, authorize, attachments) : await this.options.adapter.execute(command, frame.id, authorize, attachments); }
           catch (error) { if (error instanceof RemoteError && ['OUTCOME_UNKNOWN', 'INTERNAL'].includes(error.code)) pauseStoppedQueue(); throw error; }
           pauseStoppedQueue();
@@ -279,7 +280,7 @@ export class Agent {
           this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, result });
         }
       } catch (error) { this.send({ type: 'result', id: frame.id, sessionId, clientId: m.clientId, error: publicError(error) }); }
-      finally { if (image) this.mediaQueued--; else if (safety) this.safetyQueued--; else this.queued--; if (frame.command.method === 'stop') this.stopping.delete(frame.command.params.id); }
+      finally { if (image) this.mediaQueued--; else if (safety) this.safetyQueued--; else this.queued--; if (stopping && 'id' in frame.command.params) this.stopping.delete(frame.command.params.id); }
     };
     if (frame.command.method === 'queue.remove' || frame.command.method === 'command.status') void work();
     else if (image) this.mediaQueue = this.mediaQueue.then(work);

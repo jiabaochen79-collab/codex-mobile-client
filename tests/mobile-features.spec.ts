@@ -59,7 +59,7 @@ test('hides the desktop attachment envelope but keeps the image and request', as
   await turn.scrollIntoViewIfNeeded(); await turn.screenshot({ path:testInfo.outputPath('attachment-clean-mobile.png') });
 });
 test('opens photo-library and camera pickers separately from ordinary files', async ({ page }, testInfo) => {
-  await login(page); await page.getByTitle('添加照片、文件或计划模式', { exact: true }).click();
+  await login(page); await page.getByTitle('添加照片、文件或任务模式', { exact: true }).click();
   await expect(page.getByRole('button', { name: '照片图库', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '拍照', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '文件', exact: true })).toBeVisible();
@@ -75,12 +75,12 @@ test('opens photo-library and camera pickers separately from ordinary files', as
   await expect(page.getByText('已上传', { exact: true })).toHaveCount(2, { timeout: 15000 });
   await expect(page.locator('.pending-attachment img')).toHaveCount(2);
   expect(await page.locator('.pending-attachment img').evaluateAll(images => images.every(image => (image as HTMLImageElement).naturalWidth > 0))).toBe(true);
-  await page.getByTitle('添加照片、文件或计划模式', { exact: true }).click();
+  await page.getByTitle('添加照片、文件或任务模式', { exact: true }).click();
   const cameraChoice = page.waitForEvent('filechooser'); await page.getByRole('button', { name: '拍照', exact: true }).click();
   const camera = await cameraChoice; expect(camera.isMultiple()).toBe(false);
   expect(await camera.element().getAttribute('accept')).toBe('image/*'); expect(await camera.element().getAttribute('capture')).toBe('environment');
   await camera.setFiles([]); await expect(page.getByText('已上传', { exact: true })).toHaveCount(2);
-  await page.getByTitle('添加照片、文件或计划模式', { exact: true }).click();
+  await page.getByTitle('添加照片、文件或任务模式', { exact: true }).click();
   const fileChoice = page.waitForEvent('filechooser'); await page.getByRole('button', { name: '文件', exact: true }).click();
   const files = await fileChoice; expect(await files.element().getAttribute('accept')).toBeNull();
   await files.setFiles([]);
@@ -92,7 +92,7 @@ test('converts a real HEIC photo locally and uploads it as a previewable JPEG', 
   page.on('pageerror', error => errors.push(error.message));
   page.on('request', request => { if (/\/assets\/heic-to-/.test(request.url())) decoderRequests.push(request.url()); });
   page.on('websocket', socket => socket.on('framereceived', event => { try { const frame = JSON.parse(String(event.payload)); if (frame.type === 'result' && frame.result?.ready) completed.push(frame.result); } catch {} }));
-  await login(page); await page.getByTitle('添加照片、文件或计划模式', { exact:true }).click();
+  await login(page); await page.getByTitle('添加照片、文件或任务模式', { exact:true }).click();
   const choice = page.waitForEvent('filechooser'); await page.getByRole('button', { name:'照片图库', exact:true }).click();
   await (await choice).setFiles(source!);
   await expect(page.getByText('已上传', { exact:true })).toBeVisible({ timeout:30000 });
@@ -118,9 +118,9 @@ test('uses model-specific reasoning options and keeps the selected next-turn mod
 test('supports viewers and explicit takeover with intact drafts at phone widths',async({page,browser},testInfo)=>{
   await login(page);await page.getByLabel('消息',{exact:true}).fill('第一终端草稿');
   const second=await browser.newContext({viewport:{width:320,height:568},isMobile:true,hasTouch:true});const viewer=await second.newPage();
-  try{await login(viewer);await expect(viewer.getByTitle('接管控制权',{exact:true})).toBeVisible();await viewer.getByTitle('添加照片、文件或计划模式',{exact:true}).click();await expect(viewer.getByRole('button',{name:'照片图库',exact:true})).toBeDisabled();await viewer.getByTitle('关闭添加内容',{exact:true}).click();
+  try{await login(viewer);await expect(viewer.getByTitle('接管控制权',{exact:true})).toBeVisible();await viewer.getByTitle('添加照片、文件或任务模式',{exact:true}).click();await expect(viewer.getByRole('button',{name:'照片图库',exact:true})).toBeDisabled();await viewer.getByTitle('关闭添加内容',{exact:true}).click();
     await viewer.getByTitle('接管控制权',{exact:true}).click();await viewer.getByRole('button',{name:'确认接管',exact:true}).click();await expect(page.getByTitle('接管控制权',{exact:true})).toBeVisible();
-    await expect(page.getByLabel('消息',{exact:true})).toHaveValue('第一终端草稿');await expect(viewer.getByTitle('添加照片、文件或计划模式',{exact:true})).toBeEnabled();
+    await expect(page.getByLabel('消息',{exact:true})).toHaveValue('第一终端草稿');await expect(viewer.getByTitle('添加照片、文件或任务模式',{exact:true})).toBeEnabled();
     expect(await viewer.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await viewer.screenshot({path:testInfo.outputPath('controller-320.png')});
   }finally{await second.close();}
 });

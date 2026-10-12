@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { goalPrompt } from '../web/goal-mode.js';
 import { resolve } from 'node:path';
 import { compileScript, parse } from '@vue/compiler-sfc';
 import { transformSync } from 'esbuild';
@@ -32,6 +33,7 @@ function setup(file: string, props: any = {}, mount = false) {
     if (id === './use-chat-scroll') return { useChatScroll: () => ({ awayFromBottom: vue.ref(false), change: async (fn: () => void) => fn(), reset() {}, pause() {}, resume() {}, toBottom() {} }) };
     if (id === './use-attachments') return { useAttachments: () => ({ current: vue.ref([]), hasPending: vue.ref(false), restore() {}, clear() {} }) };
     if (id === './conversation-model') return { conversationTurns };
+    if (id === './goal-mode') return { goalPrompt };
     if (id === './notification-count') return { mergeNotificationCount };
     if (id === 'qrcode') return { default: { toDataURL: async () => 'data:fixture' } };
     if (id === 'lucide-vue-next' || id.endsWith('.vue') || ['./mobile-viewport','./push-registration','./prepare-photo'].includes(id)) return {};

@@ -46,6 +46,14 @@ function setup() {
   };
   return page;
 }
+function goalPage() {
+  const p = setup(), a = task(); p.showConversation(a);
+  p.status.value.client.capabilities.push('goal-mode', 'task-mode');
+  p.snapshot.value = { ...a, epoch: 'fixture', busy: false, turnId: null, requests: [], messages: [], hasMore: false,
+    settings: { mode: 'default', revision: 'settings' } };
+  p.taskSynced.value = true; p.modeSynced.value = true;
+  return { p, a };
+}
 beforeEach(() => {
   vi.useFakeTimers();
   state.unmounted.length = 0; state.api.mockReset(); state.api.mockResolvedValue({});
@@ -89,6 +97,49 @@ describe('M01: queue response fencing', () => {
     const p = setup(); p.showConversation(task());
     const reading = p.readQueue(); FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), { queued: [{ id: 'confirmed entry' }] }); await reading;
     expect(p.queuedMessages.value).toEqual([{ id: 'confirmed entry' }]);
+  });
+});
+
+describe('goal drafts', () => {
+  it('keeps a goal choice attached to its task through A-B-A navigation', async () => {
+    const { p, a } = goalPage(); const b = task(); p.draft.value = 'Original objective';
+    await p.setGoalMode(true); expect(p.goalComposer.value).toBe(true);
+    p.showConversation(b); expect(p.goalComposer.value).toBe(false);
+    p.showConversation(a); expect(p.goalComposer.value).toBe(true); expect(p.draft.value).toBe('Original objective');
+    expect(FakeSocket.latest.frames).toEqual([]);
+  });
+  it('blocks a duplicate goal discovered after choosing the mode without clearing the draft', async () => {
+    const { p, a } = goalPage(); p.draft.value = 'Keep objective'; await p.setGoalMode(true);
+    expect(p.canSend.value).toBe(true);
+    p.snapshot.value.goal = { threadId: a.id, status: 'active' };
+    expect(p.canSend.value).toBe(false); expect(p.goalReason.value).toContain('已有目标');
+    expect(p.draft.value).toBe('Keep objective');
+  });
+  it('allows an authorized pause after subscription expiry but never in viewer mode', () => {
+    const { p } = goalPage(); p.snapshot.value.goal = { status: 'active' };
+    p.status.value.subscription.access = false; p.invalidateMode();
+    expect(p.canPauseGoal.value).toBe(true); expect(p.canSend.value).toBe(false);
+    p.status.value.control = { role: 'viewer' }; expect(p.canPauseGoal.value).toBe(false);
+    p.status.value.control = { role: 'controller' }; p.connected.value = false; expect(p.canPauseGoal.value).toBe(false);
+  });
+  it('preserves goal choice and draft after a rejected plan switch', async () => {
+    const { p } = goalPage(); p.draft.value = 'Keep objective'; await p.setGoalMode(true);
+    const changing = p.setPlanMode('plan'); const frame = FakeSocket.latest.frames.at(-1);
+    FakeSocket.latest.reject(frame, 'Native mode changed');
+    await vi.waitFor(() => expect(FakeSocket.latest.frames.at(-1).command.method).toBe('read'));
+    FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), p.snapshot.value); await changing;
+    expect(p.goalComposer.value).toBe(true); expect(p.draft.value).toBe('Keep objective');
+    expect(FakeSocket.latest.frames.some(f => ['send', 'stop', 'goal.pause'].includes(f.command.method))).toBe(false);
+  });
+  it('stores the canonical goal payload in the existing durable queue request', async () => {
+    const { p, a } = goalPage(); p.draft.value = 'Run two steps'; await p.setGoalMode(true);
+    p.snapshot.value.busy = true; p.snapshot.value.turnId = 'native-turn';
+    const sending = p.send(); const frame = FakeSocket.latest.frames.at(-1);
+    expect(frame.command).toEqual({ method: 'send', params: { id: a.id, epoch: 'fixture', text: '/goal Run two steps', mode: 'queue' } });
+    FakeSocket.latest.reply(frame, { accepted: true, queued: true });
+    await vi.waitFor(() => expect(FakeSocket.latest.frames.at(-1).command.method).toBe('read'));
+    FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), p.snapshot.value); await sending;
+    expect(p.goalComposer.value).toBe(false); expect(p.draft.value).toBe('');
   });
 });
 

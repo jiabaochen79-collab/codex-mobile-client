@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { goalPrompt } from '../web/goal-mode.js';
 import { resolve } from 'node:path';
 import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc';
 import { transformSync } from 'esbuild';
@@ -42,6 +43,7 @@ function setup(file: string, props: any) {
     if (id === './use-chat-scroll') return { useChatScroll: () => ({ awayFromBottom: vue.ref(false), change: async (fn: any) => fn(), reset() {}, pause() {}, resume() {}, toBottom() {} }) };
     if (id === './use-attachments') return { useAttachments: () => ({ current: vue.ref([]), hasPending: vue.ref(false), uploading: vue.ref(false), restore() {}, clear() {}, suspend() {} }) };
     if (id === './conversation-model') return { conversationTurns };
+    if (id === './goal-mode') return { goalPrompt };
     if (id === './notification-count') return { mergeNotificationCount };
     if (id === 'qrcode') return { toDataURL: async () => 'data:fixture' };
     if (id === './push-registration') return { pushRegistration: async () => { throw new Error('No push provider in this fixture'); } };
@@ -152,8 +154,12 @@ it('clears only the logged-out device plan drafts and preserves them during sess
   const key = `plan-feedback:${props.deviceId}:${props.conversationId}:${props.request.id}`;
   sessions.set('plan-feedback:987654321:other:request', 'other device');
   const p = setup('MobilePanel.vue', { deviceId: props.deviceId, deviceName: 'Fixture' });
+  p.goalDrafts.add(props.conversationId); sessions.set('goal-drafts:' + props.deviceId, JSON.stringify([props.conversationId]));
+  sessions.set('goal-drafts:987654321', '["other-task"]');
   p.clearNavigation(true); expect(sessions.get(key)).toContain('Private unsent revision');
+  expect(p.goalDrafts.has(props.conversationId)).toBe(true);
   p.clearNavigation(false); expect(sessions.has(key)).toBe(false); expect(sessions.get('plan-feedback:987654321:other:request')).toBe('other device');
+  expect(p.goalDrafts.size).toBe(0); expect(sessions.get('goal-drafts:987654321')).toBe('["other-task"]');
 });
 async function render(file: string, state: any) {
   const descriptor = parse(readFileSync(resolve('web', file), 'utf8')).descriptor, script = compileScript(descriptor, { id: file });
