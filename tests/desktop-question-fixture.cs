@@ -38,7 +38,7 @@ internal static class QuestionFixture {
         var request = new JavaScriptSerializer().Deserialize("{\"title\":\"fixture\",\"answers\":[{\"question\":\"单次导入 最多多少条？ 说明 & 约束\",\"answer\":\"最多10万\"}]}", requestType);
         var results = new List<string>(); var application = new Application();
         var window = new Window { Title = "Question matcher fixture", Width = 500, Height = 400, Left = -30000, Top = -30000, ShowInTaskbar = false };
-        var cases = new[] { "shallow", "free-form-deep", "ambiguous", "wrong-question", "wrong-title", "document-boundary", "closed" };
+        var cases = new[] { "shallow", "free-form-deep", "minimized", "ambiguous", "wrong-question", "wrong-title", "document-boundary", "closed" };
         Exception failure = null;
         window.Loaded += (sender, e) => {
             var handle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
@@ -46,17 +46,19 @@ internal static class QuestionFixture {
             try {
                 foreach (var sample in cases) {
                     window.Dispatcher.Invoke(new Action(() => {
+                        window.WindowState = WindowState.Normal;
                         var content = new StackPanel();
                         bool empty = sample == "document-boundary" || sample == "closed";
                         content.Children.Add(Document(sample == "wrong-title" ? "other" : "fixture", empty ? Wrap(new TextBox()) : Card(sample == "wrong-question" ? "Another question" : "单次导入\n 最多多少条？  说明 &amp; 约束", sample == "ambiguous", sample == "shallow" ? 0 : 5)));
                         if (empty) content.Children.Add(Document("unrelated", Card("单次导入 最多多少条？ 说明 & 约束", false, 5)));
                         window.Content = content; window.UpdateLayout();
+                        if (sample == "minimized") window.WindowState = WindowState.Minimized;
                     }));
                     var root = AutomationElement.FromHandle(handle);
                     bool found = false;
                     try { type.GetMethod("Find", Hidden).Invoke(null, new object[] { root, request, 0 }); found = true; }
                     catch (TargetInvocationException error) { if (!(error.InnerException is InvalidOperationException)) throw; }
-                    if (found != (sample == "shallow" || sample == "free-form-deep")) throw new Exception("Incorrect card matching: " + sample);
+                    if (found != (sample == "shallow" || sample == "free-form-deep" || sample == "minimized")) throw new Exception("Incorrect card matching: " + sample);
                     if (sample == "free-form-deep" || sample == "closed") {
                         var pending = (bool)type.GetMethod("HasQuestion", Hidden).Invoke(null, new object[] { root, request, 0 });
                         if (pending != (sample == "free-form-deep")) throw new Exception("Incorrect submission confirmation: " + sample);
