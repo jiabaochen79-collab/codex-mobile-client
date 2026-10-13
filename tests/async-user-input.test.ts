@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { CodexDesktop, normalizeSnapshot } from '../src/agent/desktop.js';
 import { NativeIpc } from '../src/agent/ipc.js';
 import * as nativeQuestion from '../src/agent/desktop-question.js';
-import { asyncInputAccepted } from '../src/agent/async-user-input.js';
+import { asyncInputAccepted, asyncInputReplies } from '../src/agent/async-user-input.js';
 import { RemoteError } from '../src/shared/protocol.js';
 
 afterEach(() => vi.restoreAllMocks());
@@ -73,49 +73,58 @@ function desktop() {
   vi.spyOn(adapter as any, 'snapshot').mockImplementation(() => normalizeSnapshot(current, 'epoch'));
   Reflect.set(adapter, 'discovery', { processId: 42, startedAt: 'ticks', executablePath: 'desktop' });
   const navigate = vi.spyOn(adapter as any, 'appTool').mockResolvedValue({ navigated: true });
-  const submit = vi.spyOn(nativeQuestion, 'submitDesktopQuestion').mockImplementation(async (_exe, _identity, _title, _request, _answers, check) => { await check(); current.turns[0].items.push(reply('accepted', 'Custom address')); return { closed: true }; });
-  const request = vi.spyOn(NativeIpc.prototype, 'request').mockResolvedValue({ resultType: 'success' });
-  return { adapter, current, request, submit, navigate, command: { method: 'respond' as const, params: { id: current.id, epoch: 'epoch', requestId: questionId(), answers: { [questionId()]: ['Custom address'] } } } };
+  const submit = vi.spyOn(nativeQuestion, 'submitDesktopQuestion').mockRejectedValue(new Error('Answer submission must not use a window'));
+  const reconcile = vi.spyOn(nativeQuestion, 'reconcileDesktopQuestion').mockImplementation(async (_exe, _identity, _title, _request, _answers, check) => { await check(); return { closed: true }; });
+  const request = vi.spyOn(NativeIpc.prototype, 'request').mockImplementation(async method => {
+    if (method === 'thread-follower-steer-turn' || method === 'thread-follower-start-turn') current.turns[0].items.push(reply('accepted', 'Custom address'));
+    return { resultType: 'success' };
+  });
+  return { adapter, current, request, submit, reconcile, navigate, command: { method: 'respond' as const, params: { id: current.id, epoch: 'epoch', requestId: questionId(), answers: { [questionId()]: ['Custom address'] } } } };
 }
-it.each(['inProgress', 'completed'])('submits a %s async answer once through the native card and verifies the accepted answer', async status => {
-  const { adapter, current, request, submit, navigate, command } = desktop();
+it.each(['inProgress', 'completed'])('submits a %s async answer once through task IPC before closing the accepted card', async status => {
+  const { adapter, current, request, submit, reconcile, navigate, command } = desktop();
   current.turns[0].status = status;
   if (status === 'completed') current.threadRuntimeStatus.type = 'idle';
   try {
     await expect(adapter.execute(command, randomUUID())).resolves.toEqual({ accepted: true });
-    expect(request).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalledOnce();
+    const [method, params, version, owner] = request.mock.calls[0];
+    expect(method).toBe(status === 'completed' ? 'thread-follower-start-turn' : 'thread-follower-steer-turn');
+    expect(version).toBe(status === 'completed' ? 2 : 1); expect(owner).toBe('owner');
+    const body = params as { turnStart: { request: { input: { text: string }[] } }; input: { text: string }[] };
+    const input = status === 'completed' ? body.turnStart.request.input : body.input;
+    expect(asyncInputReplies(input[0].text)).toEqual([{ questionItemId: questionId(), question: 'Which address?', answer: 'Custom address' }]);
     expect(navigate).toHaveBeenCalledWith('navigate_to_codex_page', { threadId: current.id }, current.id, undefined);
-    expect(submit).toHaveBeenCalledTimes(1);
-    expect(submit.mock.calls[0].slice(2, 5)).toEqual(['Input fixture', normalizeSnapshot(state(), 'epoch').requests[0], command.params.answers]);
+    expect(submit).not.toHaveBeenCalled(); expect(reconcile).toHaveBeenCalledOnce();
+    expect(reconcile.mock.calls[0].slice(2, 5)).toEqual(['Input fixture', normalizeSnapshot(state(), 'epoch').requests[0], command.params.answers]);
+    expect(request.mock.invocationCallOrder[0]).toBeLessThan(navigate.mock.invocationCallOrder[0]);
   } finally { adapter.close(); }
 });
-it('checks authorization and question freshness again before clicking submit', async () => {
-  const { adapter, current, command, submit, request } = desktop();
+it('checks authorization and question freshness again before submitting the answer', async () => {
+  const { adapter, current, command, request } = desktop();
   const authorize = vi.fn().mockImplementation(() => { current.turns[0].items.push(reply()); });
-  submit.mockImplementation(async (_exe, _identity, _title, _request, _answers, check) => { await check(); return { closed: true }; });
   try {
     await expect(adapter.execute(command, randomUUID(), authorize)).rejects.toMatchObject({ code: 'STALE' });
     expect(request).not.toHaveBeenCalled();
   } finally { adapter.close(); }
 });
 it.each(['open card', 'unknown submission'])('reconciles an accepted answer after %s without sending the answer again', async kind => {
-  const { adapter, current, command, submit, request } = desktop();
-  submit.mockImplementation(async () => {
+  const { adapter, current, command, submit, request, reconcile } = desktop();
+  request.mockImplementation(async () => {
     current.turns[0].items.push(reply('accepted', 'Custom address'));
     if (kind === 'unknown submission') throw new RemoteError('OUTCOME_UNKNOWN', 'Unconfirmed card');
-    return { closed: false };
+    return { resultType: 'success' };
   });
-  const reconcile = vi.spyOn(nativeQuestion, 'reconcileDesktopQuestion').mockImplementation(async (_exe, _identity, _title, _request, _answers, check) => { await check(); return { closed: true }; });
   try {
     await expect(adapter.execute(command, randomUUID())).resolves.toEqual({ accepted: true });
-    expect(submit).toHaveBeenCalledOnce(); expect(reconcile).toHaveBeenCalledOnce(); expect(request).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled(); expect(reconcile).toHaveBeenCalledOnce(); expect(request).toHaveBeenCalledOnce();
   } finally { adapter.close(); }
 });
 it('does not dismiss a new question that repeats an earlier question text', async () => {
-  const { adapter, current, command, submit } = desktop();
-  submit.mockImplementation(async () => {
+  const { adapter, current, command, request } = desktop();
+  request.mockImplementation(async () => {
     current.turns[0].items.push(reply('accepted', 'Custom address'), { ...question, id: 'new-question' });
-    return { closed: false };
+    return { resultType: 'success' };
   });
   const reconcile = vi.spyOn(nativeQuestion, 'reconcileDesktopQuestion').mockImplementation(async (_exe, _identity, _title, _request, _answers, check) => { await check(); return { closed: true }; });
   try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'STALE' }); }
@@ -132,11 +141,11 @@ it.each(['new turn', 'answered', 'other question', 'empty answer', 'extra answer
   try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: ['empty answer', 'extra answer', 'decline'].includes(kind) ? 'INVALID' : 'STALE' }); expect(request).not.toHaveBeenCalled(); }
   finally { adapter.close(); }
 });
-it.each(['inProgress', 'completed'])('keeps a %s answer retryable after a native rejection and leaves the original question unchanged', async status => {
-  const { adapter, current, request, submit, command } = desktop(); submit.mockRejectedValue({ code: 'CLIENT_UNAVAILABLE' });
+it.each(['inProgress', 'completed'])('keeps a %s answer retryable after an IPC rejection and leaves the original question unchanged', async status => {
+  const { adapter, current, request, reconcile, command } = desktop(); request.mockResolvedValue({ resultType: 'error' });
   current.turns[0].status = status;
   if (status === 'completed') current.threadRuntimeStatus.type = 'idle';
-  try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'CLIENT_UNAVAILABLE' }); expect(normalizeSnapshot(current, 'epoch').requests).toHaveLength(1); expect(request).not.toHaveBeenCalled(); }
+  try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'CLIENT_REJECTED' }); expect(normalizeSnapshot(current, 'epoch').requests).toHaveLength(1); expect(request).toHaveBeenCalledOnce(); expect(reconcile).not.toHaveBeenCalled(); }
   finally { adapter.close(); }
 });
 it.each(['inProgress', 'completed'])('retains a %s question subscription and installation blocker until the reply is accepted', async status => {
@@ -184,18 +193,26 @@ it('accepts only exact question identities, text, and answers in native history'
   const current = state(); current.turns.push({ turnId: 'next', status: 'completed', turnStartedAtMs: 2, items: [{ type: 'userMessage', content: reply('accepted', 'Custom address').input }] });
   expect(asyncInputAccepted(current, request, { [questionId()]: ['Custom address'] })).toBe(true);
 });
-it.each(['missing reply', 'card still open', 'unknown outcome'])('never falls back to raw transport after %s', async kind => {
+it.each(['missing reply', 'card still open', 'unknown outcome'])('never resends an answer after %s', async kind => {
   vi.useFakeTimers();
-  const { adapter, command, submit, request } = desktop();
-  submit.mockImplementation(async () => {
-    if (kind === 'unknown outcome') throw { code: 'OUTCOME_UNKNOWN' };
-    return { closed: kind !== 'card still open' };
-  });
+  const { adapter, command, submit, request, reconcile } = desktop();
+  if (kind === 'unknown outcome') request.mockRejectedValue(new RemoteError('OUTCOME_UNKNOWN', 'Unconfirmed transport'));
+  if (kind === 'missing reply') request.mockResolvedValue({ resultType: 'success' });
+  reconcile.mockResolvedValue({ closed: false });
   try {
     const assertion = expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
     await vi.advanceTimersByTimeAsync(6000); await assertion;
-    expect(request).not.toHaveBeenCalled(); expect(submit).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledOnce(); expect(submit).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalledTimes(kind === 'card still open' ? 3 : 0);
   } finally { adapter.close(); vi.useRealTimers(); }
+});
+it('retries transient card closure without resubmitting the already accepted answer', async () => {
+  const { adapter, command, request, reconcile } = desktop();
+  reconcile.mockRejectedValueOnce(new RemoteError('OUTCOME_UNKNOWN', 'Stale accessibility element')).mockResolvedValueOnce({ closed: false });
+  try {
+    await expect(adapter.execute(command, randomUUID())).resolves.toEqual({ accepted: true });
+    expect(request).toHaveBeenCalledOnce(); expect(reconcile).toHaveBeenCalledTimes(3);
+  } finally { adapter.close(); }
 });
 it('continues using the legacy response protocol for blocking user input', async () => {
   const { adapter, current, request } = desktop();

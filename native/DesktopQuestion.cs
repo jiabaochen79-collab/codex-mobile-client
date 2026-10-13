@@ -52,6 +52,14 @@ internal static class DesktopQuestion {
     }
 
     internal static void Run(bool step = false, bool reconcile = false) {
+        // UI Automation callbacks require a non-UI MTA thread.
+        var thread = new Thread(() => RunCore(step, reconcile));
+        thread.SetApartmentState(ApartmentState.MTA);
+        thread.Start();
+        thread.Join();
+    }
+
+    private static void RunCore(bool step, bool reconcile) {
         bool submitting = false;
         string stage = "input";
         WindowLease window = null;
@@ -249,7 +257,7 @@ internal static class DesktopQuestion {
     private static bool HasQuestion(AutomationElement root, Request request, int index) {
         var document = root.FindFirst(TreeScope.Descendants, new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document), new PropertyCondition(AutomationElement.NameProperty, request.title)));
         if (document == null) throw new InvalidOperationException();
-        return document.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit)).Cast<AutomationElement>().Where(e => Editors.Contains(e.Current.Name)).Any(e => {
+        return document.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>().Where(e => e.Current.ControlType == ControlType.Edit && Editors.Contains(e.Current.Name)).Any(e => {
             var panel = TreeWalker.ControlViewWalker.GetParent(e);
             for (int i = 0; i < 8 && panel != null && panel.Current.ControlType != ControlType.Document; i++, panel = TreeWalker.ControlViewWalker.GetParent(panel)) {
                 if (panel.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text)).Cast<AutomationElement>().Any(text => QuestionText(text.Current.Name) == QuestionText(request.answers[index].question))) return true;
@@ -261,8 +269,8 @@ internal static class DesktopQuestion {
         var document = root.FindFirst(TreeScope.Descendants, new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document), new PropertyCondition(AutomationElement.NameProperty, request.title)));
         if (document == null) throw new InvalidOperationException();
         var candidates = new List<Card>();
-        foreach (AutomationElement editor in document.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit))) {
-            if (!Editors.Contains(editor.Current.Name)) continue;
+        foreach (AutomationElement editor in document.FindAll(TreeScope.Descendants, Condition.TrueCondition)) {
+            if (editor.Current.ControlType != ControlType.Edit || !Editors.Contains(editor.Current.Name)) continue;
             var panel = TreeWalker.ControlViewWalker.GetParent(editor);
             for (int depth = 0; depth < 8 && panel != null && panel.Current.ControlType != ControlType.Document; depth++, panel = TreeWalker.ControlViewWalker.GetParent(panel)) {
                 var descendants = panel.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>().ToArray();

@@ -16,7 +16,7 @@ import { errorText } from './error-text.js';
 import { ConversationImages, markdownImages, userImageContent } from './images.js';
 import { snapshotResponse } from './snapshot-response.js';
 import { asyncInputReplies, asyncInputAccepted, asyncUserInputRequests, hasPendingInteractions } from './async-user-input.js';
-import { submitDesktopQuestion, reconcileDesktopQuestion } from './desktop-question.js';
+import { reconcileDesktopQuestion } from './desktop-question.js';
 import { threadGoal } from './goals.js';
 import { RemoteError, supportsDesktopCommand, uid, type ClientStatus, type Command, type DesktopAdapter, type Snapshot, type Interaction, type Conversation, type Message, type LocalAttachment, type Activity, type PermissionMode } from '../shared/protocol.js';
 
@@ -663,20 +663,28 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
         if (asyncUserInputRequests(this.current!.state).some(input => input.id === request.id)) {
           if ((request.questions ?? []).some(question => answers[question.id]?.length !== 1)) throw new RemoteError('INVALID', '请为当前问题提交一个回答。');
           if (!this.discovery) throw new RemoteError('CLIENT_UNAVAILABLE', '电脑客户端身份尚未同步，请稍后重试。');
-          await this.appTool('navigate_to_codex_page', { threadId: snap.id }, snap.id, authorize);
           const check = async () => {
             authorize?.();
             const current = await this.snapshot();
             if (current.id !== snap.id || current.epoch !== snap.epoch || JSON.stringify(current.requests.find(input => input.id === request.id)) !== JSON.stringify(request)) throw new RemoteError('STALE', '电脑提问已变化，请重新查看后回答。');
             authorize?.();
+            return current;
           };
           let closed = false;
-          try { closed = (await submitDesktopQuestion(this.nativeExe, this.discovery, snap.title, request, answers, check)).closed; }
+          const current = await check();
+          const text = '<send_user_message_question_reply>\n' + JSON.stringify(request.questions!.map(question => ({ questionItemId: question.id, question: question.question, answer: answers[question.id][0].trim() }))) + '\n</send_user_message_question_reply>';
+          const method = current.busy ? 'thread-follower-steer-turn' : 'thread-follower-start-turn';
+          const params = current.busy ? this.steeringParams(snap.id, text, commandId) : { conversationId: snap.id, turnStart: { request: { threadId: snap.id, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: commandId }, context: { inheritThreadSettings: true, attachments: [], commentAttachments: [] } } };
+          try {
+            const response = await this.ipc.request(method, params, current.busy ? 1 : 2, this.current!.owner);
+            if (response.resultType === 'error') throw new RemoteError('CLIENT_REJECTED', '电脑客户端未接受此回答，手机回答已保留。');
+          }
           catch (error) { if (!(error instanceof RemoteError) || error.code !== 'OUTCOME_UNKNOWN') throw error; }
           const deadline = Date.now() + 5000;
           do {
             if (asyncInputAccepted(this.followed.get(snap.id)?.state ?? {}, request, answers)) {
               if (!closed) {
+                await this.appTool('navigate_to_codex_page', { threadId: snap.id }, snap.id, authorize);
                 const accepted = async () => {
                   authorize?.();
                   if (!asyncInputAccepted(this.followed.get(snap.id)?.state ?? {}, request, answers)) throw new RemoteError('OUTCOME_UNKNOWN', '回答接收状态已变化，请核对原会话，勿重复提交。');
@@ -685,10 +693,13 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
                   if (current.requests.some(input => input.questions?.some(question => request.questions?.some(original => original.question === question.question && original.id !== question.id)))) throw new RemoteError('STALE', '电脑端已有新的提问，原回答不会重复提交。');
                   authorize?.();
                 };
-                try { closed = (await reconcileDesktopQuestion(this.nativeExe, this.discovery, snap.title, request, answers, accepted)).closed; }
-                catch (error) {
-                  if (error instanceof RemoteError && error.code === 'CLIENT_UNAVAILABLE') throw new RemoteError('OUTCOME_UNKNOWN', '回答已送达，但电脑提问面板尚未同步，请勿重复提交回答。');
-                  throw error;
+                // Retrying a close is safe after exact acceptance; never resend an answer.
+                for (let attempt = 0; attempt < 3 && !closed; attempt++) {
+                  try { closed = (await reconcileDesktopQuestion(this.nativeExe, this.discovery, snap.title, request, answers, accepted)).closed; }
+                  catch (error) {
+                    if (!(error instanceof RemoteError) || !['CLIENT_UNAVAILABLE', 'OUTCOME_UNKNOWN'].includes(error.code)) throw error;
+                  }
+                  if (!closed && attempt < 2) await new Promise(resolve => setTimeout(resolve, 250));
                 }
               }
               if (closed) return { accepted: true };
