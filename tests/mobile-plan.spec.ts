@@ -84,17 +84,50 @@ test('chooses goal mode explicitly and sends one native goal without changing ta
   const f = await fixture(page, { mode: 'default' });
   await page.getByLabel('消息', { exact: true }).fill('完成验收并报告结果'); await add(page).click(); await goalOption(page).click();
   await expect(page.getByPlaceholder('描述目标及完成标准')).toHaveValue('完成验收并报告结果');
+  await expect(page.locator('.composer-field .goal-chip')).toContainText('目标');
   expect(f.commands.some(c => ['send', 'permissions.update', 'stop'].includes(c.method))).toBe(false);
   await page.getByTitle('发送消息', { exact: true }).click();
   await expect.poll(() => f.commands.filter(c => c.method === 'send').length).toBe(1);
   expect(f.commands.find(c => c.method === 'send').params).toEqual({ id: f.snapshot.id, epoch: 'fixture', text: '/goal 完成验收并报告结果' });
-  await expect(page.getByLabel('消息', { exact: true })).toHaveValue(''); await expect(page.locator('.goal-draft-status')).toHaveCount(0);
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue(''); await expect(page.locator('.goal-chip')).toHaveCount(0);
+});
+test('fits the selected goal inside the composer using the same chip as plan mode', async ({ page }, info) => {
+  const f = await fixture(page);
+  const planSize = await page.locator('.composer-field .plan-chip').boundingBox();
+  await page.getByLabel('消息', { exact: true }).fill('目标模式布局验收'); await add(page).click(); await goalOption(page).click();
+  const chip = page.locator('.composer-field .goal-chip');
+  await expect(chip).toBeVisible(); await expect(closePlan(page)).toHaveCount(0);
+  const goalSize = await chip.boundingBox();
+  expect(goalSize!.width).toBeCloseTo(planSize!.width, 0); expect(goalSize!.height).toBe(planSize!.height);
+  await expect(chip.locator('svg').first()).toHaveClass(/lucide-target/);
+  await expect(page.locator('.goal-draft-status, .composer-mode-reason')).toHaveCount(0);
+  for (const [width, height] of [[320, 568], [390, 844], [1280, 900], [390, 360]]) {
+    await page.setViewportSize({ width, height });
+    await expect.poll(async () => { const box = await chip.boundingBox(); return box!.y + box!.height; }).toBeLessThanOrEqual(height);
+    for (const element of [add(page), chip, page.getByLabel('消息', { exact: true }), page.locator('.composer-field .send-button')]) {
+      const box = await element.boundingBox(); expect(box!.x).toBeGreaterThanOrEqual(0); expect(box!.x + box!.width).toBeLessThanOrEqual(width); expect(box!.y + box!.height).toBeLessThanOrEqual(height);
+    }
+    if (width === 320) expect((await page.getByLabel('消息', { exact: true }).boundingBox())!.width).toBeGreaterThan(100);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath('goal-composer-' + width + '-' + height + '.png') });
+  }
+  await page.getByLabel('消息', { exact: true }).fill('a'.repeat(4001));
+  await expect(page.locator('.composer-mode-reason')).toContainText('目标最多 4000 个字符'); await expect(page.getByTitle('发送消息', { exact: true })).toBeDisabled();
+  await page.getByLabel('消息', { exact: true }).fill('目标模式布局验收'); await expect(page.locator('.composer-mode-reason')).toHaveCount(0);
+  expect(f.commands.some(c => ['send', 'goal.pause', 'stop'].includes(c.method))).toBe(false);
+});
+test('cancels the selected goal from the composer without losing the draft or interrupting execution', async ({ page }) => {
+  const f = await fixture(page, { busy: true, mode: 'default' });
+  await page.getByLabel('消息', { exact: true }).fill('保留执行中的目标草稿'); await add(page).click(); await goalOption(page).click();
+  await page.getByRole('button', { name: '取消目标模式', exact: true }).click();
+  await expect(page.locator('.goal-chip')).toHaveCount(0); await expect(page.getByPlaceholder('发送消息', { exact: true })).toHaveValue('保留执行中的目标草稿');
+  expect(f.commands.some(c => ['send', 'mode.update', 'permissions.update', 'goal.pause', 'stop'].includes(c.method))).toBe(false);
 });
 test('switches out of plan mode before choosing a goal and preserves the draft on a rejected switch', async ({ page }) => {
   const f = await fixture(page, { reject: true });
   await page.getByLabel('消息', { exact: true }).fill('保留原始目标'); await add(page).click(); await goalOption(page).click();
   await expect(page.getByRole('alert')).toContainText('计划或设置已变化');
-  await expect(closePlan(page)).toBeVisible(); await expect(page.locator('.goal-draft-status')).toHaveCount(0);
+  await expect(closePlan(page)).toBeVisible(); await expect(page.locator('.goal-chip')).toHaveCount(0);
   await expect(page.getByLabel('消息', { exact: true })).toHaveValue('保留原始目标');
   expect(f.commands.filter(c => c.method === 'mode.update')).toHaveLength(1); expect(f.commands.some(c => c.method === 'send')).toBe(false);
 });
