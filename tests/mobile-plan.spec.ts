@@ -153,11 +153,35 @@ test('keeps goal detail collapsed and pauses the whole goal at 320px and 390px',
 test('shows actual goal termination and does not confuse a stopped turn with a paused goal', async ({ page }) => {
   const f = await fixture(page, { mode: 'default' }); f.snapshot.requests = []; f.snapshot.lastTurnStatus = 'interrupted'; f.snapshot.goal = nativeGoal(f.snapshot.id); f.update();
   await expect(page.locator('.task-goal summary')).toContainText('本轮已停止，目标仍开启');
-  for (const [status, label] of [['complete', '目标已达成'], ['paused', '目标已暂停'], ['blocked', '目标暂时受阻'], ['budgetLimited', '目标预算已用完'], ['usageLimited', '目标达到用量限制']]) {
+  for (const [status, label] of [['paused', '目标已暂停'], ['blocked', '目标暂时受阻'], ['budgetLimited', '目标预算已用完'], ['usageLimited', '目标达到用量限制']]) {
     f.snapshot.goal.status = status; f.update(); await expect(page.locator('.task-goal summary')).toContainText(label);
   }
   expect(f.commands.some(c => ['send', 'goal.pause'].includes(c.method))).toBe(false);
 });
+test('removes completed goals from the chat header while preserving the conversation and showing new goals', async ({ page }, info) => {
+  const f = await fixture(page, { mode: 'default' }); f.snapshot.requests = []; f.snapshot.goal = nativeGoal(f.snapshot.id); f.update();
+  await expect(page.locator('.task-goal summary')).toContainText('正在执行目标');
+  await page.locator('.task-goal summary').click();
+  await page.getByLabel('消息', { exact: true }).fill('目标完成后的草稿');
+  f.snapshot.goal.status = 'complete'; f.update();
+  await expect(page.locator('.task-goal')).toHaveCount(0);
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('目标完成后的草稿');
+  await expect(page.getByText('保留已有数据。', { exact: false }).first()).toBeVisible();
+  await page.reload(); await page.getByRole('button', { name: '计划模式验收', exact: true }).click();
+  await expect.poll(() => f.commands.filter(c => c.method === 'read').length).toBeGreaterThan(2);
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(page.locator('.task-goal')).toHaveCount(0);
+    await expect(page.getByLabel('消息', { exact: true })).toHaveValue('目标完成后的草稿');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath('completed-goal-' + width + '.png') });
+  }
+  f.snapshot.goal = { ...nativeGoal(f.snapshot.id), createdAt: 1700000002 }; f.update();
+  await expect(page.locator('.task-goal summary')).toContainText('正在执行目标');
+  expect(await page.locator('.task-goal').getAttribute('open')).toBeNull();
+  expect(f.commands.some(c => ['send', 'goal.pause', 'stop'].includes(c.method))).toBe(false);
+});
+
 test('preserves goal draft on reload and does not offer goal mode to an old helper', async ({ page }) => {
   const f = await fixture(page, { mode: 'default' }); await page.getByLabel('消息', { exact: true }).fill('关闭前的目标');
   await add(page).click(); await goalOption(page).click(); await page.reload(); await page.getByRole('button', { name: '计划模式验收', exact: true }).click();
