@@ -66,6 +66,8 @@ internal static class Program {
             }
             if (args.Length > 0 && args[0] == "--discover") { Discover(); return 0; }
             if (args.Length == 1 && args[0] == "--desktop-question") { DesktopQuestion.Run(); return 0; }
+            if (args.Length == 1 && args[0] == "--desktop-question-step") { DesktopQuestion.Run(true); return 0; }
+            if (args.Length == 1 && args[0] == "--desktop-question-reconcile") { DesktopQuestion.Run(false, true); return 0; }
             if (args.Length == 3 && args[0] == "--desktop-watch") { DesktopRecovery.Watch(args[1], args[2]); return 0; }
             if (args.Length == 1 && args[0] == "--desktop-launch") { DesktopRecovery.Launch(); return 0; }
             if (args.Length > 0 && args[0] == "--power-status") { using (var writer = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false))) writer.Write(Json.Serialize(PowerSettings.Read())); return 0; }

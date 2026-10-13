@@ -4,6 +4,7 @@ import { CodexDesktop, normalizeSnapshot } from '../src/agent/desktop.js';
 import { NativeIpc } from '../src/agent/ipc.js';
 import * as nativeQuestion from '../src/agent/desktop-question.js';
 import { asyncInputAccepted } from '../src/agent/async-user-input.js';
+import { RemoteError } from '../src/shared/protocol.js';
 
 afterEach(() => vi.restoreAllMocks());
 const questionId = (item = 'question-message', index = 0) => JSON.stringify(['request_user_input_async', item, index]);
@@ -96,6 +97,29 @@ it('checks authorization and question freshness again before clicking submit', a
     await expect(adapter.execute(command, randomUUID(), authorize)).rejects.toMatchObject({ code: 'STALE' });
     expect(request).not.toHaveBeenCalled();
   } finally { adapter.close(); }
+});
+it.each(['open card', 'unknown submission'])('reconciles an accepted answer after %s without sending the answer again', async kind => {
+  const { adapter, current, command, submit, request } = desktop();
+  submit.mockImplementation(async () => {
+    current.turns[0].items.push(reply('accepted', 'Custom address'));
+    if (kind === 'unknown submission') throw new RemoteError('OUTCOME_UNKNOWN', 'Unconfirmed card');
+    return { closed: false };
+  });
+  const reconcile = vi.spyOn(nativeQuestion, 'reconcileDesktopQuestion').mockImplementation(async (_exe, _identity, _title, _request, _answers, check) => { await check(); return { closed: true }; });
+  try {
+    await expect(adapter.execute(command, randomUUID())).resolves.toEqual({ accepted: true });
+    expect(submit).toHaveBeenCalledOnce(); expect(reconcile).toHaveBeenCalledOnce(); expect(request).not.toHaveBeenCalled();
+  } finally { adapter.close(); }
+});
+it('does not dismiss a new question that repeats an earlier question text', async () => {
+  const { adapter, current, command, submit } = desktop();
+  submit.mockImplementation(async () => {
+    current.turns[0].items.push(reply('accepted', 'Custom address'), { ...question, id: 'new-question' });
+    return { closed: false };
+  });
+  const reconcile = vi.spyOn(nativeQuestion, 'reconcileDesktopQuestion').mockImplementation(async (_exe, _identity, _title, _request, _answers, check) => { await check(); return { closed: true }; });
+  try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'STALE' }); }
+  finally { adapter.close(); }
 });
 it.each(['new turn', 'answered', 'other question', 'empty answer', 'extra answer', 'decline'])('rejects %s async replies before native dispatch', async kind => {
   const { adapter, current, request, command } = desktop();

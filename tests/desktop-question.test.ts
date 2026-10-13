@@ -57,7 +57,7 @@ it.each(['before', 'after'])('keeps a %s-submit timeout distinct and never retri
   const result = submit(); const assertion = expect(result).rejects.toMatchObject({ code: phase === 'before' ? 'CLIENT_UNAVAILABLE' : 'OUTCOME_UNKNOWN' });
   await vi.advanceTimersByTimeAsync(0);
   if (phase === 'after') { child.stdout.write('{"ready":true}\n'); await vi.advanceTimersByTimeAsync(0); }
-  await vi.advanceTimersByTimeAsync(21000); await assertion;
+  await vi.advanceTimersByTimeAsync(33000); await assertion;
   expect(spawn).toHaveBeenCalledOnce(); expect(child.kill).toHaveBeenCalledOnce();
 });
 it.each(['CLIENT_UNAVAILABLE', 'OUTCOME_UNKNOWN'])('preserves native %s errors without a transport fallback', async error => {

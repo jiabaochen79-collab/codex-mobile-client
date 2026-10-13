@@ -16,7 +16,7 @@ import { errorText } from './error-text.js';
 import { ConversationImages, markdownImages, userImageContent } from './images.js';
 import { snapshotResponse } from './snapshot-response.js';
 import { asyncInputReplies, asyncInputAccepted, asyncUserInputRequests, hasPendingInteractions } from './async-user-input.js';
-import { submitDesktopQuestion } from './desktop-question.js';
+import { submitDesktopQuestion, reconcileDesktopQuestion } from './desktop-question.js';
 import { threadGoal } from './goals.js';
 import { RemoteError, supportsDesktopCommand, uid, type ClientStatus, type Command, type DesktopAdapter, type Snapshot, type Interaction, type Conversation, type Message, type LocalAttachment, type Activity, type PermissionMode } from '../shared/protocol.js';
 
@@ -413,16 +413,23 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     const existing = this.followed.get(id);
     if (existing?.state && Date.now() - (existing.ownerCheckedAt ?? 0) < 30000) { this.current = existing; return; }
     let owner: any;
-    try { owner = await this.ipc.request('thread-owner-discovery', { hostId: 'local', conversationId: id }); } catch { /* An unopened task needs its original desktop view. */ }
+    const discover = async () => {
+      try { return await this.ipc.request('thread-owner-discovery', { hostId: 'local', conversationId: id }); }
+      catch (error) {
+        if (error instanceof RemoteError && error.code === 'CLIENT_REJECTED' && error.message.includes('no-client-found')) return;
+        throw error;
+      }
+    };
+    owner = await discover();
     const recoverActivation = activate && existing?.ownerCheckedAt === 0 && !existing.state;
     if (existing) existing.state = undefined;
     if (activate && (!owner?.handledByClientId || recoverActivation)) {
       await this.appTool('navigate_to_codex_page', { threadId: id }, id, authorize);
-      owner = await this.ipc.request('thread-owner-discovery', { hostId: 'local', conversationId: id });
+      owner = await discover();
       const deadline = Date.now() + 6000;
       for (let delay = 250; !owner?.handledByClientId && Date.now() < deadline; delay = Math.min(1000, delay * 2)) {
         await new Promise(resolve => setTimeout(resolve, Math.min(delay, deadline - Date.now())));
-        owner = await this.ipc.request('thread-owner-discovery', { hostId: 'local', conversationId: id });
+        owner = await discover();
       }
     }
     if (!owner?.handledByClientId) throw new RemoteError('CLIENT_UNAVAILABLE', '请先在电脑端打开此任务。');
@@ -663,11 +670,30 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
             if (current.id !== snap.id || current.epoch !== snap.epoch || JSON.stringify(current.requests.find(input => input.id === request.id)) !== JSON.stringify(request)) throw new RemoteError('STALE', '电脑提问已变化，请重新查看后回答。');
             authorize?.();
           };
-          const result = await submitDesktopQuestion(this.nativeExe, this.discovery, snap.title, request, answers, check);
+          let closed = false;
+          try { closed = (await submitDesktopQuestion(this.nativeExe, this.discovery, snap.title, request, answers, check)).closed; }
+          catch (error) { if (!(error instanceof RemoteError) || error.code !== 'OUTCOME_UNKNOWN') throw error; }
           const deadline = Date.now() + 5000;
           do {
-            if (!result.closed) break;
-            if (asyncInputAccepted(this.followed.get(snap.id)?.state ?? {}, request, answers)) return { accepted: true };
+            if (asyncInputAccepted(this.followed.get(snap.id)?.state ?? {}, request, answers)) {
+              if (!closed) {
+                const accepted = async () => {
+                  authorize?.();
+                  if (!asyncInputAccepted(this.followed.get(snap.id)?.state ?? {}, request, answers)) throw new RemoteError('OUTCOME_UNKNOWN', '回答接收状态已变化，请核对原会话，勿重复提交。');
+                  const current = await this.snapshot();
+                  if (current.id !== snap.id) throw new RemoteError('STALE', '会话已切换，原回答不会重复提交。');
+                  if (current.requests.some(input => input.questions?.some(question => request.questions?.some(original => original.question === question.question && original.id !== question.id)))) throw new RemoteError('STALE', '电脑端已有新的提问，原回答不会重复提交。');
+                  authorize?.();
+                };
+                try { closed = (await reconcileDesktopQuestion(this.nativeExe, this.discovery, snap.title, request, answers, accepted)).closed; }
+                catch (error) {
+                  if (error instanceof RemoteError && error.code === 'CLIENT_UNAVAILABLE') throw new RemoteError('OUTCOME_UNKNOWN', '回答已送达，但电脑提问面板尚未同步，请勿重复提交回答。');
+                  throw error;
+                }
+              }
+              if (closed) return { accepted: true };
+              break;
+            }
             await new Promise(resolve => setTimeout(resolve, 100));
           } while (Date.now() < deadline);
           throw new RemoteError('OUTCOME_UNKNOWN', '回答已提交，但电脑卡片状态尚未确认，请核对原会话，勿重复提交。');

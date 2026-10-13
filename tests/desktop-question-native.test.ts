@@ -6,13 +6,13 @@ import { expect, it } from 'vitest';
 const valid = { processId: process.pid, startedAt: 'wrong-time', executablePath: process.execPath, title: 'fixture', answers: [{ question: 'First?', answer: 'Answer' }] };
 it.skipIf(process.platform !== 'win32')('matches normalized free-form cards without crossing document boundaries or accepting ambiguous editors', () => {
   mkdirSync('.runtime', { recursive: true });
-  const dir = mkdtempSync(resolve('.runtime/question-native-'));
+  const dir = mkdtempSync(resolve('.runtime/OpenAI.Codex_question-native-'));
   try {
     const executable = resolve(dir, 'QuestionFixture.exe');
     const framework = 'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/WPF/';
     execFileSync('C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe', ['/nologo', '/target:exe', '/platform:x64', '/utf8output', `/out:${executable}`, '/reference:System.Web.Extensions.dll', '/reference:System.Xaml.dll', ...['WindowsBase', 'PresentationCore', 'PresentationFramework', 'UIAutomationClient', 'UIAutomationTypes'].map(name => `/reference:${framework}${name}.dll`), resolve('tests/desktop-question-fixture.cs')], { windowsHide: true });
     const results = JSON.parse(execFileSync(executable, [resolve('release/RemoteCompanion.exe')], { encoding: 'utf8', windowsHide: true, timeout: 20000 }));
-    expect(results).toEqual(['shallow', 'free-form-deep', 'minimized', 'ambiguous', 'wrong-question', 'wrong-title', 'document-boundary', 'closed', 'minimized-window-recovery']);
+    expect(results).toEqual(['shallow', 'free-form-deep', 'minimized', 'ambiguous', 'wrong-question', 'wrong-title', 'document-boundary', 'closed', 'minimized-window-recovery', 'native-submission', 'native-reconciliation']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }, 25000);
 it.skipIf(process.platform !== 'win32').each([

@@ -23,18 +23,18 @@ function nativeFailure(stage: unknown) {
   return '未定位到当前电脑提问卡片，操作未提交，手机回答已保留。请稍后重试。';
 }
 
-export async function submitDesktopQuestion(nativeExe: string, identity: { processId: number; startedAt?: string; executablePath: string | null }, title: string, request: Interaction, answers: Record<string, string[]>, authorize: () => Promise<void>) {
+async function nativeQuestion(mode: string, nativeExe: string, identity: { processId: number; startedAt?: string; executablePath: string | null }, title: string, request: Interaction, answers: Record<string, string[]>, authorize: () => Promise<void>) {
   if (!identity.startedAt || !identity.executablePath || !title) throw new RemoteError('CLIENT_UNAVAILABLE', '无法核对电脑提问窗口，请稍后重试。');
   await authorize();
   return new Promise<{ closed: boolean }>((resolve, reject) => {
-    const child = spawn(nativeExe, ['--desktop-question'], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+    const child = spawn(nativeExe, [mode], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
     let buffer = '', submitted = false, prepared = false, committing = false, finished = false, closed = false;
     const finish = (error?: unknown) => {
       if (finished) return; finished = true; clearTimeout(timer); child.stdin.end();
       if (error || !submitted) { child.kill(); reject(error ?? new RemoteError(committing ? 'OUTCOME_UNKNOWN' : 'CLIENT_UNAVAILABLE', committing ? '提问提交结果未确认，请核对原会话，勿重复提交。' : '未找到对应的电脑提问卡片，操作未提交。')); }
       else resolve({ closed });
     };
-    const timer = setTimeout(() => finish(), 20000);
+    const timer = setTimeout(() => finish(), 20000 + Math.max(0, (request.questions?.length ?? 1) - 1) * 12000);
     child.stdin.on('error', () => finish()); child.once('error', () => finish());
     child.stdout.on('data', bytes => {
       buffer += bytes;
@@ -56,3 +56,6 @@ export async function submitDesktopQuestion(nativeExe: string, identity: { proce
     child.stdin.write(JSON.stringify({ ...identity, title, answers: request.questions?.map(question => ({ question: questionDisplayText(question.question), answer: answers[question.id][0].trim() })) }) + '\n');
   });
 }
+
+export const submitDesktopQuestion = (...args: Parameters<typeof nativeQuestion> extends [string, ...infer Rest] ? Rest : never) => nativeQuestion('--desktop-question', ...args);
+export const reconcileDesktopQuestion = (...args: Parameters<typeof nativeQuestion> extends [string, ...infer Rest] ? Rest : never) => nativeQuestion('--desktop-question-reconcile', ...args);
