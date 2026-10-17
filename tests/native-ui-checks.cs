@@ -25,7 +25,7 @@ internal static class NativeUiChecks {
             Check(version.ProductVersion == args[2] && version.FileVersion == args[2] + ".0", "Executable version must match package.json");
             Check(assembly.GetName().Version.ToString() == args[2] + ".0", "Assembly version must match package.json");
             var results = new List<object>(); Directory.CreateDirectory(args[1]);
-            foreach (var sample in new[] { "default", "automatic", "custom", "long-password", "offline", "wide", "scaled-150", "power-risk", "power-unknown", "compatibility-limited", "compatibility-blocked", "update-ready", "update-downloading" }) {
+            foreach (var sample in new[] { "default", "automatic", "custom", "long-password", "offline", "wide", "scaled-150", "power-risk", "power-unknown", "compatibility-limited", "compatibility-blocked", "recovery-failed", "recovery-connecting", "update-ready", "update-downloading" }) {
                 using (var signal = new EventWaitHandle(false, EventResetMode.AutoReset))
                 using (var form = (Form)Activator.CreateInstance(type, Hidden, null, new object[] { signal }, null)) {
                     Check(form.Text == "ChatGPT 远程助手", "Product title");
@@ -40,6 +40,7 @@ internal static class NativeUiChecks {
                     if (sample == "offline") { data["connection"] = "offline"; data["enabled"] = false; data["authorizedCount"] = 0; }
                     if (sample == "offline" || sample == "scaled-150") { data["connection"] = "offline"; data["connectionError"] = new Dictionary<string, object> { { "stage", "save" }, { "code", "CREDENTIAL_SAVE" }, { "message", "设备凭据保存失败，请检查安全软件拦截、磁盘空间及目录权限。" } }; }
                     if (sample.StartsWith("compatibility-")) data["client"] = new Dictionary<string, object> { { "available", sample == "compatibility-limited" }, { "version", "26.903.61454" }, { "reason", "发送消息接口需适配，请更新助手。" } };
+                    if (sample.StartsWith("recovery-")) data["client"] = new Dictionary<string, object> { { "available", false }, { "version", "26.1013.40934" }, { "reason", "未找到通过验证的 Codex 工具接口，请更新助手。" }, { "recovery", new Dictionary<string, object> { { "phase", sample == "recovery-failed" ? "failed" : "connecting" }, { "reason", "正在等待电脑客户端启动及兼容检查" } } } };
                     if (sample == "automatic") data["update"] = new Dictionary<string, object> { { "phase", "idle" }, { "progress", 0 }, { "autoDownload", true }, { "message", "已是最新版本" }, { "notes", "" }, { "checkedAt", null } };
                     if (sample.StartsWith("update-")) data["update"] = new Dictionary<string, object> { { "phase", sample == "update-ready" ? "ready" : "downloading" }, { "version", "0.4.29" }, { "progress", 45 }, { "autoDownload", true } };
                     Set(form, "token", "fixture-only"); Set(form, "state", data); type.GetMethod("Render", Hidden).Invoke(form, null);
@@ -66,6 +67,10 @@ internal static class NativeUiChecks {
                     if (data.ContainsKey("connectionError")) Check(((Label)Field(form, "error")).Text.Contains("[save/CREDENTIAL_SAVE]"), "Connection failures must remain visible");
                     Check(((Label)Field(form, "relayStatus")).Text == (data.ContainsKey("connectionError") ? "服务器未连接" : "服务器已连接"), "Server wording");
                     if (sample.StartsWith("compatibility-")) { Check(((Label)Field(form, "clientStatus")).Text.Contains("26.903.61454"), "Show detected application version even when blocked"); Check(((Label)Field(form, "clientStatus")).Text.Contains("接口需适配"), "Show the failed compatibility check"); Check(((Label)Field(form, "clientBadge")).Text == (sample == "compatibility-limited" ? "部分兼容" : "未就绪"), "Compatibility badge"); }
+                    if (sample.StartsWith("recovery-")) {
+                        Check(((Label)Field(form, "clientStatus")).Text.Contains(sample == "recovery-failed" ? "未找到通过验证的 Codex 工具接口" : "正在等待电脑客户端启动及兼容检查"), "Recovery failure must preserve the actual connection error; active recovery must show progress");
+                        Check(((Label)Field(form, "clientBadge")).Text == (sample == "recovery-failed" ? "未就绪" : "正在恢复"), "Recovery badge");
+                    }
                     Check(((Button)Field(form, "refreshCode")).Visible == !custom, "Refresh must be absent in fixed-password mode");
                     var revoke = (Button)Field(form, "rotate");
                     Check(revoke.AccessibleName == "撤销全部授权" && revoke.Text == "撤销全部授权", "Revoke must have explicit text");

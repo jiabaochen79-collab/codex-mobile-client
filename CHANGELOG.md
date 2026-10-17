@@ -2,6 +2,14 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.57 - 2026-10-17
+
+### Fixed
+
+- Discover the dedicated app-tool pipe used by Codex 26.1013 while retaining support for older desktop builds.
+- Keep process ownership, tool catalog, bounded probes and ambiguous endpoint rejection in desktop discovery.
+- Show the actual compatibility error after recovery fails instead of replacing it with a generic recovery message.
+
 ## 0.4.53 - 2026-10-12
 
 ### Fixed

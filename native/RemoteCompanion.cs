@@ -167,7 +167,7 @@ internal static class Program {
         using (var query = new ManagementObjectSearcher("SELECT ProcessId, ExecutablePath, CommandLine, SessionId FROM Win32_Process WHERE ParentProcessId=" + pid + " AND Name='codex.exe'")) {
             foreach (ManagementObject p in query.Get()) {
                 var childPid = Convert.ToInt32(p["ProcessId"]);
-                var match = Regex.Match(Convert.ToString(p["CommandLine"]), @"codex-browser-use-[a-f0-9-]+");
+                var match = Regex.Match(Convert.ToString(p["CommandLine"]), @"codex-(?:browser-use|app-tools)-[a-f0-9-]+");
                 var cliPath = Convert.ToString(p["ExecutablePath"]);
                 if (Convert.ToInt32(p["SessionId"]) != session || !File.Exists(cliPath) || !String.Equals(Path.GetFileName(cliPath), "codex.exe", StringComparison.OrdinalIgnoreCase)) continue;
                 using (var processObject = new ManagementObject("Win32_Process.Handle='" + Convert.ToString(p["ProcessId"]) + "'")) {
@@ -180,7 +180,8 @@ internal static class Program {
             }
         }
         // Newer Codex builds publish a separate app-tool pipe, no longer a CLI argument.
-        try { toolPipes.AddRange(Directory.GetFiles(@"\\.\pipe\", "codex-browser-use-*")); } catch (IOException) { }
+        foreach (var pattern in new[] { "codex-browser-use-*", "codex-app-tools-*" })
+            try { toolPipes.AddRange(Directory.GetFiles(@"\\.\pipe\", pattern)); } catch (IOException) { }
         var pipe = DesktopToolsPipe.Find(toolOwnerProcessIds, toolPipes);
         var cliPaths = cliExecutables.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         string startedAt;
@@ -569,7 +570,7 @@ internal sealed class CompanionForm : Form {
         var recovery = client != null && client.ContainsKey("recovery") ? client["recovery"] as Dictionary<string, object> : null;
         string recoveryPhase = recovery == null ? "" : Convert.ToString(recovery["phase"]);
         bool recovering = recoveryPhase == "backoff" || recoveryPhase == "launching" || recoveryPhase == "connecting";
-        if (!available && recovery != null) clientReason = Convert.ToString(recovery["reason"]);
+        if (!available && recovery != null && (recovering || String.IsNullOrEmpty(clientReason))) clientReason = Convert.ToString(recovery["reason"]);
         clientStatus.Text = client == null ? "正在检查" : (String.IsNullOrEmpty(clientVersion) ? "" : "Codex " + clientVersion + (String.IsNullOrEmpty(clientReason) ? "" : "  ")) + clientReason;
         tooltips.SetToolTip(clientStatus, clientStatus.Text);
         clientBadge.Text = recovering ? "正在恢复" : available ? String.IsNullOrEmpty(clientReason) ? "就绪" : "部分兼容" : "未就绪"; clientBadge.ForeColor = available && String.IsNullOrEmpty(clientReason) ? Color.FromArgb(35, 130, 93) : Color.FromArgb(146, 106, 48);

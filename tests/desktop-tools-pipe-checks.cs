@@ -10,11 +10,12 @@ using System.Web.Script.Serialization;
 
 internal static class DesktopToolsPipeChecks {
     private sealed class Endpoint : IDisposable {
-        internal readonly string Path = @"\\.\pipe\codex-browser-use-" + Guid.NewGuid();
+        internal readonly string Path;
         internal bool ReceivedRequest;
         private NamedPipeServerStream server;
         private Task work;
-        internal Endpoint(string kind) {
+        internal Endpoint(string kind, string pipePrefix = "codex-browser-use-") {
+            Path = @"\\.\pipe\" + pipePrefix + Guid.NewGuid();
             server = new NamedPipeServerStream(Path.Substring(9), PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
             work = Task.Run(async () => {
                 try {
@@ -42,25 +43,34 @@ internal static class DesktopToolsPipeChecks {
     private static int Main() {
         try {
             var pid = Process.GetCurrentProcess().Id;
+            foreach (var prefix in new[] { "codex-browser-use-", "codex-app-tools-" })
             foreach (var kind in new[] { "tools", "browser", "error", "wrong-id", "oversized", "timeout" }) {
-                using (var endpoint = new Endpoint(kind)) {
+                using (var endpoint = new Endpoint(kind, prefix)) {
                     var result = DesktopToolsPipe.Find(new[] { pid }, new[] { endpoint.Path });
                     Check(result == (kind == "tools" ? endpoint.Path : null), "Incorrect discovery for " + kind);
                 }
             }
-            using (var endpoint = new Endpoint("tools")) {
+            foreach (var prefix in new[] { "codex-browser-use-", "codex-app-tools-" })
+            using (var endpoint = new Endpoint("tools", prefix)) {
                 Check(DesktopToolsPipe.Find(new[] { pid + 1 }, new[] { endpoint.Path }) == null, "Do not select a pipe owned by another process");
                 Check(!endpoint.ReceivedRequest, "Do not send a request to an unverified pipe owner");
             }
             using (var endpoint = new Endpoint("tools")) Check(DesktopToolsPipe.Find(new[] { pid + 1, pid }, new[] { endpoint.Path }) == endpoint.Path, "Accept a pipe owned by any validated Codex process");
-            using (var wrong = new Endpoint("browser")) using (var correct = new Endpoint("tools")) {
+            using (var wrong = new Endpoint("browser")) using (var correct = new Endpoint("tools", "codex-app-tools-")) {
                 Check(DesktopToolsPipe.Find(new[] { pid }, new[] { wrong.Path, correct.Path, correct.Path }) == correct.Path, "Probe candidates and deduplicate legacy discovery");
             }
             using (var first = new Endpoint("tools")) using (var second = new Endpoint("tools")) {
                 Check(DesktopToolsPipe.Find(new[] { pid }, new[] { first.Path, second.Path }) == null, "Reject ambiguous tool endpoints");
             }
+            using (var first = new Endpoint("tools")) using (var second = new Endpoint("tools", "codex-app-tools-")) {
+                Check(DesktopToolsPipe.Find(new[] { pid }, new[] { first.Path, second.Path }) == null, "Reject ambiguous legacy and dedicated tool endpoints");
+            }
+            using (var endpoint = new Endpoint("tools", "codex-computer-use-")) {
+                Check(DesktopToolsPipe.Find(new[] { pid }, new[] { endpoint.Path }) == null, "Reject unrelated local pipe names");
+                Check(!endpoint.ReceivedRequest, "Do not probe unrelated services");
+            }
             Check(DesktopToolsPipe.Find(new[] { pid }, new[] { "not-a-local-pipe", @"\\other\pipe\codex-browser-use-" + Guid.NewGuid() }) == null, "Only known local pipe names are allowed");
-            Console.WriteLine("11 discovery checks passed"); return 0;
+            Console.WriteLine("App-tool discovery checks passed"); return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }
     }
 }

@@ -10,7 +10,7 @@ using System.Web.Script.Serialization;
 using Microsoft.Win32.SafeHandles;
 
 internal static class DesktopToolsPipe {
-    private const string Prefix = @"\\.\pipe\codex-browser-use-";
+    private static readonly string[] Prefixes = { @"\\.\pipe\codex-browser-use-", @"\\.\pipe\codex-app-tools-" };
     private const int MaxFrame = 1024 * 1024;
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
@@ -30,7 +30,7 @@ internal static class DesktopToolsPipe {
     }
     private static bool IsCandidate(string path) {
         Guid id;
-        return path != null && path.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase) && Guid.TryParseExact(path.Substring(Prefix.Length), "D", out id);
+        return path != null && Prefixes.Any(prefix => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && Guid.TryParseExact(path.Substring(prefix.Length), "D", out id));
     }
     private static bool Probe(string path, ISet<int> allowedOwnerProcessIds) {
         try {
