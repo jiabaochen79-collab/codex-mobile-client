@@ -32,7 +32,9 @@ it('discovers every indexed task while reading a bounded batch and retains archi
   db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,name TEXT,title TEXT,cwd TEXT,updated_at_ms INTEGER,updated_at INTEGER,project_id TEXT,source TEXT,archived INTEGER,rollout_path TEXT)');
   const insert = db.prepare("INSERT INTO threads VALUES(?,'task','',?,?,0,NULL,'vscode',0,?)");
   const ids: string[] = [], paths: string[] = [];
+  db.exec('BEGIN');
   for (let i = 0; i < 450; i++) { const id = randomUUID(), path = join(dir, `${i}.jsonl`); ids.push(id); paths.push(path); writeFileSync(path, '{}\n'); insert.run(id, dir, 450 - i, path); }
+  db.exec('COMMIT');
   const store = new AgentStore(dir), desktop = new CodexDesktop('fixture.exe', dir), monitor = new CompletionMonitor(store, watched => desktop.notificationSources(watched));
   const original = Date.now(); let now = original; vi.spyOn(Date, 'now').mockImplementation(() => now);
   try {
@@ -42,7 +44,7 @@ it('discovers every indexed task while reading a bounded batch and retains archi
     for (let i = 0; i < 10 && !store.notificationOutbox().length; i++) { now += 6000; await monitor.poll(); }
     expect(store.notificationOutbox().map(row => row.turnId)).toEqual(['older-archived']);
   } finally { monitor.close(); desktop.close(); store.close(); db.close(); }
-});
+}, 60000);
 
 it('captures a rewritten completion after clock rollback without replaying old terminal records', async () => {
   const path = join(dir, 'log.jsonl'), store = new AgentStore(dir), task = randomUUID();
