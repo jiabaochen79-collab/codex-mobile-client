@@ -455,11 +455,14 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (this.followed.get(id) !== followed || !followed.state) throw new RemoteError('CLIENT_UNAVAILABLE', '任务连接正在恢复，请稍后重试。');
   }
   private async snapshot(limit = 100, before?: string) {
-    const current = this.current, discovery = this.discovery;
-    const result = normalizeSnapshot(this.current!.state, `${this.discovery!.processId}:${this.current!.owner}`, limit, this.images, before);
+    const current = this.current!, discovery = this.discovery!;
+    const result = normalizeSnapshot(current.state, `${discovery.processId}:${current.owner}`, limit, this.images, before);
     result.nativeQueuedCount = this.nativeQueuedCount(result.id);
     const db = this.index(); try { result.completionId = (await this.readyTaskActivity(result.id, db)).completionId; } finally { db.close(); }
-    if (this.current !== current || this.discovery !== discovery) throw new RemoteError('STALE', '任务连接已变化，请重新读取。');
+    // Routine discovery probes replace metadata without replacing the task connection.
+    const connection = this.discovery;
+    if (this.current !== current || !connection || connection.processId !== discovery.processId || connection.startedAt !== discovery.startedAt
+      || connection.executablePath !== discovery.executablePath || connection.toolsPipe !== discovery.toolsPipe) throw new RemoteError('CLIENT_UNAVAILABLE', '任务连接正在恢复，正在自动重新读取。');
     return result;
   }
   private nativeQueuedCount(id: string): number | null {

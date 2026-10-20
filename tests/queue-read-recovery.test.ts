@@ -9,7 +9,7 @@ import { CodexDesktop } from '../src/agent/desktop.js';
 import { RemoteError } from '../src/shared/protocol.js';
 
 describe('queue recovery during rollout replacement', () => {
-  it.each(['CLIENT_REJECTED', 'OUTCOME_UNKNOWN', 'UNAVAILABLE'])('recovers a %s read without replaying a dispatched send', async code => {
+  it.each(['CLIENT_REJECTED', 'OUTCOME_UNKNOWN', 'UNAVAILABLE', 'STALE', 'CLIENT_UNAVAILABLE'])('recovers a %s read without replaying a dispatched send', async code => {
     const dir = mkdtempSync(join(tmpdir(), 'queue-read-error-')); const task = randomUUID(), session = randomUUID();
     let healthy = false, dispatched = false, sends = 0;
     const adapter: any = { close() {}, execute: async (command: any, _id: string, authorize?: () => void) => {
@@ -24,9 +24,55 @@ describe('queue recovery during rollout replacement', () => {
     try {
       const row = state.sends.add(randomUUID(), task, session, 'epoch', { text: 'queued', attachments: [] });
       await state.dispatchQueued(row); expect(state.sends.get(row.id, task).state).toBe('pending'); expect(sends).toBe(0);
+      expect(state.sends.get(row.id, task).reason).toBe('transient read failure');
       healthy = true; await state.dispatchQueued(state.sends.get(row.id, task));
       expect(dispatched).toBe(true); expect(sends).toBe(1); expect(state.sends.get(row.id, task).state).toBe('uncertain');
       await state.dispatchQueued(state.sends.get(row.id, task)); expect(sends).toBe(1);
+    } finally { await agent.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+  it.each(['epoch', 'authorization', 'send'])('keeps the queue paused after a real %s failure', async failure => {
+    const dir = mkdtempSync(join(tmpdir(), 'queue-read-guard-')); const task = randomUUID(), session = randomUUID();
+    const execute = vi.fn(async (command: any) => {
+      if (command.method === 'read') return { id: task, epoch: failure === 'epoch' ? 'new-epoch' : 'epoch', busy: false, requests: [], nativeQueuedCount: 0, messages: [] };
+      throw new RemoteError('STALE', 'send rejected');
+    });
+    const agent = new Agent({ origin: 'http://127.0.0.1:8790', dir, adapter: { execute, close() {} } as any }); const state = agent as any;
+    vi.spyOn(state.store, 'protect').mockImplementation((value: any) => value);
+    state.notifyQueue = () => {}; state.updateSubscriptions = () => {};
+    state.queueAuthorization = async () => ({ allowed: failure !== 'authorization', validForMs: 10000 });
+    state.enabled = true; state.connection = 'online'; state.grants.set(session, Date.now() + 60000);
+    try {
+      const row = state.sends.add(randomUUID(), task, session, 'epoch', { text: 'keep paused', attachments: [] });
+      await state.dispatchQueued(row);
+      expect(state.sends.get(row.id, task).state).toBe('paused');
+      expect(execute.mock.calls.filter(([command]) => command.method === 'send')).toHaveLength(failure === 'send' ? 1 : 0);
+      const calls = execute.mock.calls.length;
+      await state.dispatchQueued(state.sends.get(row.id, task)); expect(execute).toHaveBeenCalledTimes(calls);
+    } finally { await agent.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('clears a transient read error after automatically sending the original queued message', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'queue-read-resume-')); const task = randomUUID(), session = randomUUID();
+    let healthy = false;
+    const execute = vi.fn(async (command: any, _id: string, authorize?: () => void) => {
+      if (command.method === 'read') {
+        if (!healthy) throw new RemoteError('STALE', 'transient read failure');
+        return { id: task, epoch: 'epoch', busy: false, requests: [], nativeQueuedCount: 0, messages: [] };
+      }
+      authorize?.(); return { accepted: true };
+    });
+    const agent = new Agent({ origin: 'http://127.0.0.1:8790', dir, adapter: { execute, close() {} } as any }); const state = agent as any;
+    vi.spyOn(state.store, 'protect').mockImplementation((value: any) => value);
+    state.notifyQueue = () => {}; state.updateSubscriptions = () => {};
+    state.queueAuthorization = async () => ({ allowed: true, validForMs: 10000 });
+    state.enabled = true; state.connection = 'online'; state.grants.set(session, Date.now() + 60000);
+    try {
+      const row = state.sends.add(randomUUID(), task, session, 'epoch', { text: 'original queued message', attachments: [] });
+      await state.dispatchQueued(row); healthy = true;
+      await state.dispatchQueued(state.sends.get(row.id, task));
+      expect(state.sends.list(task)).toEqual([]);
+      const sends = execute.mock.calls.filter(([command]) => command.method === 'send');
+      expect(sends).toHaveLength(1); expect(sends[0][0].params).toMatchObject({ id: task, text: 'original queued message' });
+      expect(sends[0][1]).toBe(row.attempt);
     } finally { await agent.close(); rmSync(dir, { recursive: true, force: true }); }
   });
   it('cleans only expired unheld reservations before checking update blockers', async () => {
