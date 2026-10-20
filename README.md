@@ -6,6 +6,8 @@ English | [简体中文](README.zh-CN.md)
 
 [Download for Windows](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/latest) · [Mobile website](https://remote.chatgptvip.asia/) · [Report a bug](https://github.com/jiabaochen79-collab/codex-mobile-client/issues)
 
+Source: [GitHub](https://github.com/jiabaochen79-collab/codex-mobile-client) · [Gitee](https://gitee.com/gitee-is-future/codex-mobile-client)
+
 Codex Mobile connects your phone to Codex desktop tasks running on your Windows computer. Check results, send follow-up work, answer questions and approvals, and switch computers without moving your workspace or files to a cloud computer.
 
 > Independent, unofficial software. This project is not affiliated with or endorsed by OpenAI. It requires a working Codex desktop installation and your own account/model access. It does not include a ChatGPT subscription, model credits, or a cloud computer. The relay service is operated separately; its source is not included here.
@@ -36,6 +38,7 @@ Screenshots show the actual 0.4.57 interface with demonstration data. Device IDs
 | Download | Use |
 | --- | --- |
 | [Latest release](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/latest) | Recommended entry for the newest version and release notes. |
+| [Gitee releases](https://gitee.com/gitee-is-future/codex-mobile-client/releases) | Alternative download source with the same installer, ZIP, and checksums. |
 | [0.4.57 Windows installer](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/ChatGPT-Remote-Assistant-Setup-0.4.57.exe) | Install or upgrade the Windows assistant. |
 | [0.4.57 portable ZIP](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/codex-mobile-windows-public.zip) | Alternative distribution with a bundled runtime; extract before use. |
 | [Installer SHA-256](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/ChatGPT-Remote-Assistant-Setup-0.4.57.exe.sha256) · [ZIP SHA-256](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/codex-mobile-windows-public.zip.sha256) | Compare with the downloaded file. |
@@ -51,7 +54,7 @@ Current installers are not Windows Authenticode signed and may trigger SmartScre
 Get-FileHash .\ChatGPT-Remote-Assistant-Setup-0.4.57.exe -Algorithm SHA256
 ```
 
-GitHub is the current download source. A Gitee mirror is not yet available.
+GitHub and Gitee host the same client source and release files. Use either download source and verify the SHA-256 checksum.
 
 ## Get Started
 

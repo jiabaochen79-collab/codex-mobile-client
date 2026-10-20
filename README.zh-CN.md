@@ -6,6 +6,8 @@
 
 [下载 Windows 助手](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/latest) · [打开手机网页](https://remote.chatgptvip.asia/) · [反馈问题](https://github.com/jiabaochen79-collab/codex-mobile-client/issues)
 
+源码仓库：[GitHub](https://github.com/jiabaochen79-collab/codex-mobile-client) · [Gitee](https://gitee.com/gitee-is-future/codex-mobile-client)
+
 Codex Mobile 将手机连接到 Windows 电脑上的 Codex 桌面任务。无需搬动工作区或把文件迁入云电脑，就能查看结果、追加需求、回答提问和审批，并在多台电脑之间切换。
 
 > 本项目为独立的非官方软件，与 OpenAI 无隶属关系，也未获得其背书。使用前需要正常运行的 Codex 桌面客户端及自己的账号、模型使用权限；不包含 ChatGPT 会员、模型额度或云电脑。连接服务独立运营，服务端源码不在本仓库内。
@@ -36,6 +38,7 @@ Codex Mobile 将手机连接到 Windows 电脑上的 Codex 桌面任务。无需
 | 下载入口 | 用途 |
 | --- | --- |
 | [最新版本发布页](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/latest) | 推荐入口，获取最新版本和更新说明。 |
+| [Gitee 发行版](https://gitee.com/gitee-is-future/codex-mobile-client/releases) | 备用下载入口，提供相同的安装包、ZIP 和校验文件。 |
 | [0.4.57 Windows 安装包](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/ChatGPT-Remote-Assistant-Setup-0.4.57.exe) | 安装或覆盖升级 Windows 助手。 |
 | [0.4.57 便携 ZIP](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/codex-mobile-windows-public.zip) | 内置运行环境的另一种分发方式，需先解压后使用。 |
 | [安装包 SHA-256](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/ChatGPT-Remote-Assistant-Setup-0.4.57.exe.sha256) · [ZIP SHA-256](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/codex-mobile-windows-public.zip.sha256) | 用于核对下载文件。 |
@@ -51,7 +54,7 @@ Codex Mobile 将手机连接到 Windows 电脑上的 Codex 桌面任务。无需
 Get-FileHash .\ChatGPT-Remote-Assistant-Setup-0.4.57.exe -Algorithm SHA256
 ```
 
-目前提供 GitHub 下载，Gitee 镜像尚未开放。
+GitHub 与 Gitee 提供相同的客户端源码和发行文件，可以选择访问更顺畅的平台下载，并核对 SHA-256 校验值。
 
 ## 快速上手
 
