@@ -23,7 +23,8 @@ it('stdin EOF cancels observation while the fixture exits normally by itself', a
 it('decodes Windows event PIDs and refuses a non-Codex main process', () => {
   expect(execFileSync(exe, ['pid'], { encoding: 'utf8', windowsHide: true, timeout: 10000 })).toContain('identity verified');
 });
-it('resolves the registered installed application without launching or stopping it', async () => {
+// Hosted runners do not have the Codex package required by this installed-app check.
+it.skipIf(process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted')('resolves the registered installed application without launching or stopping it', async () => {
   const value = await new Promise<string>((resolve, reject) => execFile(exe, ['resolve'], { windowsHide: true, timeout: 12000 }, (error, output) => error ? reject(error) : resolve(output)));
   expect(value).toMatch(/^OpenAI\.Codex_[a-zA-Z0-9]+![a-zA-Z0-9._-]+$/);
 });
