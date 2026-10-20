@@ -1,97 +1,184 @@
-# Codex Mobile Client
+# Codex Mobile · ChatGPT Remote Assistant
 
-**Continue and supervise your Codex desktop work from a phone, wherever you are.**
-
-[![Latest release](https://img.shields.io/github/v/release/jiabaochen79-collab/codex-mobile-client?display_name=tag)](https://github.com/jiabaochen79-collab/codex-mobile-client/releases)
-[![CI](https://github.com/jiabaochen79-collab/codex-mobile-client/actions/workflows/ci.yml/badge.svg)](https://github.com/jiabaochen79-collab/codex-mobile-client/actions)
+**Keep your Codex work on your computer. Continue it from your phone.**
 
 English | [简体中文](README.zh-CN.md)
 
-Codex Mobile is an independent Windows companion and mobile web client for existing Codex desktop tasks. It keeps the desktop environment as the execution host while giving you a focused way to inspect progress, respond to approvals, send follow-up work, and switch between computers.
+[Download for Windows](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/latest) · [Mobile website](https://remote.chatgptvip.asia/) · [Report a bug](https://github.com/jiabaochen79-collab/codex-mobile-client/issues)
 
-> This is independent, unofficial software. It is not affiliated with or endorsed by OpenAI. Codex desktop, its account, model access, and the separately operated relay service remain separate products.
+Codex Mobile connects your phone to Codex desktop tasks running on your Windows computer. Check results, send follow-up work, answer questions and approvals, and switch computers without moving your workspace or files to a cloud computer.
 
-## Why people use it
+> Independent, unofficial software. This project is not affiliated with or endorsed by OpenAI. It requires a working Codex desktop installation and your own account/model access. It does not include a ChatGPT subscription, model credits, or a cloud computer. The relay service is operated separately; its source is not included here.
 
-- **Work from anywhere:** Read task progress and continue conversations from a phone without moving the desktop workspace.
-- **Reliable task control:** Queue messages while a task is running, adjust direction, stop safely, and keep work on the original computer.
-- **Plan-aware workflow:** Review plans and provide decisions from a small screen before execution continues.
-- **Multiple computers:** Keep home, office, and remote computers in one mobile device list and switch with explicit device authorization.
-- **Useful mobile input:** Upload photos and files, preview attachments, handle HEIC photos, and retry failed uploads.
-- **Quiet completion alerts:** Use in-site notifications and supported Web Push browsers to know when a task finishes or fails.
-- **Desktop crash recovery:** Restore Codex after a confirmed abnormal exit, with bounded retries and a manual recovery panel. Interrupted tasks and uncertain sends are never automatically replayed.
-- **Operational feedback:** Submit a product issue with optional screenshots and sanitized diagnostics without exposing task content by default.
+<img src="doc/screenshots/windows-assistant.png" alt="Windows assistant showing a connected server, a ready Codex client, and the Copy connection information button" width="820">
 
-## Product boundary
+Screenshots show the actual 0.4.57 interface with demonstration data. Device IDs, passwords, tasks, and subscription states are examples, not usable credentials or a promise of service eligibility. The current interface is in Chinese; instructions below include its button labels.
 
-The Windows helper connects to the local Codex desktop process and establishes an authenticated outbound connection to a separately operated relay service. The mobile page talks to that service using authenticated sessions.
+## What You Can Do
 
-This repository contains only the client:
+| Capability | Everyday use |
+| --- | --- |
+| Conversations and progress | Read tasks and results, expand command details when needed, and continue conversations from your phone. |
+| Queue and steer | Submit follow-up work to the computer while it is busy, or adjust the running task's direction. |
+| Plans and goals | Review plans before implementation, or give compatible Codex versions an objective and completion criteria. |
+| Questions and permissions | Select an answer or type your own; change the current task's permission level. |
+| Photos and files | Select photos, take pictures, upload files, and process supported HEIC photos. |
+| Multiple computers | Pair computers separately, name them, and switch authorized devices. |
+| Completion alerts | Use in-site notifications and supported Web Push to return to the corresponding task. |
+| Updates and recovery | Download updates in the background and recover supported Codex crashes without automatically replaying uncertain work. |
 
-- Windows helper and native companion.
-- Mobile web interface and browser assets.
-- Shared protocol snapshot and client-side tests.
-- Windows packaging and installer scripts.
+## Download and Requirements
 
-It does **not** contain the relay server, administrator console, payment implementation, deployment manifests, production databases, service credentials, certificates, or private signing keys. The server source is maintained separately and is never published with this repository.
+**Most users should download the `.exe` installer. You do not need Node.js or a source build.**
 
-## Main capabilities
+| Download | Use |
+| --- | --- |
+| [Latest release](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/latest) | Recommended entry for the newest version and release notes. |
+| [0.4.57 Windows installer](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/ChatGPT-Remote-Assistant-Setup-0.4.57.exe) | Install or upgrade the Windows assistant. |
+| [0.4.57 portable ZIP](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/codex-mobile-windows-public.zip) | Alternative distribution with a bundled runtime; extract before use. |
+| [Installer SHA-256](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/ChatGPT-Remote-Assistant-Setup-0.4.57.exe.sha256) · [ZIP SHA-256](https://github.com/jiabaochen79-collab/codex-mobile-client/releases/download/v0.4.57/codex-mobile-windows-public.zip.sha256) | Compare with the downloaded file. |
 
-### Mobile task control
+- **Computer:** Windows 10 build 19041 or newer, x64; supported Codex desktop; Internet access. Keep the computer awake and Codex and the assistant running.
+- **Phone:** A current iPhone or Android browser. Basic remote access does not need a native phone app. Background notification requirements are below.
+- **Network:** The devices do not need the same Wi-Fi. Both must reach the configured relay. The assistant connects outbound; normal use does not need router port forwarding.
+- **Service access:** The operated relay may require a trial, authorization code, or subscription. Open client source does not include free service access. Check **订阅与权益** for live availability, prices, terms, and expiry.
 
-- View projects, conversations, models, task status, approvals, and execution activity.
-- Send immediately, queue follow-up messages, or adjust direction while work is running.
-- Use plan mode when the task needs a review before execution.
-- Retain drafts and attachments when switching computers, refreshing, or recovering from a temporary connection loss.
-
-### Files, photos, and notifications
-
-- Select multiple photos, take a photo, or choose regular files from the phone.
-- Preview attachments and retry an upload after a weak-network failure.
-- Convert supported HEIC photos locally when required by the browser workflow.
-- Receive privacy-conscious completion and failure notifications; notification text does not include prompts, replies, commands, files, passwords, or model keys.
-
-### Windows integration
-
-- Preserve the local device identity and remembered authorization during an upgrade.
-- Read update metadata from the service over HTTPS and download only the new installer, verifying its size and SHA-256. Publishing requires only the EXE.
-- Install a prepared update only after the user confirms; Codex and active desktop tasks are not intentionally stopped by an assistant update.
-- Back up the installed program locally before updating and restore that verified copy on failure; user data is not rolled back. Older updaters need one manual upgrade to 0.4.48 first.
-- Report helper version and compatibility capabilities to the mobile interface.
-
-### Service access and support
-
-- View subscription status, redeem an authorization code, and purchase service access when enabled by the relay operator.
-- Claim a one-time seven-day trial on an eligible computer when the operator has enabled trials; eligibility and expiry are determined by the service.
-- Submit feedback, attach optional screenshots, follow replies, and track resolution from either device.
-- Service expiry does not stop Codex tasks already running on the computer.
-
-## Download
-
-Windows installers and portable archives are distributed through [GitHub Releases](https://github.com/jiabaochen79-collab/codex-mobile-client/releases). The Gitee mirror will be linked here after its account and release assets have been verified.
-
-For each release, download the installer or archive together with its `.sha256` file and verify the digest before opening it. The current public package is an unsigned Windows installer; Windows may show a SmartScreen warning until an Authenticode certificate is added.
-
-## Quick start
-
-1. Install the Windows package on the computer that runs Codex desktop.
-2. Start the assistant and keep its device ID and connection password private.
-3. Open the separately operated HTTPS relay address in a phone browser.
-4. Pair the phone with the displayed device credentials.
-5. Open a task and use the mobile controls without closing Codex desktop.
-
-The relay service address, subscription status, and account policy are deployment-specific. They are not hard-coded server credentials in this repository.
-
-## Build the client
-
-Requirements:
-
-- Windows 10 build 19041 or later, x64.
-- Node.js 22.13 or later.
-- .NET Framework 4.8 for the native companion.
-- Inno Setup for the Windows installer.
+Current installers are not Windows Authenticode signed and may trigger SmartScreen. Download from the release page, check the filename and checksum, and follow your organization's software policy. A matching checksum confirms file consistency; it does not replace code signing.
 
 ```powershell
+Get-FileHash .\ChatGPT-Remote-Assistant-Setup-0.4.57.exe -Algorithm SHA256
+```
+
+GitHub is the current download source. A Gitee mirror is not yet available.
+
+## Get Started
+
+### 1. Prepare Your Computer
+
+1. Open Codex desktop, sign in, and confirm that a task runs locally.
+2. Install and launch **ChatGPT 远程助手** with the Windows installer.
+3. Check **服务器已连接** (server connected), **Codex 客户端 → 就绪** (Codex ready), and enable **允许远程连接** (allow remote connections).
+4. Click **复制连接信息** (copy connection information) and send it privately to your own phone. It contains the website address, nine-digit device ID, and connection password.
+
+**打开手机网页** opens the website on the computer. Copying the connection information is usually more useful for pairing a phone. Do not post it in public screenshots, Issues, or group chats.
+
+### 2. Connect Your Phone
+
+1. Open the address copied from your assistant. The operated service uses [remote.chatgptvip.asia](https://remote.chatgptvip.asia/).
+2. Enter **设备 ID** and the current **验证码或自定义密码**. IDs have nine digits; generated codes have eight characters; custom passwords have 8–64 characters. Use the eye icon to check your input.
+3. On a personal device, optionally select **记住此设备（30 天免登录）**, then tap **连接**. Remembered authorization can still be revoked or expire earlier.
+4. Open a task under **项目与会话**, or tap **+** to create one. If activation is required, open **订阅与权益** first.
+
+<img src="doc/screenshots/mobile-connect.png" alt="Phone pairing form with a demonstration device ID and masked demonstration password" width="312">
+
+In automatic-code mode, the code changes after a successful connection. Authorized phones retain their authorization; new phones need the current code. Use the Windows password settings icon to choose a fixed password. **撤销全部授权** disconnects existing phone authorizations.
+
+### 3. Send Your First Task
+
+Check the selected computer and conversation, enter a request, and tap the upward arrow. Read the result or return later. Work runs on the computer; sleeping the computer or exiting Codex interrupts that execution environment.
+
+<img src="doc/screenshots/mobile-chat.png" alt="Mobile conversation showing a request, collapsed execution details, a readable result, and the message composer" width="312">
+
+## Everyday Workflows
+
+### Queue Messages and Adjust Direction
+
+- While a task runs, enter the next request and use **排队发送**. **待发送** shows the computer assistant's queue.
+- **Wait for “电脑已保存，排队中” before closing the browser.** A confirmed queue continues on the computer without the phone page. Drafts, unfinished uploads, and submissions with unknown results are not saved tasks.
+- Open the send-options arrow and choose **调整方向** to steer the running task. Messages with attachments use the queue.
+- **停止当前生成** stops the current generation; cancelling queued work and pausing a goal are separate operations.
+- If a message shows **结果待核对**, inspect the conversation before retrying to avoid duplicate work.
+
+See [queue and steering details](doc/queued-send-and-steering.md).
+
+### Plans, Goals, Questions, and Permissions
+
+| Control | How to use it |
+| --- | --- |
+| **+ → 计划模式** | Plan first, then review and confirm implementation. A plan chip appears in the composer. |
+| **+ → 目标模式** | Enter an objective and completion criteria, then explicitly send. Compatible Codex manages native goal continuation. Selecting the mode starts no work. |
+| Question card | Choose an option or type your own answer, then submit the card. |
+| Shield beside the model | Open **任务权限** for the current task. The same entry appears under **…**. |
+| **… → 在线终端** | Inspect terminals and explicitly take control if another terminal controls the computer. Viewing a task does not require taking control. |
+
+Choose permissions appropriate to the work. **完全访问权限** grants broad computer access and requires confirmation; ordinary use does not require it. Availability depends on actual Codex and assistant compatibility.
+
+More: [plan mode](doc/plan-mode.md) · [goal mode](doc/goal-mode.md).
+
+### Photos and Files
+
+Tap **+** beside the composer and choose **照片图库**, **拍照**, or **文件**. Inspect the preview and wait for upload success before sending. Supported HEIC photos use the photo-processing workflow; keep the original and report feedback if conversion fails.
+
+Current service limits, also shown in **订阅与权益**, are five attachments per message, 25 MB per file, and 50 MB total. Browser support, available computer storage, and service limits also apply. Closing a browser does not finish an upload that is still in progress.
+
+### Switch Computers
+
+Tap the computer name below the task title, or **切换电脑** in the project list, to open **我的电脑**. Use **+** to pair another computer. Its **…** menu lets you rename, reorder, or remove its browser authorization.
+
+<img src="doc/screenshots/mobile-computers.png" alt="My computers dialog with two demonstration computers, online states, and add and management controls" width="312">
+
+Check the computer name before sending. Tasks, authorization, entitlement, and reminder settings are per computer. Pairing a second computer does not transfer the first computer's subscription.
+
+### Enable Completion Reminders
+
+Open **… → 任务完成提醒**. Enable reminders for the selected computer, choose completion and/or failure/interruption events, and allow system notifications when asked. If **开启系统通知** appears, use it to register this browser or Web App for background delivery.
+
+| Phone or browser | Setup |
+| --- | --- |
+| iPhone/iPad, including Chrome | Use the current browser's **Share → More, if needed → Add to Home Screen**. Open that Web App from the home screen, reconnect if requested, and enable reminders there. No Safari transfer is needed. This client blocks background Push setup in ordinary iOS browser tabs. |
+| Android Chrome | Enable reminders and grant notification permission directly. A home-screen app is optional. Battery restrictions, notification settings, force-stopping the browser, and network conditions can affect delivery. |
+| Desktop Chrome/Edge | Browser Web Push works with permission. The Windows assistant itself does not display task notifications. |
+
+<img src="doc/screenshots/mobile-notifications.png" alt="Completion reminder settings and recent reminders identified by task name" width="312">
+
+Configure each computer separately. Tapping a reminder opens its task without sending, approving, or taking control. In-site records last 30 days. System notifications contain status and time, not task text; the authenticated list resolves task names. OS and push-service availability affect delivery; the in-site list remains available.
+
+### Trial, Activation, and Support
+
+- Open **订阅与权益** from Windows or the mobile project list for the selected computer.
+- If a seven-day trial is available, read and accept the terms, then explicitly claim it. Installation alone does not start the trial; the service determines eligibility and expiry.
+- Paste an authorization code into **授权码**, accept the terms, and choose **激活授权**. If online purchase is enabled, select an available plan and follow payment instructions. Check current prices and terms there.
+- Expiry does not stop existing Codex work, but new remote operations may be restricted.
+- Open **… → 问题反馈** on mobile or **问题反馈** on Windows. Include steps, time, and error codes; optionally add reviewed screenshots. Check **我的反馈** for replies, or open a sanitized [GitHub Issue](https://github.com/jiabaochen79-collab/codex-mobile-client/issues).
+
+## Updates and Recovery
+
+With automatic downloads enabled, updates download in the background. Once ready, confirm installation in the update dialog; **检查更新** also checks manually. Upgrades preserve device identity, passwords, remembered authorization, and user data. They replace the assistant and its connections without intentionally ending Codex or desktop tasks. Allow time to reconnect.
+
+Old updaters may need one manual upgrade; install the current `.exe` over the existing installation. Recovery uses a local program backup instead of downloading an old installer. See [installation and power settings](doc/windows-installer-and-power.md).
+
+If Codex is unavailable, inspect its reason before using **客户端恢复**. Recovery does not automatically resend interrupted tasks or uncertain messages. See [recovery behavior](doc/client-recovery.md).
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Connection button disabled | Enter nine device-ID digits and an 8–64 character password. Use the current code, check spaces, and use the eye icon. |
+| Computer offline | Keep the computer awake, assistant running, and remote access enabled. Both networks must reach the HTTPS service; company policies and VPNs may interfere. |
+| Codex “未就绪” or compatibility warning | Open Codex, sign in, and verify a local task. Read the reason, update the assistant, and inspect **客户端恢复**. Version alone does not prove compatibility. |
+| Can view but cannot send | Check viewer/controller status, another terminal's control lease, service expiry, and the displayed compatibility or permission reason. |
+| No iPhone notification | Use the home-screen Web App, enable reminders for the correct computer there, and allow notifications in iOS settings. |
+| Second computer has no notifications | Configure its reminders separately and verify its assistant is online and current. |
+| Upload or send stalled | Wait for confirmation, retry after reconnection, and inspect **待发送**. Do not repeatedly submit work with an unknown previous result. |
+| Older messages missing | Scroll upward and use history loading when shown; the visible page is not necessarily the entire conversation. |
+| Windows installer warning | Verify the release and SHA-256; the package is unsigned. Do not disable certificate validation or system protection to resolve connectivity. |
+
+## Privacy and Repository Boundary
+
+- This repository contains the Windows helper, native companion, mobile web client, client tests, packaging scripts, and shared protocol snapshot.
+- It excludes the relay server, administrator console, payments, deployment files, production data, credentials, certificates, and private keys. It is not a complete self-hosted server distribution.
+- HTTPS protects transport with a valid certificate. **This is not end-to-end encryption:** the independently operated relay can process forwarded task content and notification metadata.
+- Device IDs and connection passwords can authorize remote access. Revoke lost or untrusted authorizations.
+- Feedback does not automatically include conversations, task files, or full logs. Review screenshots and diagnostics before submission. Never post passwords, cookies, TOTP seeds, model keys, private documents, or production logs in public Issues.
+- Screenshots contain demonstration data only. Report vulnerabilities through [SECURITY.md](SECURITY.md).
+
+## Build From Source
+
+End users can use the installer. Contributors need Windows x64, Node.js 22.13 or newer, .NET Framework 4.8/native build tools, and Inno Setup to create installers.
+
+```powershell
+git clone git@github.com:jiabaochen79-collab/codex-mobile-client.git
+cd codex-mobile-client
 npm ci
 npm run audit:public
 npm run check
@@ -104,30 +191,6 @@ npm run package:windows
 npm run installer:windows
 ```
 
-The build records the client Web artifact version and SHA-256 manifest in `dist/client-web-manifest.json`. The separately maintained server imports that artifact after validation; it does not need the client source tree.
+`RELAY_URL` must point to a compatible, separately operated service; the example is not a working server. Output includes `dist/agent.mjs`, mobile assets, and `dist/client-web-manifest.json`. The separate server can validate and import that web artifact. See [CONTRACTS.md](CONTRACTS.md) for shared protocol snapshots.
 
-## Privacy and security
-
-- HTTPS protects the network connection when the service is configured with a valid certificate.
-- Authentication uses the device identity, connection password, session controls, and server-side authorization.
-- The client does not intentionally persist chat history in the public repository or upload provider credentials.
-- Web Push metadata is not end-to-end encrypted; the relay can see notification metadata. Notification payloads intentionally omit task content and files.
-- Do not place passwords, cookies, TOTP seeds, model credentials, private files, or production logs in Issues or feedback attachments.
-- Transport encryption is not a claim that the independently operated relay cannot process forwarded task content.
-
-## Troubleshooting
-
-- **Computer offline:** Confirm Codex desktop and the Windows assistant are running, then check the assistant connection state.
-- **Compatibility warning:** Upgrade the Windows helper; capabilities are checked explicitly and are not inferred only from the version number.
-- **No Web Push:** Keep using the in-site notification center. iPhone notifications require the supported Web App installation flow; Android Chrome and desktop Chromium browsers can use Web Push when permission is granted.
-- **Installer warning:** Verify the published SHA-256. The current installer is unsigned and may require an explicit Windows confirmation.
-- **Connection errors:** Check the HTTPS origin, DNS, certificate, and company-network policy. Do not disable certificate validation.
-
-## Contributing
-
-Please read [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the client boundary rules before opening a change. Server code and production configuration must remain outside this repository.
-
-## License
-
-Original code is licensed under [Apache-2.0](LICENSE). Third-party libraries and generated assets retain their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing. Original code uses [Apache-2.0](LICENSE); third-party terms and attribution are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [NOTICE](NOTICE).
