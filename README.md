@@ -14,6 +14,8 @@ Codex Mobile connects your phone to Codex desktop tasks running on your Windows 
 
 Screenshots show the actual 0.4.57 interface with demonstration data. Device IDs, passwords, tasks, and subscription states are examples, not usable credentials or a promise of service eligibility. The current interface is in Chinese; instructions below include its button labels.
 
+[Download](#download-and-requirements) · [Get started](#get-started) · [Everyday workflows](#everyday-workflows) · [Reminders](#enable-completion-reminders) · [Troubleshooting](#troubleshooting) · [Build](#build-from-source)
+
 ## What You Can Do
 
 | Capability | Everyday use |
