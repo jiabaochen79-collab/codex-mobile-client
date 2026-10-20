@@ -76,7 +76,7 @@ it('updater-stale-installer-freeze', async () => {
   const dir = join(root, 'updater'); mkdirSync(join(dir, 'updates'), { recursive: true });
   writeFileSync(join(dir, 'updates/result.json'), JSON.stringify({ version: '0.4.43', phase: 'failed', installerRunning: true, runnerPid: 2147483647 }));
   const store = new AgentStore(dir); let frozen = false, requests = 0;
-  const updater = new HelperUpdater({ dir, root: dir + '-program', version: '0.4.42', store, request: async () => { requests++; return new Response('{}'); }, blockers: async () => [], freeze: v => frozen = v });
+  const updater = new HelperUpdater({ dir, root: dir + '-program', version: '0.4.42', store, request: async () => { requests++; return new Response('{}'); }, blockers: async () => [], freeze: v => frozen = v, processes: async () => [] });
   await updater.reportPrevious(); await updater.check();
   assert.equal(frozen, false); assert.notEqual(updater.state.phase, 'installing'); assert.ok(requests > 0);
   updater.close(); store.close(); return { frozen, requests };
