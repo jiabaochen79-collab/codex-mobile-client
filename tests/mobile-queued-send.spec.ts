@@ -14,7 +14,10 @@ async function fixture(page: Page) {
   const snapshot: Snapshot = { ...task, epoch: 'fixture', busy: true, turnId: 'active-turn', lastTurnId: 'active-turn', lastTurnStatus: 'inProgress', requests: [], hasMore: false, queued: [], messages: Array.from({ length: 24 }, (_, i) => ({ id: `history-${i}`, role: i % 2 ? 'assistant' : 'user', text: `Record ${i + 1}\n` + 'History for scroll verification. '.repeat(12) })) };
   const queued = (id: string, text: string): QueuedMessage => ({ id, text, attachments: [], state: 'pending', created: Date.now(), reason: null });
   let file: any;
+  const steering = { error: null as { code: string; message: string } | null };
   await mockPairedBrowser(page);
+  await page.route('**/api/bootstrap', route => route.fulfill({ json: { mode: 'mobile' } }));
+  await page.route('**/api/notifications', route => route.fulfill({ json: { items: [], unread: 0 } }));
   await page.route('**/api/uploads/*/*', route => { file.offset = file.size; return route.fulfill({ json: file }); });
   await page.routeWebSocket('**/ws/mobile*', ws => {
     socket = ws; ws.send(JSON.stringify(status));
@@ -28,6 +31,7 @@ async function fixture(page: Page) {
       }
       if (command.method === 'safety.status') result = { id: task.id, epoch: snapshot.epoch, busy: snapshot.busy, turnId: snapshot.turnId };
       if (command.method === 'send') {
+        if (command.params.mode === 'steer' && steering.error) { ws.send(JSON.stringify({ type: 'result', id, error: steering.error })); steering.error = null; return; }
         if (command.params.mode === 'queue') { const item = queued(id, command.params.text); if (command.params.attachmentIds?.length) item.attachments = [{ id: file.id, name: file.name }]; snapshot.queued!.push(item); result = { accepted: true, queued: true, messageId: id }; }
         else snapshot.messages.push({ id, role: 'user', text: command.params.text });
       }
@@ -41,7 +45,7 @@ async function fixture(page: Page) {
   });
   await page.goto(origin); await page.locator('.project-toggle').filter({ hasText: 'Fixture project' }).click(); await page.getByRole('button', { name: task.title, exact: true }).click();
   await expect(page.getByLabel('消息', { exact: true })).toBeVisible();
-  return { commands, snapshot, status, queued, changed: () => socket.send(JSON.stringify({ type: 'changed', conversationIds: [task.id] })), updateStatus: () => socket.send(JSON.stringify(status)) };
+  return { commands, snapshot, status, queued, steering, changed: () => socket.send(JSON.stringify({ type: 'changed', conversationIds: [task.id] })), updateStatus: () => socket.send(JSON.stringify(status)) };
 }
 
 test('changes stop to queue send with input, preserves stop, and supports pause, resume and cancel', async ({ page }) => {
@@ -83,6 +87,26 @@ test('queues attachments without silently including them in text-only steering',
   await page.getByRole('menuitem', { name: '排队发送', exact: true }).click();
   await expect(page.getByRole('region', { name: '待发送消息' })).toContainText('pending.txt'); await expect(page.locator('.pending-attachment')).toHaveCount(0);
   expect(f.commands.filter(c => c.method === 'send')).toEqual([expect.objectContaining({ params: expect.objectContaining({ mode: 'queue', attachmentIds: [expect.any(String)] }) })]);
+});
+
+test('preserves a rejected steering draft and sends again only after an explicit retry', async ({ page }) => {
+  const f = await fixture(page); const input = page.getByLabel('消息', { exact: true });
+  const text = 'Keep this direction draft after a connection change.';
+  f.steering.error = { code: 'CLIENT_UNAVAILABLE', message: '电脑端任务连接暂不可用，请稍后重试。' };
+  await input.fill(text); await page.getByTitle('发送方式', { exact: true }).click();
+  await page.getByRole('menuitem', { name: '调整方向', exact: true }).click();
+  await expect(page.getByText('电脑端任务连接暂不可用，请稍后重试。', { exact: true })).toBeVisible();
+  await expect(input).toHaveValue(text); await expect(page.getByRole('menu')).toHaveCount(0);
+  expect(f.commands.filter(command => command.method === 'send')).toHaveLength(1);
+  expect(f.snapshot.messages.filter(message => message.text === text)).toHaveLength(0);
+  await page.getByTitle('发送方式', { exact: true }).click();
+  await page.getByRole('menuitem', { name: '调整方向', exact: true }).click();
+  await expect(input).toHaveValue('');
+  await expect(page.getByText('电脑端任务连接暂不可用，请稍后重试。', { exact: true })).toHaveCount(0);
+  expect(f.commands.filter(command => command.method === 'send')).toHaveLength(2);
+  expect(f.snapshot.messages.filter(message => message.text === text)).toHaveLength(1);
+  expect(f.commands.some(command => command.method === 'stop' || command.method === 'create')).toBe(false);
+  expect(f.snapshot.busy).toBe(true);
 });
 
 test('restricts viewers and removes expired queue entries without reading the transcript', async ({ page }) => {

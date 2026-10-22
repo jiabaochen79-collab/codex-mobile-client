@@ -3,7 +3,7 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { NativeIpc } from '../src/agent/ipc.js';
+import { IpcRoutingError, NativeIpc } from '../src/agent/ipc.js';
 function frame(message: unknown) { const data = Buffer.from(JSON.stringify(message)); const header = Buffer.alloc(4); header.writeUInt32LE(data.length); return Buffer.concat([header, data]); }
 describe('native IPC transport', () => {
   let server: net.Server; let client: NativeIpc; let peer: net.Socket;
@@ -29,6 +29,19 @@ describe('native IPC transport', () => {
     await start((socket, m) => { if (m.method === 'initialize') socket.write(frame({ type: 'response', requestId: m.requestId, resultType: 'success', result: { clientId: 'fixture' } })); else response = m; });
     peer.write(frame({ type: 'client-discovery-request', requestId: 'probe', request: { method: 'thread-follower-start-turn' } }));
     await new Promise(r => setTimeout(r,40)); expect(response.response.canHandle).toBe(false);
+  });
+  it('identifies a bare routing error and returns an actionable connection error', async () => {
+    await start((socket, m) => socket.write(frame(m.method === 'initialize'
+      ? { type: 'response', requestId: m.requestId, resultType: 'success', result: { clientId: 'fixture' } }
+      : { type: 'response', requestId: m.requestId, resultType: 'error', error: 'no-client-found' })));
+    await expect(client.request('steer', {})).rejects.toBeInstanceOf(IpcRoutingError);
+  });
+  it.each(['forwarded', 'structured', 'suffix'])('preserves a %s handler error without routing recovery', async kind => {
+    await start((socket, m) => socket.write(frame(m.method === 'initialize'
+      ? { type: 'response', requestId: m.requestId, resultType: 'success', result: { clientId: 'fixture' } }
+      : { type: 'response', requestId: m.requestId, resultType: 'error', ...(kind === 'forwarded' ? { handledByClientId: 'owner' } : {}), error: kind === 'structured' ? { message: 'no-client-found' } : kind === 'suffix' ? 'no-client-found: after delivery' : 'no-client-found' })));
+    const error = await client.request('steer', {}).catch(error => error);
+    expect(error).not.toBeInstanceOf(IpcRoutingError); expect(error).toMatchObject({ code: 'CLIENT_REJECTED' });
   });
   it('treats disconnect after dispatch as unknown outcome instead of retrying', async () => {
     await start((socket, m) => { if (m.method === 'initialize') socket.write(frame({ type: 'response', requestId: m.requestId, resultType: 'success', result: { clientId: 'fixture' } })); else socket.destroy(); });

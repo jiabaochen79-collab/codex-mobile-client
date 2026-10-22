@@ -14,6 +14,7 @@ function idleDesktop() {
   vi.spyOn(adapter as any, 'follow').mockResolvedValue(undefined);
   vi.spyOn(adapter as any, 'snapshot').mockReturnValue(snapshot);
   Reflect.set(adapter, 'current', { id: snapshot.id, owner: 'desktop-owner', revision: 0, state: {} });
+  Reflect.set(adapter, 'discovery', { processId: 123, startedAt: 'fixture-start', executablePath: 'C:/Codex.exe', toolsPipe: 'fixture-tools' });
   return { adapter, snapshot };
 }
 

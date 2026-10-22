@@ -5,6 +5,10 @@ import { RemoteError } from '../shared/protocol.js';
 import { compactJson } from './compact-json.js';
 import { errorText } from './error-text.js';
 
+export class IpcRoutingError extends RemoteError {
+  constructor() { super('CLIENT_UNAVAILABLE', '电脑端任务连接暂不可用，请稍后重试。'); }
+}
+
 function rejection(value: any) {
   const raw = typeof value === 'string' ? value : value?.message;
   const reason = errorText(raw);
@@ -111,7 +115,9 @@ export class NativeIpc extends EventEmitter {
         const id = String(message.requestId ?? message.id); const pending = this.pending.get(id);
         if (pending) {
           this.pending.delete(id); clearTimeout(pending.timer);
-          if (message.error || !this.tools && message.resultType === 'error') pending.reject(rejection(message.error ?? message.result));
+          // A routing error is transient, but does not authorize replaying a sent operation.
+          if (!this.tools && message.resultType === 'error' && message.error === 'no-client-found' && message.handledByClientId === undefined) pending.reject(new IpcRoutingError());
+          else if (message.error || !this.tools && message.resultType === 'error') pending.reject(rejection(message.error ?? message.result));
           else if (!this.tools && (message.resultType !== 'success' || message.method !== undefined && message.method !== pending.method)) pending.reject(new RemoteError('OUTCOME_UNKNOWN', '客户端返回格式不兼容，操作结果未确认，请在电脑核对，勿重复提交。'));
           else pending.resolve(message);
         }

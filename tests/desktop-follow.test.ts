@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { CodexDesktop } from '../src/agent/desktop.js';
-import { NativeIpc } from '../src/agent/ipc.js';
+import { IpcRoutingError, NativeIpc } from '../src/agent/ipc.js';
 import { RemoteError } from '../src/shared/protocol.js';
 
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
@@ -21,9 +21,9 @@ function fixture() {
 it('waits for the owner to appear after navigation instead of failing on transient discovery errors', async () => {
   vi.useFakeTimers();
   const { adapter, navigate, request, follow } = fixture();
-  request.mockRejectedValueOnce(new RemoteError('CLIENT_REJECTED', '电脑客户端拒绝操作：no-client-found'))
-    .mockRejectedValueOnce(new RemoteError('CLIENT_REJECTED', '电脑客户端拒绝操作：no-client-found'))
-    .mockRejectedValueOnce(new RemoteError('CLIENT_REJECTED', '电脑客户端拒绝操作：no-client-found'))
+  request.mockRejectedValueOnce(new IpcRoutingError())
+    .mockRejectedValueOnce(new IpcRoutingError())
+    .mockRejectedValueOnce(new IpcRoutingError())
     .mockResolvedValue({ handledByClientId: 'owner' });
   try {
     const result = follow();

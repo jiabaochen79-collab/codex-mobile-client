@@ -7,7 +7,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { applyPatches, enablePatches, type Patch } from 'immer';
-import { NativeIpc } from './ipc.js';
+import { IpcRoutingError, NativeIpc } from './ipc.js';
 import { DesktopCompatibility, assessProtocols, type DesktopContract } from './compatibility.js';
 import { normalizeProjectPath, projectForConversation, type IndexedProject } from './projects.js';
 import { collaborationMode, desktopModels, threadSettings, validateModel } from './models.js';
@@ -416,7 +416,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     const discover = async () => {
       try { return await this.ipc.request('thread-owner-discovery', { hostId: 'local', conversationId: id }); }
       catch (error) {
-        if (error instanceof RemoteError && error.code === 'CLIENT_REJECTED' && error.message.includes('no-client-found')) return;
+        if (error instanceof IpcRoutingError) return;
         throw error;
       }
     };
@@ -642,6 +642,13 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       const input: any[] = [{ type: 'text', text, text_elements: [] }];
       for (const file of attachments) if (file.mediaType.startsWith('image/')) input.push({ type: 'localImage', path: file.path });
       if (steer) {
+        // Refresh the cached owner before dispatch; never replay steering after a rejection.
+        const connection = this.discovery, followed = this.followed.get(snap.id);
+        if (followed) followed.ownerCheckedAt = 0;
+        await this.follow(snap.id);
+        const latest = await this.snapshot(), desktop = this.discovery;
+        if (!connection || !desktop || desktop.processId !== connection.processId || desktop.startedAt !== connection.startedAt || desktop.executablePath !== connection.executablePath) throw new RemoteError('CLIENT_UNAVAILABLE', '电脑客户端已重新连接，调整内容已保留，请同步后重试。');
+        if (latest.id !== snap.id || !latest.busy || latest.turnId !== snap.turnId) throw new RemoteError('STALE', '目标生成已结束或改变，调整内容已保留，请重新选择发送方式。');
         method = 'thread-follower-steer-turn';
         params = this.steeringParams(snap.id, text, commandId);
       } else {
