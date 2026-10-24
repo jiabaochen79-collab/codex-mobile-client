@@ -1,5 +1,5 @@
 // Push-only worker. It deliberately has no fetch handler or cache storage.
-const PUSH_WORKER_VERSION = 'codex-mobile-push-v3';
+const PUSH_WORKER_VERSION = 'codex-mobile-push-v4';
 
 function localUrl(value) {
   if (typeof value !== 'string') return `${self.location.origin}/`;
@@ -19,7 +19,7 @@ self.addEventListener('activate', event => {
 self.addEventListener('push', event => {
   let payload = {};
   try { payload = event.data?.json() ?? {}; } catch { payload = {}; }
-  const status = payload.status === 'failed' ? '任务执行异常' : payload.status === 'interrupted' ? '任务中断' : '任务已完成';
+  const status = payload.status === 'decision_required' ? '任务需要你确认或回复' : payload.status === 'failed' ? '任务执行异常' : payload.status === 'interrupted' ? '任务中断' : '任务已完成';
   const occurredAt = Number(payload.occurredAt);
   const time = Number.isFinite(occurredAt) ? new Date(occurredAt).toLocaleString('zh-CN', { hour12: false }) : '';
   const url = localUrl(payload.url);

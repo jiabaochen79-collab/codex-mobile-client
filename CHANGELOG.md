@@ -2,6 +2,25 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.58 - 2026-10-25
+
+### Changed
+
+- Allow every authorized online terminal to operate without taking control from another terminal; retain the three-terminal limit and device authorization.
+- Include pending questions, approvals and plan confirmations in task reminders, with durable reporting and resolved-request suppression.
+- Keep Windows notification monitoring in the background without showing desktop alerts.
+
+### Fixed
+
+- Refresh and verify desktop task ownership before steering a running task; preserve the draft when delivery is uncertain.
+
+### 中文
+
+- 所有已授权的在线终端均可直接操作，无需接管，仍保留最多三个终端及设备授权校验。
+- 任务等待回答、审批或计划确认时发送提醒；助手后台持续监测，已处理的问题不再重复提醒。
+- 修复调整方向时桌面任务归属变化导致的发送失败，结果不确定时保留草稿。
+- Windows 只负责后台监测，不显示桌面通知。
+
 ## 0.4.57 - 2026-10-17
 
 ### Fixed

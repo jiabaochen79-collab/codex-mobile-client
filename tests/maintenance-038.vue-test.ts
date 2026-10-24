@@ -78,6 +78,13 @@ it('F02 notification navigation activates only for the existing controller', asy
     expect(activation).toBe(role === 'controller');
   }
 });
+it('does not mark a new question read just because an older result in that turn is visible', async () => {
+  const p = mobileFixture(['multi-terminal', 'shared-control']), taskId = crypto.randomUUID();
+  p.selected.value = { id: taskId }; p.snapshot.value = { id: taskId, busy: false, lastTurnId: 'turn', requests: [] };
+  const calls: string[] = []; api = async path => { calls.push(path); return { items: [] }; };
+  await p.suppressVisibleNotification({ id: 'question', taskId, turnId: 'turn', status: 'decision_required' });
+  expect(calls).toEqual([]);
+});
 it('F09 a committed feedback result remains visible when local cleanup fails', async () => {
   api = async () => ({ ticket: { id: 'created-ticket', state: 'open' }, messages: [] });
   draft = async (_key, value) => { if (value === null) throw new Error('storage failure'); };

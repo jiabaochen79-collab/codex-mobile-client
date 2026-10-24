@@ -3,7 +3,7 @@ import { computed } from 'vue';
 import { Monitor, RefreshCw, X } from 'lucide-vue-next';
 import type { RecoveryState } from '../src/shared/protocol';
 const props = defineProps<{ state?: RecoveryState; busy: boolean; unavailable?: string; error?: string }>();
-defineEmits<{ close: []; action: [action: 'launch' | 'pause' | 'enable']; takeover: [] }>();
+defineEmits<{ close: []; action: [action: 'launch' | 'pause' | 'enable'] }>();
 const recovering = computed(() => ['backoff', 'launching', 'connecting'].includes(props.state?.phase ?? ''));
 </script>
 <template>
@@ -12,7 +12,6 @@ const recovering = computed(() => ['backoff', 'launching', 'connecting'].include
     <p class="recovery-status" role="status"><RefreshCw v-if="recovering" :size="18" class="spin"/><Monitor v-else :size="18"/><span>{{ state?.reason || '当前助手尚未提供恢复状态，请升级电脑助手。' }}</span></p>
     <label class="recovery-toggle"><input type="checkbox" :checked="state?.autoEnabled === true" :disabled="busy || !!unavailable || !state" @change="$emit('action', ($event.target as HTMLInputElement).checked ? 'enable' : 'pause')">异常退出后自动恢复</label>
     <p v-if="unavailable" class="compatibility-notice">{{ unavailable }}</p>
-    <button v-if="unavailable?.includes('查看模式')" class="text-button" @click="$emit('takeover')">接管控制权</button>
     <p v-if="error" class="alert" role="alert">{{ error }}</p>
     <button class="button primary" :disabled="busy || recovering || !!unavailable || !state" @click="$emit('action', 'launch')"><RefreshCw :size="17" :class="{ spin: busy }"/>{{ recovering ? '正在恢复客户端' : '恢复电脑客户端' }}</button>
     <p class="small muted">恢复后请核对原任务。中断任务和暂停队列不会自动继续。</p>

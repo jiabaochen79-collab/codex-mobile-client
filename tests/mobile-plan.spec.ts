@@ -487,7 +487,7 @@ for (const variant of ['viewer', 'legacy', 'expired', 'offline', 'incompatible',
     if (variant === 'offline') f.status.online = false;
     if (variant === 'incompatible') f.status.client = { available: false, reason: '客户端接口不兼容', version: 'future', capabilities: [] };
     f.statusUpdate(); await add(page).click(); await expect(planOption(page)).toBeVisible(); await expect(planOption(page)).toBeDisabled();
-    const reason = { viewer: '查看模式', legacy: '升级至 0.4.4', expired: '已到期', offline: '未连接', incompatible: '不兼容', unsynced: '尚未同步' }[variant];
+    const reason = { viewer: '升级电脑助手', legacy: '升级至 0.4.4', expired: '已到期', offline: '未连接', incompatible: '不兼容', unsynced: '尚未同步' }[variant];
     await expect(planOption(page)).toContainText(reason); expect(f.commands.some(c => ['mode.update', 'plan.respond'].includes(c.method))).toBe(false);
   });
 }
@@ -498,7 +498,7 @@ for (const variant of ['viewer', 'legacy', 'expired', 'offline', 'incompatible',
     if (variant === 'offline') f.status.online = false;
     if (variant === 'incompatible') f.status.client = { available: false, reason: '客户端接口不兼容', version: 'future', capabilities: [] };
     f.statusUpdate(); await permissionTrigger(page).click(); await expect(permissionOption(page, '请求批准')).toBeVisible(); await expect(permissionOption(page, '请求批准')).toBeDisabled();
-    const reason = { viewer: '查看模式', legacy: '更新电脑助手', expired: '已到期', offline: '未连接', incompatible: '不兼容', unsynced: '尚未同步' }[variant];
+    const reason = { viewer: '升级电脑助手', legacy: '更新电脑助手', expired: '已到期', offline: '未连接', incompatible: '不兼容', unsynced: '尚未同步' }[variant];
     await expect(page.getByRole('dialog', { name: '任务权限', exact: true })).toContainText(reason); expect(f.commands.some(c => c.method === 'permissions.update')).toBe(false);
   });
 }

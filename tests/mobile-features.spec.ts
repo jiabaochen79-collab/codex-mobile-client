@@ -127,8 +127,8 @@ test('supports viewers and explicit takeover with intact drafts at phone widths'
 test('opens task reminders without taking composer space or overflowing phone widths', async ({ page }, testInfo) => {
   await login(page);
   await page.getByTitle('更多操作', { exact: true }).click();
-  await page.getByRole('button', { name: '任务完成提醒' }).click();
-  await expect(page.getByRole('dialog', { name: '任务完成提醒' })).toBeVisible();
+  await page.getByRole('button', { name: '任务提醒' }).click();
+  await expect(page.getByRole('dialog', { name: '任务提醒' })).toBeVisible();
   await expect(page.getByText(/提醒已开启|提醒未开启/)).toBeVisible();
   await expect(page.getByText('站内通知', { exact: false })).toBeVisible();
   for (const width of [390, 320]) {

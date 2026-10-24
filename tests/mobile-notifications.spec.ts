@@ -10,7 +10,8 @@ const tasks = [
 const notifications = tasks.map((task, index) => ({ id: `33333333-3333-4333-8333-33333333333${index}`, deviceId, taskId: task.id, turnId: `turn-${index}`, status: 'completed', occurredAt: Date.now(), createdAt: Date.now(), readAt: null, delivery: 'accepted' }));
 const link = (index = 0, device = deviceId) => `${origin}/?notification=${notifications[index].id}&notificationDevice=${device}`;
 
-async function fixture(page: Page, initiallyReady = true, missing = false, longHistory = false, controlling = false) {
+async function fixture(page: Page, initiallyReady = true, missing = false, longHistory = false, controlling = false, decision = false) {
+  const items = notifications.map((item, index) => decision && index === 0 ? { ...item, status: 'decision_required' } : item);
   const commands: { device: string; command: any }[] = []; const reads: string[] = []; const statuses = new Map<string, (ready: boolean) => void>();
   let notify!: () => void;
   let readTaskId: string | undefined;
@@ -23,12 +24,12 @@ async function fixture(page: Page, initiallyReady = true, missing = false, longH
     const path = new URL(route.request().url()).pathname; const device = route.request().headers()['x-remote-device'];
     if (path.endsWith('/settings')) return route.fulfill({ json: { settings: { enabled: true, completed: true, failed: true }, pushConfigured: false } });
     if (path.endsWith('/read')) { reads.push(device); return route.fulfill({ json: { ok: true } }); }
-    const item = notifications.find(row => path.endsWith('/' + row.id));
-    return route.fulfill({ json: item ? { item: { ...item, deviceId: device } } : { items: notifications.map(row => ({ ...row, deviceId: device })), unread: 2 } });
+    const item = items.find(row => path.endsWith('/' + row.id));
+    return route.fulfill({ json: item ? { item: { ...item, deviceId: device } } : { items: items.map(row => ({ ...row, deviceId: device })), unread: 2 } });
   });
   await page.routeWebSocket('**/ws/mobile*', ws => {
     const device = new URL(ws.url()).searchParams.get('remoteDevice')!;
-    const status = (ready: boolean) => ws.send(JSON.stringify({ type: 'status', online: ready, enabled: true, client: { available: ready, capabilities: ['project-navigation', 'multi-terminal'] }, control: { role: controlling ? 'controller' : 'viewer', epoch: null, terminals: [] } }));
+    const status = (ready: boolean) => ws.send(JSON.stringify({ type: 'status', online: ready, enabled: true, client: { available: ready, capabilities: ['project-navigation', 'multi-terminal'] }, control: { role: controlling ? 'controller' : 'viewer', shared: controlling, epoch: controlling ? 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' : null, terminals: controlling ? [{ id: 'one', label: 'iPhone', controlling: true }, { id: 'two', label: 'Android', controlling: true }] : [] } }));
     statuses.set(device, status); status(initiallyReady);
     notify = () => ws.send(JSON.stringify({ type: 'notification', notification: { ...notifications[0], deviceId: device } }));
     ws.onMessage(data => {
@@ -55,8 +56,34 @@ async function pushClick(page: Page, url: string) {
   await page.evaluate(value => navigator.serviceWorker.dispatchEvent(new MessageEvent('message', { data: { type: 'notification.open', url: value } })), url);
 }
 async function history(page: Page) {
-  await page.getByTitle('更多操作', { exact: true }).click(); await page.getByRole('button', { name: /^任务完成提醒/ }).click();
+  await page.getByTitle('更多操作', { exact: true }).click(); await page.getByRole('button', { name: /^任务提醒/ }).click();
 }
+
+for (const width of [320, 390]) test(`shared terminals need no takeover at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 844 });
+  const state = await fixture(page, true, false, false, true); await page.goto(link());
+  await expect(page.getByText('Result: ' + tasks[0].title, { exact: true })).toBeVisible();
+  await page.getByRole('textbox', { name: '消息', exact: true }).fill('Shared terminal draft');
+  await expect(page.getByTitle('发送消息', { exact: true })).toBeEnabled();
+  await expect(page.getByTitle('接管控制权', { exact: true })).toHaveCount(0);
+  await page.getByTitle('更多操作', { exact: true }).click();
+  await page.getByRole('button', { name: /在线终端 2/ }).click();
+  await expect(page.getByText('可操作', { exact: true })).toHaveCount(2);
+  await expect(page.getByRole('button', { name: '确认接管' })).toHaveCount(0);
+  expect(state.commands.some(row => row.command.method === 'control.claim')).toBe(false);
+  await page.screenshot({ path: `test-results/shared-terminals-${width}.png` });
+});
+
+test('shows a decision reminder with its task and opens it without answering automatically', async ({ page }) => {
+  const state = await fixture(page, true, false, false, true, true); await page.goto(link(1));
+  await expect(page.getByText('Result: ' + tasks[1].title, { exact: true })).toBeVisible();
+  await history(page);
+  await expect(page.getByText(/需要你确认或回复/)).toBeVisible();
+  const item = page.locator('.notification-item').filter({ hasText: '需要你确认或回复' });
+  await item.click();
+  await expect(page.getByText('Result: ' + tasks[0].title, { exact: true })).toBeVisible();
+  expect(state.commands.some(row => ['respond', 'plan.respond', 'send', 'control.claim'].includes(row.command.method))).toBe(false);
+});
 
 test('keeps a cold-start notification pending until the computer is ready', async ({ page }) => {
   const state = await fixture(page, false); await page.goto(link());
@@ -83,7 +110,7 @@ for (const width of [320, 390]) test(`shows task names and projects in reminder 
 test('history clicks open the named task before marking it read, without activating it', async ({ page }) => {
   const state = await fixture(page); await page.goto(origin); await history(page);
   await page.locator('.notification-item').filter({ hasText: tasks[1].title }).click();
-  await expect(page.getByRole('dialog', { name: '任务完成提醒', exact: true })).toBeHidden();
+  await expect(page.getByRole('dialog', { name: '任务提醒', exact: true })).toBeHidden();
   await expect(page.locator('.chat-heading h1')).toHaveText(tasks[1].title);
   expect(state.reads).toEqual([deviceId]);
   expect(state.commands.filter(row => row.command.method === 'read').every(row => row.command.params.activate === false)).toBe(true);
@@ -242,7 +269,7 @@ test('honors the latest computer notification while an earlier device switch is 
 test('keeps history open and unread when its task cannot be loaded', async ({ page }) => {
   const state = await fixture(page, true, true); await page.goto(origin); await history(page);
   await page.locator('.notification-item').filter({ hasText: tasks[0].title }).click();
-  await expect(page.getByRole('dialog', { name: '任务完成提醒', exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: '任务提醒', exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Task no longer exists');
   expect(state.reads).toEqual([]); await expect(page.locator('.notification-item.unread')).toHaveCount(2);
 });

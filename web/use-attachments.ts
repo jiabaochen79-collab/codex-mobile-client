@@ -12,7 +12,7 @@ export function useAttachments(options: { request: (command: Command, id?: strin
     if (item.uploading || item.cancelled) return;
     item.uploading = true; item.error = '';
     try {
-      if (!options.control().allowed) throw new Error('请先接管控制权。');
+      if (!options.control().allowed) throw new Error('连接授权尚未同步，请等待重连或升级电脑助手。');
       if (!item.prepared) {
         item.preparing = true;
         const file = await preparePhoto(item.file,item.photosOnly);

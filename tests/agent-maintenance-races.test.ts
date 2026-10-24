@@ -32,5 +32,5 @@ it('accepts a server control lease independently of the computer wall clock', as
   expect(a.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'control-result', ok: true }));
   expect(() => a.authorizeControl(sessionId, clientId, epoch)).not.toThrow();
   a.controlDeadline = performance.now() - 1;
-  expect(() => a.authorizeControl(sessionId, clientId, epoch)).toThrow('当前为查看模式');
+  expect(() => a.authorizeControl(sessionId, clientId, epoch)).toThrow('连接授权已变化');
 });

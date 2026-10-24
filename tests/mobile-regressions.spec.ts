@@ -147,7 +147,7 @@ test('a notification arriving during read-all stays unread', async ({ page }) =>
   let finish!: () => Promise<void>;
   await page.route('**/api/notifications/read-all', route => { finish = () => route.fulfill({ json: { ok: true } }); });
   await page.getByTitle('更多操作', { exact: true }).click();
-  await page.getByRole('button', { name: '任务完成提醒', exact: true }).click();
+  await page.getByRole('button', { name: '任务提醒', exact: true }).click();
   await page.getByRole('button', { name: '全部标为已读', exact: true }).click();
   await expect.poll(() => !!finish).toBe(true);
   f.send({ type: 'notification', notification: item('55555555-5555-4555-8555-555555555555') });

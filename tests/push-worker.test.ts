@@ -58,3 +58,10 @@ it('does not follow a notification link to another origin', async () => {
   const fixture = worker([]); await fixture.click('https://untrusted.example/');
   expect(fixture.openWindow).toHaveBeenCalledWith(origin + '/');
 });
+
+it('distinguishes a waiting decision from completion and keeps question content out of the popup', async () => {
+  const fixture = worker([]); let pending: Promise<void> | undefined;
+  fixture.handlers.push({ data: { json: () => ({ notificationId: 'fixture', status: 'decision_required', occurredAt: Date.now(), url: target }) }, waitUntil: (work: Promise<void>) => { pending = work; } });
+  await pending;
+  expect(fixture.showNotification).toHaveBeenCalledWith('任务需要你确认或回复', expect.objectContaining({ data: { notificationId: 'fixture', url: target } }));
+});

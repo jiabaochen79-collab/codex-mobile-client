@@ -19,12 +19,12 @@ test('keeps notification list errors retryable and recovers the actual list', as
   await page.route('**/api/notifications', route => route.fulfill(failed ? { status: 503, json: { error: { code: 'NETWORK', message: 'notification-list-fixture' } } } : { json: { items: [], unread: 0 } }));
   await page.route('**/api/notifications/settings', route => route.fulfill({ json: { settings: { enabled: false, completed: true, failed: true }, revision: 'fixture', pushConfigured: false } }));
   await pairedHome(page);
-  await page.getByTitle('更多操作', { exact: true }).click(); await page.getByRole('button', { name: '任务完成提醒', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: '任务完成提醒', exact: true });
+  await page.getByTitle('更多操作', { exact: true }).click(); await page.getByRole('button', { name: '任务提醒', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '任务提醒', exact: true });
   await expect(dialog.getByRole('button', { name: '重试读取', exact: true })).toBeVisible();
-  await expect(dialog.getByText('暂无任务完成提醒', { exact: true })).toHaveCount(0);
+  await expect(dialog.getByText('暂无任务提醒', { exact: true })).toHaveCount(0);
   failed = false; await dialog.getByRole('button', { name: '重试读取', exact: true }).click();
-  await expect(dialog.getByText('暂无任务完成提醒', { exact: true })).toBeVisible(); await expect(dialog.getByRole('alert')).toHaveCount(0);
+  await expect(dialog.getByText('暂无任务提醒', { exact: true })).toBeVisible(); await expect(dialog.getByRole('alert')).toHaveCount(0);
   for (const width of [320, 390]) { await page.setViewportSize({ width, height: 640 }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); await page.screenshot({ path: info.outputPath('notifications-recovered-' + width + '.png') }); }
 });
 

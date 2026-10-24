@@ -62,7 +62,7 @@ const browserMessage = computed(() => {
 });
 
 function formatTime(value: number) { return new Date(value).toLocaleString('zh-CN', { hour12: false }); }
-function statusLabel(status: NotificationItem['status']) { return status === 'failed' ? '执行异常' : status === 'interrupted' ? '任务中断' : '任务完成'; }
+function statusLabel(status: NotificationItem['status']) { return status === 'decision_required' ? '需要你确认或回复' : status === 'failed' ? '执行异常' : status === 'interrupted' ? '任务中断' : '任务完成'; }
 function updateUnread(value: number) { unread.value = Math.max(0, value); emit('unread', unread.value); }
 function saveLocalSubscription(id?: string) {
   try { if (id) localStorage.setItem(`notification-subscription:${props.deviceId}`, id); else localStorage.removeItem(`notification-subscription:${props.deviceId}`); } catch {}
@@ -301,7 +301,7 @@ onUnmounted(() => { disposed = true; loadRevision++; pushStateRevision++; clearI
 <template>
   <div class="modal-backdrop notification-backdrop" @click.self="!busy && emit('close')">
     <section class="modal notification-modal" role="dialog" aria-modal="true" aria-labelledby="notification-title">
-      <div class="modal-title"><h2 id="notification-title"><Bell :size="18"/>任务完成提醒</h2><button class="icon-button" title="关闭提醒设置" :disabled="busy" @click="emit('close')"><X :size="20"/></button></div>
+      <div class="modal-title"><h2 id="notification-title"><Bell :size="18"/>任务提醒</h2><button class="icon-button" title="关闭提醒设置" :disabled="busy" @click="emit('close')"><X :size="20"/></button></div>
       <div v-if="loading" class="notification-loading" role="status"><RefreshCw class="spin" :size="18"/>正在读取提醒设置</div>
       <template v-else-if="settingsReady">
         <div class="notification-toggle-row"><div><strong>{{ settings.enabled ? '提醒已开启' : '提醒未开启' }}</strong><small>每台电脑分别保存提醒设置</small></div><button v-if="!settings.enabled && canEnableReminders" class="button primary" :disabled="busy" @click="enable"><Bell :size="16"/>开启提醒</button><button v-else-if="!settings.enabled" class="button" disabled>请先添加到主屏幕</button><button v-else class="button" :disabled="busy" @click="disable">关闭提醒</button></div>
@@ -310,12 +310,12 @@ onUnmounted(() => { disposed = true; loadRevision++; pushStateRevision++; clearI
         <p v-if="browserMessage" class="notification-info"><Smartphone v-if="isIos" :size="16"/><ShieldAlert v-else :size="16"/><span>{{ browserMessage }}</span></p>
         <p v-if="info || systemPushState === 'enabled'" class="notification-success" role="status"><Check :size="16"/>{{ info || '系统推送已开启。' }}</p>
         <div class="notification-list-heading"><strong>最近提醒</strong><button v-if="unread" class="text-button" :disabled="busy" @click="readAll">全部标为已读</button></div>
-        <div v-if="!items.length && listReady" class="notification-empty">暂无任务完成提醒</div>
+        <div v-if="!items.length && listReady" class="notification-empty">暂无任务提醒</div>
         <div v-else class="notification-list"><button v-for="item in items" :key="item.id" class="notification-item" :class="{ unread: !item.readAt }" :disabled="busy" @click="readOne(item)"><span class="notification-status" :class="item.status"><Check v-if="item.status === 'completed'" :size="15"/><ShieldAlert v-else :size="15"/></span><span class="notification-item-text"><strong :title="taskLabels[item.taskId]?.title || item.taskId">{{ taskLabels[item.taskId]?.title || `任务 ${item.taskId.slice(0, 8)}` }}</strong><small v-if="taskLabels[item.taskId]?.project" class="notification-project">{{ taskLabels[item.taskId].project }}</small><small>{{ statusLabel(item.status) }} · {{ formatTime(item.occurredAt) }}</small></span><ExternalLink :size="15"/></button></div>
         <button v-if="nextCursor" class="button" :disabled="busy || refreshing || loadingMore" @click="loadMore"><RefreshCw v-if="loadingMore" class="spin" :size="16"/>{{ loadingMore ? '正在读取' : '加载更多提醒' }}</button>
       </template>
       <p v-if="error" class="alert" role="alert">{{ error }}<button v-if="!settingsReady || !listReady" class="text-button" :disabled="busy || loading" @click="load(true)">重试读取</button></p>
-      <p class="notification-footnote">系统通知只显示状态和时间；登录后的提醒列表显示任务及项目名称，无法读取名称时显示任务编号。站内记录保留 30 天。</p>
+      <p class="notification-footnote">开启提醒后，待回复、执行审批及计划确认也会提醒。系统通知只显示状态和时间；登录后的提醒列表显示任务及项目名称，无法读取名称时显示任务编号。站内记录保留 30 天。</p>
     </section>
   </div>
 </template>

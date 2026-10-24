@@ -46,10 +46,10 @@ describe('mobile photo preparation', () => {
     await expect(queue.add([files[0]])).rejects.toThrow('5');
     await pending; queue.clear(); expect(queue.current.value).toHaveLength(0);
   });
-  it('retains files selected before control was lost, ready for retry after takeover', async () => {
+  it('retains files selected before control was lost, ready for retry after authorization resumes', async () => {
     const queue = useAttachments({thread:()=>'task',control:()=>({allowed:false,clientId:'fixture'}),request:async()=>{throw new Error('must not dispatch');}});
     await queue.add([new File(['photo selection'], 'selected.txt')]);
-    expect(queue.current.value).toHaveLength(1); expect(queue.current.value[0].error).toContain('接管');
+    expect(queue.current.value).toHaveLength(1); expect(queue.current.value[0].error).toContain('连接授权');
     queue.clear();
   });
 });

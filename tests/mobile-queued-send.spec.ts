@@ -113,7 +113,7 @@ test('restricts viewers and removes expired queue entries without reading the tr
   const f = await fixture(page); f.snapshot.queued!.push(f.queued('queued-one', 'Queued before expiry')); f.changed();
   await expect(page.getByTitle('取消排队消息')).toBeEnabled(); f.status.control.role = 'viewer'; f.updateStatus();
   await expect(page.getByTitle('取消排队消息')).toBeDisabled(); await page.getByLabel('消息', { exact: true }).fill('Viewer draft');
-  await expect(page.getByTitle('接管控制权', { exact: true })).toBeVisible(); await expect(page.getByTitle('发送方式')).toBeDisabled();
+  await expect(page.getByTitle('接管控制权', { exact: true })).toHaveCount(0); await expect(page.getByTitle('发送方式')).toBeDisabled();
   f.status.control.role = 'controller'; f.status.subscription.access = false; f.updateStatus();
   await expect(page.getByTitle('取消排队消息')).toBeEnabled(); await page.getByTitle('取消排队消息').click();
   await expect(page.getByRole('region', { name: '待发送消息' })).toHaveCount(0);

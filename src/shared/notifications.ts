@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const notificationStatusSchema = z.enum(['completed', 'failed', 'interrupted']);
+export const notificationStatusSchema = z.enum(['completed', 'failed', 'interrupted', 'decision_required']);
 export type NotificationStatus = z.infer<typeof notificationStatusSchema>;
 
 export const notificationEventSchema = z.object({
@@ -8,12 +8,24 @@ export const notificationEventSchema = z.object({
   deviceId: z.string().regex(/^[1-9][0-9]{8}$/),
   taskId: z.string().uuid(),
   turnId: z.string().min(1).max(200),
-  status: notificationStatusSchema,
+  status: z.enum(['completed', 'failed', 'interrupted']),
   occurredAt: z.number().int().positive(),
   protocolVersion: z.literal(1)
 }).strict();
 export type NotificationEvent = z.infer<typeof notificationEventSchema>;
 export type LocalNotificationEvent = Omit<NotificationEvent, 'deviceId'>;
+
+export const decisionEventSchema = z.object({
+  deviceId: z.string().regex(/^[1-9][0-9]{8}$/),
+  taskId: z.string().uuid(),
+  turnId: z.string().min(1).max(200),
+  requestKey: z.string().regex(/^[a-f0-9]{64}$/),
+  state: z.enum(['required', 'resolved']),
+  occurredAt: z.number().int().positive(),
+  protocolVersion: z.literal(1)
+}).strict();
+export type DecisionEvent = z.infer<typeof decisionEventSchema>;
+export type DecisionSnapshot = { taskId: string; turnId: string; requestIds: string[] };
 
 export const notificationSettingsSchema = z.object({
   enabled: z.boolean(),

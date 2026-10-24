@@ -37,11 +37,14 @@ test('recovers an unavailable client once, keeping task and draft without send o
   await expect(page.getByLabel('消息', { exact: true })).toHaveValue('恢复后核对的草稿'); await expect(page.locator('.chat-heading h1')).toHaveText('恢复验收任务');
   expect(f.commands.some(c => ['send', 'stop', 'queue.resume'].includes(c.method))).toBe(false);
 });
-test('can claim control while Codex is unavailable, before recovering', async ({ page }) => {
+test('explains an old helper without offering takeover and enables recovery after shared authorization arrives', async ({ page }) => {
   const f = await fixture(page, true); f.status.client.available = false; f.update(); await open(page);
-  await expect(page.getByRole('button', { name: '恢复电脑客户端' })).toBeDisabled(); await page.getByRole('button', { name: '接管控制权', exact: true }).click();
-  await page.getByRole('button', { name: '确认接管', exact: true }).click(); await open(page); await expect(page.getByRole('button', { name: '恢复电脑客户端' })).toBeEnabled();
-  expect(f.commands.filter(c => c.method === 'control.claim')).toHaveLength(1);
+  await expect(page.getByRole('button', { name: '恢复电脑客户端' })).toBeDisabled();
+  await expect(page.getByRole('dialog', { name: '客户端恢复' })).toContainText('升级电脑助手');
+  await expect(page.getByRole('button', { name: '接管控制权', exact: true })).toHaveCount(0);
+  f.status.control.role = 'controller'; f.status.control.shared = true; f.update();
+  await expect(page.getByRole('button', { name: '恢复电脑客户端' })).toBeEnabled();
+  expect(f.commands.filter(c => c.method === 'control.claim')).toHaveLength(0);
 });
 for (const variant of ['legacy', 'offline', 'expired', 'disabled'] as const) test('keeps entry and explains ' + variant, async ({ page }) => {
   const f = await fixture(page); if (variant === 'legacy') { f.status.client.capabilities = []; delete f.status.client.recovery; } if (variant === 'offline') f.status.online = false; if (variant === 'expired') f.status.subscription.access = false; if (variant === 'disabled') f.status.enabled = false;

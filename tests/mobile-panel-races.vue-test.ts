@@ -188,7 +188,7 @@ describe('M02: notification badge snapshot boundaries', () => {
 });
 
 describe('M03: seen receipt completion identity', () => {
-  it.each(['subscriptionOpen', 'notificationOpen', 'modelModal', 'permissionPicker', 'moreMenu', 'projectModal', 'attachmentPicker', 'takeoverModal'])('does not acknowledge an obscured result under %s', async overlay => {
+  it.each(['subscriptionOpen', 'notificationOpen', 'modelModal', 'permissionPicker', 'moreMenu', 'projectModal', 'attachmentPicker', 'terminalsModal'])('does not acknowledge an obscured result under %s', async overlay => {
     const p = setup(), a = task(); p.selected.value = a;
     p.snapshot.value = { id: a.id, busy: false, completionId: 'round:complete', lastTurnId: 'round' };
     p[overlay].value = true; await p.markSeen(); await p.suppressVisibleNotification({ id: 'notice', taskId: a.id, turnId: 'round' });

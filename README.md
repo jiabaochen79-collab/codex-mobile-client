@@ -126,7 +126,7 @@ Check the computer name before sending. Tasks, authorization, entitlement, and r
 
 ### Enable Completion Reminders
 
-Open **… → 任务完成提醒**. Enable reminders for the selected computer, choose completion and/or failure/interruption events, and allow system notifications when asked. If **开启系统通知** appears, use it to register this browser or Web App for background delivery.
+Open **… → 任务提醒**. Enable reminders for the selected computer, choose completion and/or failure/interruption events, and allow system notifications when asked. Pending questions, execution approvals, and plan confirmations also generate reminders; answering on another terminal cancels undelivered reminders. If **开启系统通知** appears, use it to register this browser or Web App for background delivery.
 
 | Phone or browser | Setup |
 | --- | --- |
@@ -161,7 +161,7 @@ If Codex is unavailable, inspect its reason before using **客户端恢复**. Re
 | Connection button disabled | Enter nine device-ID digits and an 8–64 character password. Use the current code, check spaces, and use the eye icon. |
 | Computer offline | Keep the computer awake, assistant running, and remote access enabled. Both networks must reach the HTTPS service; company policies and VPNs may interfere. |
 | Codex “未就绪” or compatibility warning | Open Codex, sign in, and verify a local task. Read the reason, update the assistant, and inspect **客户端恢复**. Version alone does not prove compatibility. |
-| Can view but cannot send | Check viewer/controller status, another terminal's control lease, service expiry, and the displayed compatibility or permission reason. |
+| Can view but cannot send | Check service expiry, connection status, and the displayed compatibility or permission reason. With the updated helper and server, all three authorized online terminals can operate without taking control. |
 | No iPhone notification | Use the home-screen Web App, enable reminders for the correct computer there, and allow notifications in iOS settings. |
 | Second computer has no notifications | Configure its reminders separately and verify its assistant is online and current. |
 | Upload or send stalled | Wait for confirmation, retry after reconnection, and inspect **待发送**. Do not repeatedly submit work with an unknown previous result. |

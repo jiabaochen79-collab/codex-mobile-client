@@ -153,6 +153,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
   private images = new ConversationImages();
   private queueCounts?: { mtime: number; size: number; counts: Map<string, number> };
   private notificationSourceCache?: { at: number; key: string; rows: { id: string; path: string }[] };
+  private notificationWatching = new Set<string>();
   async updateBlockers() {
     if (existsSync(join(this.codexHome, '.codex-global-state.json'))) {
       if (this.nativeQueuedCount('') === null) return ['无法核对电脑端队列，请稍后安装'];
@@ -322,6 +323,15 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       } finally { db.close(); }
     } catch { return this.notificationSourceCache?.rows ?? []; }
   }
+  async notificationSnapshot(taskId: string) {
+    await this.ready({ method: 'read', params: { id: taskId, limit: 1, activate: false } });
+    await this.follow(taskId, false);
+    const snapshot = normalizeSnapshot(this.current!.state, '', 1);
+    const turnId = snapshot.turnId ?? snapshot.lastTurnId;
+    if (!turnId) throw new RemoteError('STALE', '任务轮次尚未同步。');
+    if (snapshot.busy || snapshot.requests.length) this.notificationWatching.add(taskId); else this.notificationWatching.delete(taskId);
+    return { taskId, turnId, requestIds: snapshot.requests.map(request => String(request.id)) };
+  }
   private index() {
     const file = join(this.codexHome, 'state_5.sqlite');
     if (!existsSync(file)) throw new RemoteError('UNSUPPORTED', '未找到此版本的会话索引。');
@@ -437,7 +447,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     followed.ownerCheckedAt = Date.now(); this.current = followed;
     this.followed.set(id, followed);
     if (this.followed.size > 6) {
-      const candidate = [...this.followed.values()].find(entry => entry.id !== id && !hasPendingInteractions(entry.state) && !this.pendingApprovals.has(entry.id));
+      const candidate = [...this.followed.values()].find(entry => entry.id !== id && !hasPendingInteractions(entry.state) && !this.pendingApprovals.has(entry.id) && !this.notificationWatching.has(entry.id));
       if (candidate) this.unfollow(candidate.id);
     }
     const waiting = new Promise<void>((resolve, reject) => {
@@ -730,8 +740,8 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     this.projectGeneration++;
     for (const id of this.followed.keys()) this.unfollow(id, true);
     this.ipc.close(); this.tools?.close(); this.current = undefined; this.images.clear();
-    this.pendingApprovals.clear();
+    this.pendingApprovals.clear(); this.notificationWatching.clear();
   }
   private unfollow(id: string, force = false) { const entry = this.followed.get(id); if (entry) { if (!force && (hasPendingInteractions(entry.state) || !entry.state && this.pendingApprovals.has(id))) { this.pendingApprovals.add(id); return; } this.pendingApprovals.delete(id); try { this.ipc.broadcast('thread-stream-following-changed', { hostId: 'local', conversationId: id, following: false }, [entry.owner]); } catch {} this.followed.delete(id); this.images.clear(id); } }
-  setSubscriptions(ids: string[]) { for (const id of this.followed.keys()) if (!ids.includes(id)) this.unfollow(id); }
+  setSubscriptions(ids: string[]) { for (const id of this.followed.keys()) if (!ids.includes(id) && !this.notificationWatching.has(id)) this.unfollow(id); }
 }

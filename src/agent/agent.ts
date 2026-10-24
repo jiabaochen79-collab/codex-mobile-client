@@ -21,6 +21,7 @@ import { HelperUpdater } from './updater.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { CompletionMonitor } from './notifications.js';
+import { DecisionMonitor } from './decision-notifications.js';
 import { DesktopRecovery, NativeRecoveryBackend, type RecoveryBackend } from './desktop-recovery.js';
 
 export class Agent {
@@ -76,6 +77,7 @@ export class Agent {
   private queueTimer?: NodeJS.Timeout;
   private notificationTimer?: NodeJS.Timeout;
   private completionMonitor: CompletionMonitor;
+  private decisionMonitor?: DecisionMonitor;
   private pumping = false;
   private queueCursor = 0;
   private stopping = new Set<string>();
@@ -88,6 +90,16 @@ export class Agent {
     this.sends = new SendQueue(this.store, this.origin);
     this.uploads = new UploadStore(options.dir, this.store.db);
     this.completionMonitor = new CompletionMonitor(this.store, taskIds => this.options.adapter.notificationSources?.(taskIds) ?? []);
+    if (options.adapter.notificationSnapshot) this.decisionMonitor = new DecisionMonitor(this.store,
+      () => options.adapter.notificationSources?.(this.store.notificationWatchIds()) ?? Promise.resolve([]),
+      taskId => new Promise((resolve, reject) => {
+        this.commandWork.push({ priority: 3, work: async () => {
+          try { if (!this.enabled || this.closing) throw new Error('Remote disabled'); resolve(await options.adapter.notificationSnapshot!(taskId)); }
+          catch (error) { reject(error); }
+        } });
+        this.commandWork.sort((a, b) => a.priority - b.priority);
+        this.queue = this.queue.then(async () => { await this.commandWork.shift()?.work(); });
+      }));
     const recoveryBackend = options.recoveryBackend ?? (process.platform === 'win32' && options.nativeExe && options.adapter.desktopProcess ? new NativeRecoveryBackend(options.nativeExe) : undefined);
     if (recoveryBackend) this.recovery = new DesktopRecovery({ store: this.store, key: `recovery:${hash(this.origin)}`, backend: recoveryBackend, dir: options.dir, interrupted: () => { for (const id of this.sends.pause('电脑客户端异常退出，请核对原任务后继续队列。')) this.notifyQueue(id); } });
     if (options.root && process.platform === 'win32' && this.origin.startsWith('https:')) this.updater = new HelperUpdater({ dir: options.dir, root: options.root, version: packageInfo.version, store: this.store, request: (path, init) => this.serviceRequest(path, init), blockers: () => this.updateBlockers(), freeze: v => { this.updateFrozen = v; this.syncRecoveryAccess(); } });
@@ -97,6 +109,7 @@ export class Agent {
     if (password.mode === 'custom') { this.passwordMode = 'custom'; this.code = password.password; this.codeExpires = null; }
     options.adapter.onChange = id => {
       this.notifyQueue(id);
+      this.decisionMonitor?.watch(id);
     };
   }
   async start() {
@@ -105,7 +118,7 @@ export class Agent {
     this.updater?.start();
     this.timer = setInterval(() => { void this.refresh(); }, 5000); this.timer.unref();
     this.queueTimer = setInterval(() => { this.pumpQueue(); }, 1500); this.queueTimer.unref();
-    this.notificationTimer = setInterval(() => { void this.flushNotifications(); }, 2000); this.notificationTimer.unref();
+    this.notificationTimer = setInterval(() => { if (this.enabled) void this.decisionMonitor?.poll().catch(() => {}); void this.flushNotifications(); }, 2000); this.notificationTimer.unref();
   }
   private async connect() {
     if (this.closing) return;
@@ -153,7 +166,7 @@ export class Agent {
     this.client = await this.options.adapter.status();
     if (this.recovery) { this.syncRecoveryAccess(); this.recovery.observe(this.options.adapter.desktopProcess?.(), this.client.available); this.recovery.tick(); }
     if (this.recovery?.blocksCommands) this.client = { ...this.client, available: false, reason: this.recovery.state.reason };
-    this.client = { ...this.client, ...(this.recovery ? { recovery: { ...this.recovery.state } } : {}), capabilities: [...new Set([...(this.client.capabilities ?? []), 'queued-send', 'multi-terminal', 'command-status', ...(this.recovery ? ['desktop-recovery'] : [])])] };
+    this.client = { ...this.client, ...(this.recovery ? { recovery: { ...this.recovery.state } } : {}), capabilities: [...new Set([...(this.client.capabilities ?? []), 'queued-send', 'multi-terminal', 'shared-control', 'command-status', ...(this.recovery ? ['desktop-recovery'] : [])])] };
     if (this.closing) { this.options.adapter.close(); return; }
     for (const [id, until] of this.grants) if (until <= Date.now()) { this.store.deleteGrant(this.origin, id); this.grants.delete(id); }
     const frame = { type: 'status', helperVersion: packageInfo.version, enabled: this.enabled, status: this.client, update: this.updater?.state, authorizedSessions: [...this.grants.keys()] };
@@ -172,6 +185,11 @@ export class Agent {
   private async message(text: string) {
     if (this.closing) return;
     let m: any; try { m = JSON.parse(text); } catch { return; }
+    if (m.type === 'notification-decision-ack') {
+      const ack = z.object({ requestKey: z.string().regex(/^[a-f0-9]{64}$/), state: z.enum(['required', 'resolved']), accepted: z.literal(true) }).safeParse(m);
+      if (ack.success) this.decisionMonitor?.ack(ack.data.requestKey, ack.data.state);
+      return;
+    }
     if (m.type === 'queue-authorization') { const parsed = z.object({ id: uid, allowed: z.boolean(), validForMs: z.number().int().min(0).max(10000) }).safeParse(m); if (parsed.success) { const pending = this.queueAuthorizations.get(parsed.data.id); if (pending) { clearTimeout(pending.timer); this.queueAuthorizations.delete(parsed.data.id); pending.resolve(parsed.data); } } return; }
     if (m.type === 'notification-ack') {
       const parsed = z.object({ type: z.literal('notification-ack'), eventId: z.string().regex(/^[a-f0-9]{64}$/), accepted: z.boolean(), errorCode: z.string().optional(), occurredAt: z.number().int().positive().optional(), serverTime: z.number().int().positive().optional() }).safeParse(m);
@@ -318,6 +336,10 @@ export class Agent {
       this.store.markNotificationAttempt(event.eventId);
       this.send({ type: 'notification.event', eventId: event.eventId, deviceId: this.credentials.id, taskId: event.taskId, turnId: event.turnId, status: event.status, occurredAt, protocolVersion: 1 });
     }
+    if (this.subscription && this.store.get(`notification:clock:${hash(this.origin)}`) !== null) for (const event of this.decisionMonitor?.outbox() ?? []) {
+      const offset = Number(this.store.get(`notification:clock:${hash(this.origin)}`));
+      this.send({ type: 'notification.decision', deviceId: this.credentials.id, taskId: event.taskId, turnId: event.turnId, requestKey: event.requestKey, state: event.state, occurredAt: Math.max(1, Math.round(event.occurredAt + offset)), protocolVersion: 1 });
+    }
   }
   private notifyQueue(id: string) {
     if (!this.enabled || this.closing) return; this.changed.add(id);
@@ -377,7 +399,9 @@ export class Agent {
   }
   private authorizeControl(sessionId: string, clientId: string, epoch?: string) {
     if (!this.enabled || this.closing || (this.grants.get(sessionId) ?? 0) <= Date.now()) throw new RemoteError('AUTH', '远控授权已失效。');
-    if (!this.control || this.control.sessionId !== sessionId || this.control.clientId !== clientId || this.control.epoch !== epoch || (this.controlDeadline === undefined ? this.control.expires <= Date.now() : this.controlDeadline <= performance.now())) throw new RemoteError('CONTROL_LOST', '当前为查看模式，请先接管控制权。');
+    // Shared control is bound to this helper incarnation and an authorized session.
+    if (epoch === this.epoch && uid.safeParse(clientId).success) return;
+    if (!this.control || this.control.sessionId !== sessionId || this.control.clientId !== clientId || this.control.epoch !== epoch || (this.controlDeadline === undefined ? this.control.expires <= Date.now() : this.controlDeadline <= performance.now())) throw new RemoteError('CONTROL_LOST', '连接授权已变化，请等待同步或升级服务。');
   }
   private syncRecoveryAccess() {
     if (this.subscription && this.recoveryBlocked !== !!this.subscription.disabled) { this.recoveryBlocked = !!this.subscription.disabled; this.store.set(`recovery:${hash(this.origin)}:disabled`, String(this.recoveryBlocked)); }
@@ -504,7 +528,7 @@ export class Agent {
   }
   async close() {
     this.updater?.close();
-    this.closing = true; this.enabled = false; clearTimeout(this.reconnect); clearTimeout(this.changeTimer); clearInterval(this.timer); clearInterval(this.queueTimer); clearInterval(this.notificationTimer); this.completionMonitor.close();
+    this.closing = true; this.enabled = false; clearTimeout(this.reconnect); clearTimeout(this.changeTimer); clearInterval(this.timer); clearInterval(this.queueTimer); clearInterval(this.notificationTimer); this.completionMonitor.close(); this.decisionMonitor?.close();
     await this.recovery?.close();
     for (const pending of this.queueAuthorizations.values()) { clearTimeout(pending.timer); pending.resolve({ allowed: false, validForMs: 0, retryable: true }); } this.queueAuthorizations.clear();
     this.socket?.close(1000); this.options.adapter.close(); await this.queue; await this.mediaQueue; this.store.close();

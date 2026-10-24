@@ -64,7 +64,7 @@ export const commandFrame = z.object({ type: z.literal('command'), id: uid, comm
 export const readMethods = new Set<Command['method']>(['list', 'read', 'image.read', 'safety.status', 'projects', 'models', 'activity', 'seen', 'upload.status', 'queue.list', 'command.status']);
 export const isSafetyCommand = (command: Command) => command.method === 'stop' || command.method === 'goal.pause' || command.method === 'safety.status' || command.method === 'command.status' || command.method === 'upload.remove' || command.method === 'queue.list' || command.method === 'queue.remove' || command.method === 'respond' && command.params.decision === 'decline' && command.params.answers === undefined;
 export type ControlLease = { sessionId: string; clientId: string; epoch: string; expires: number };
-export type ControlState = { role: 'controller' | 'viewer'; epoch: string | null; expires: number | null; terminals: { id: string; label: string; controlling: boolean }[] };
+export type ControlState = { role: 'controller' | 'viewer'; shared?: boolean; epoch: string | null; expires: number | null; terminals: { id: string; label: string; controlling: boolean }[] };
 export type ModelOption = { id: string; name: string; efforts: string[]; defaultEffort: string; images: boolean };
 export type ThreadSettings = { model: string; effort: string | null; revision: string; mode?: 'plan' | 'default'; permission?: PermissionMode | 'custom' };
 export const threadGoalSchema = z.object({
@@ -98,6 +98,7 @@ export interface DesktopAdapter {
   hasConversation?(id: string): boolean | undefined;
   updateBlockers?(): Promise<string[]>;
   notificationSources?(taskIds?: string[]): Promise<{ id: string; path: string }[]>;
+  notificationSnapshot?(taskId: string): Promise<import('./notifications.js').DecisionSnapshot>;
   status(): Promise<ClientStatus>;
   execute(command: Command, commandId: string, authorize?: () => void, attachments?: LocalAttachment[]): Promise<unknown>;
   setSubscriptions?(ids: string[]): void;

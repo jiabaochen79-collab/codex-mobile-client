@@ -177,7 +177,7 @@ it('recovers a failed notification list together with settings and keeps the ret
   await p.load(); await p.refreshSettings();
   expect(listCalls).toBe(2); expect(p.listReady.value).toBe(false);
   p.settingsReady.value = true;
-  const failed = await render('NotificationCenter.vue', p); expect(failed).toContain('重试读取'); expect(failed).not.toContain('暂无任务完成提醒');
+  const failed = await render('NotificationCenter.vue', p); expect(failed).toContain('重试读取'); expect(failed).not.toContain('暂无任务提醒');
   const item = { id: crypto.randomUUID(), taskId: crypto.randomUUID(), status: 'completed', occurredAt: Date.now(), createdAt: Date.now(), readAt: null };
   api = async path => path.endsWith('/settings') ? settings : { items: [item], unread: 1 };
   await p.refreshSettings(); expect(p.items.value[0].id).toBe(item.id); expect(p.listReady.value).toBe(true); expect(p.error.value).toBe('');
