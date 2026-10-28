@@ -33,10 +33,9 @@ For iPhone notifications, add the site to the home screen and enable reminders i
 
 ## Preview
 
-<p>
-  <img src="doc/screenshots/mobile-chat.png" alt="Continue a conversation and read results on your phone" width="260">
-  <img src="doc/screenshots/mobile-computers.png" alt="Switch between paired computers" width="260">
-</p>
+| Continue conversations | Switch computers |
+| --- | --- |
+| ![Continue a conversation and read results on your phone](doc/screenshots/mobile-chat.png) | ![Switch between paired computers](doc/screenshots/mobile-computers.png) |
 
 *Screenshots use demonstration data. The current interface is in Chinese.*
 

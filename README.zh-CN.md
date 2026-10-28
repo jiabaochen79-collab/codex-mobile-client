@@ -33,10 +33,9 @@ iPhone 通知需先「添加到主屏幕」，再从主屏幕打开并开启提�
 
 ## 界面预览
 
-<p>
-  <img src="doc/screenshots/mobile-chat.png" alt="手机继续会话，查看执行结果" width="260">
-  <img src="doc/screenshots/mobile-computers.png" alt="在多台已配对电脑之间切换" width="260">
-</p>
+| 继续会话 | 切换电脑 |
+| --- | --- |
+| ![手机继续会话，查看执行结果](doc/screenshots/mobile-chat.png) | ![在多台已配对电脑之间切换](doc/screenshots/mobile-computers.png) |
 
 *截图使用演示数据。*
 
