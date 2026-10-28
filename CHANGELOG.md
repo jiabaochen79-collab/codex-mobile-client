@@ -2,6 +2,18 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.59 - 2026-10-28
+
+### Fixed
+
+- Read large desktop conversations containing historical tool results and screenshots without repeatedly dropping the task connection.
+- Skip incremental patches to discarded tool output while preserving chat text, user images, pending questions and task status.
+
+### 中文
+
+- 修复包含大量历史工具结果和截图的会话无法读取、反复提示任务连接恢复的问题。
+- 正确处理已省略工具输出的增量更新，保留聊天正文、用户图片、待回答问题和任务状态。
+
 ## 0.4.58 - 2026-10-25
 
 ### Changed

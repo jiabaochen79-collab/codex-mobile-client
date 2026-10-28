@@ -5,6 +5,9 @@ import { RemoteError } from '../shared/protocol.js';
 import { compactJson } from './compact-json.js';
 import { errorText } from './error-text.js';
 
+// Raw tool output is unused by mobile history. Keep response envelopes and arguments.
+export const unusedHistoryOutput = /^(?:params\.change\.conversationState\.)?(?:turns\.\d+|turnHistory\.history\.entitiesByKey\.[^.]+)\.items\.\d+\.(?:result|aggregatedOutput)(?:\.|$)/;
+
 export class IpcRoutingError extends RemoteError {
   constructor() { super('CLIENT_UNAVAILABLE', '电脑端任务连接暂不可用，请稍后重试。'); }
 }
@@ -90,9 +93,9 @@ export class NativeIpc extends EventEmitter {
         if (!size || size > 256 * 1024 * 1024) { this.close(); return; }
         this.frameBytes = size; this.frameOffset = 0;
         if (size > 64 * 1024 * 1024) {
-          // Historical command output is not part of mobile snapshots. Stream it
+          // Historical tool output is not part of mobile snapshots. Stream it
           // away instead of retaining the oversized native frame.
-          this.compact = compactJson(/(?:^|\.)aggregatedOutput$/, 64 * 1024 * 1024, message => { if (generation === this.generation) this.message(message); }, () => { if (generation === this.generation) this.close(); });
+          this.compact = compactJson(unusedHistoryOutput, 64 * 1024 * 1024, message => { if (generation === this.generation) this.message(message); }, () => { if (generation === this.generation) this.close(); });
         } else this.buffer = Buffer.allocUnsafe(size);
       }
       const length = Math.min(this.frameBytes - this.frameOffset, chunk.length - offset);

@@ -7,7 +7,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { applyPatches, enablePatches, type Patch } from 'immer';
-import { IpcRoutingError, NativeIpc } from './ipc.js';
+import { IpcRoutingError, NativeIpc, unusedHistoryOutput } from './ipc.js';
 import { DesktopCompatibility, assessProtocols, type DesktopContract } from './compatibility.js';
 import { normalizeProjectPath, projectForConversation, type IndexedProject } from './projects.js';
 import { collaborationMode, desktopModels, threadSettings, validateModel } from './models.js';
@@ -192,7 +192,8 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       if (change.type === 'snapshot') current.state = change.conversationState;
       else if (change.type === 'patches' && current.state && current.revision === change.baseRevision) {
         if (change.patches.some((p: Patch) => p.path.some(k => ['__proto__', 'prototype', 'constructor'].includes(String(k))))) throw new Error('Unsafe path');
-        current.state = applyPatches(current.state, change.patches);
+        // A compacted snapshot omits tool results, so their nested patches have no target.
+        current.state = applyPatches(current.state, change.patches.filter((p: Patch) => !unusedHistoryOutput.test(p.path.join('.'))));
       } else { current.state = undefined; this.requestSnapshot(current); return; }
       if (current.state?.id !== current.id) throw new Error('Mismatched conversation snapshot');
       if (hasPendingInteractions(current.state)) this.pendingApprovals.add(current.id); else this.pendingApprovals.delete(current.id);
