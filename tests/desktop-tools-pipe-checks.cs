@@ -43,6 +43,18 @@ internal static class DesktopToolsPipeChecks {
     private static int Main() {
         try {
             var pid = Process.GetCurrentProcess().Id;
+            using (var endpoint = new Endpoint("tools", "codex-app-tools-")) {
+                var candidates = new List<string>();
+                for (var i = 0; i < 24; i++) candidates.Add(@"\\.\pipe\codex-browser-use-" + Guid.NewGuid());
+                candidates.Add(endpoint.Path);
+                Check(DesktopToolsPipe.Find(new[] { pid }, candidates) == endpoint.Path, "Unrelated browser pipes must not hide the dedicated app-tool endpoint");
+            }
+            using (var endpoint = new Endpoint("tools")) {
+                var candidates = new List<string>();
+                for (var i = 0; i < 17; i++) candidates.Add(@"\\.\pipe\codex-browser-use-" + Guid.NewGuid());
+                candidates.Add(endpoint.Path);
+                Check(DesktopToolsPipe.Find(new[] { pid }, candidates) == endpoint.Path, "Legacy discovery must not reject a valid endpoint solely because of candidate count");
+            }
             foreach (var prefix in new[] { "codex-browser-use-", "codex-app-tools-" })
             foreach (var kind in new[] { "tools", "browser", "error", "wrong-id", "oversized", "timeout" }) {
                 using (var endpoint = new Endpoint(kind, prefix)) {
@@ -63,7 +75,11 @@ internal static class DesktopToolsPipeChecks {
                 Check(DesktopToolsPipe.Find(new[] { pid }, new[] { first.Path, second.Path }) == null, "Reject ambiguous tool endpoints");
             }
             using (var first = new Endpoint("tools")) using (var second = new Endpoint("tools", "codex-app-tools-")) {
-                Check(DesktopToolsPipe.Find(new[] { pid }, new[] { first.Path, second.Path }) == null, "Reject ambiguous legacy and dedicated tool endpoints");
+                Check(DesktopToolsPipe.Find(new[] { pid }, new[] { first.Path, second.Path }) == second.Path, "Prefer the verified dedicated app-tool endpoint over legacy services");
+                Check(!first.ReceivedRequest, "Do not probe legacy services when dedicated app tools are available");
+            }
+            using (var first = new Endpoint("tools", "codex-app-tools-")) using (var second = new Endpoint("tools", "codex-app-tools-")) {
+                Check(DesktopToolsPipe.Find(new[] { pid }, new[] { first.Path, second.Path }) == null, "Reject ambiguous dedicated tool endpoints");
             }
             using (var endpoint = new Endpoint("tools", "codex-computer-use-")) {
                 Check(DesktopToolsPipe.Find(new[] { pid }, new[] { endpoint.Path }) == null, "Reject unrelated local pipe names");

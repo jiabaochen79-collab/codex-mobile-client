@@ -106,6 +106,7 @@ internal static class Program {
         if (!Regex.IsMatch(ids, @"^(\d+(,\d+)*)?$")) throw new ArgumentException("Invalid process IDs");
         var filter = " WHERE SessionId=" + Process.GetCurrentProcess().SessionId;
         if (ids.Length > 0) filter += " AND (" + String.Join(" OR ", ids.Split(',').Select(id => "ProcessId=" + Int32.Parse(id))) + ")";
+        else filter += " AND (Name='RemoteCompanion.exe' OR Name='node.exe')";
         var rows = new List<object>();
         using (var query = new ManagementObjectSearcher("SELECT * FROM Win32_Process" + filter)) {
             foreach (ManagementObject process in query.Get()) {

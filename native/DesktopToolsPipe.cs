@@ -10,7 +10,7 @@ using System.Web.Script.Serialization;
 using Microsoft.Win32.SafeHandles;
 
 internal static class DesktopToolsPipe {
-    private static readonly string[] Prefixes = { @"\\.\pipe\codex-browser-use-", @"\\.\pipe\codex-app-tools-" };
+    private static readonly string[] Prefixes = { @"\\.\pipe\codex-app-tools-", @"\\.\pipe\codex-browser-use-" };
     private const int MaxFrame = 1024 * 1024;
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
@@ -18,15 +18,20 @@ internal static class DesktopToolsPipe {
     internal static string Find(IEnumerable<int> allowedOwnerProcessIds, IEnumerable<string> candidates) {
         var allowedOwners = new HashSet<int>(allowedOwnerProcessIds ?? Enumerable.Empty<int>());
         if (allowedOwners.Count == 0) return null;
-        var paths = candidates.Where(IsCandidate).Distinct(StringComparer.OrdinalIgnoreCase).Take(17).ToArray();
-        if (paths.Length > 16) return null;
-        string found = null;
-        foreach (var path in paths) {
-            if (!Probe(path, allowedOwners)) continue;
-            if (found != null) return null;
-            found = path;
+        var paths = candidates.Where(IsCandidate).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var clock = Stopwatch.StartNew();
+        // Dedicated app tools take precedence over per-task browser services.
+        foreach (var prefix in Prefixes) {
+            string found = null;
+            foreach (var path in paths.Where(path => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))) {
+                if (clock.ElapsedMilliseconds >= 6000) return null;
+                if (!Probe(path, allowedOwners)) continue;
+                if (found != null) return null;
+                found = path;
+            }
+            if (found != null) return found;
         }
-        return found;
+        return null;
     }
     private static bool IsCandidate(string path) {
         Guid id;

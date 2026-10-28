@@ -2,6 +2,18 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.60 - 2026-10-28
+
+### Fixed
+
+- Keep desktop discovery working when long-running Codex sessions expose more than sixteen browser service pipes. Prefer the verified dedicated app-tool endpoint and bound probe time instead of rejecting by candidate count.
+- Limit update recovery scans to helper and connection process names instead of checking ownership for every Windows application.
+
+### 中文
+
+- 修复 Codex 长时间运行、浏览器接口超过 16 个后助手误报“客户端未就绪”的问题。优先使用已验证的专用工具接口，按探测时间控制开销，不再因候选接口数量直接判定失败。
+- 升级恢复仅扫描助手与连接进程，避免逐个核验所有 Windows 应用而超时。
+
 ## 0.4.59 - 2026-10-28
 
 ### Fixed

@@ -54,6 +54,7 @@ describe.skipIf(process.platform !== 'win32')('isolated native update process op
     const transient = Array.from({ length: 8 }, () => spawn(process.execPath, ['-e', 'setTimeout(()=>{},50)'], { windowsHide: true, stdio: 'ignore' }));
     try {
       const rows = await updateProcesses([], exe);
+      expect(rows.every(row => /^(RemoteCompanion|node)\.exe$/i.test(row.name))).toBe(true);
       expect(rows.find(row => row.pid === test.pid)).toMatchObject({ path: exe, parentPid: process.pid });
       expect(rows.find(row => row.pid === test.nodePid)).toMatchObject({ parentPid: test.pid, path: join(dir, 'node.exe') });
     } finally {
