@@ -120,6 +120,7 @@ export class NativeIpc extends EventEmitter {
           this.pending.delete(id); clearTimeout(pending.timer);
           // A routing error is transient, but does not authorize replaying a sent operation.
           if (!this.tools && message.resultType === 'error' && message.error === 'no-client-found' && message.handledByClientId === undefined) pending.reject(new IpcRoutingError());
+          else if (!this.tools && (message.error === pending.method + '-timeout' || message.error?.message === pending.method + '-timeout')) pending.reject(new RemoteError('OUTCOME_UNKNOWN', '电脑端操作确认较慢，正在核对接收结果，不会重复提交。'));
           else if (message.error || !this.tools && message.resultType === 'error') pending.reject(rejection(message.error ?? message.result));
           else if (!this.tools && (message.resultType !== 'success' || message.method !== undefined && message.method !== pending.method)) pending.reject(new RemoteError('OUTCOME_UNKNOWN', '客户端返回格式不兼容，操作结果未确认，请在电脑核对，勿重复提交。'));
           else pending.resolve(message);

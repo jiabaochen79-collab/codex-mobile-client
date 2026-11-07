@@ -154,6 +154,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
   private queueCounts?: { mtime: number; size: number; counts: Map<string, number> };
   private notificationSourceCache?: { at: number; key: string; rows: { id: string; path: string }[] };
   private notificationWatching = new Set<string>();
+  private questionClosures = new Map<string, Promise<void>>();
   async updateBlockers() {
     if (existsSync(join(this.codexHome, '.codex-global-state.json'))) {
       if (this.nativeQueuedCount('') === null) return ['无法核对电脑端队列，请稍后安装'];
@@ -497,6 +498,48 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     const cwd = this.current!.state.cwd;
     return { conversationId: id, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: commandId, attachments: [], restoreMessage: { id: commandId, text, createdAt: Date.now(), cwd, context: { prompt: text, addedFiles: [], fileAttachments: [], imageAttachments: [], commentAttachments: [], workspaceRoots: cwd ? [cwd] : [], ideContext: null } } };
   }
+  commandAccepted(id: string, commandId: string) {
+    const state = this.followed.get(id)?.state;
+    const turns: any[] = state?.turnHistory?.history?.entitiesByKey ? Object.values(state.turnHistory.history.entitiesByKey) : state?.turns ?? [];
+    return turns.some(turn => turn.items?.some((item: any) => item.clientId === commandId && (item.type === 'userMessage' || item.type === 'steeringUserMessage' && item.status === 'accepted')));
+  }
+  private async dispatchMessage(id: string, commandId: string, method: string, params: unknown, version: number, accepted?: () => boolean) {
+    let settled = false, failure: unknown;
+    const received = accepted ?? (() => this.commandAccepted(id, commandId));
+    void this.ipc.request(method, params, version, this.followed.get(id)!.owner).then(response => {
+      if (response.resultType === 'error') failure = new RemoteError('CLIENT_REJECTED', '电脑客户端未接受此操作。');
+      settled = true;
+    }, error => { failure = error; settled = true; });
+    const deadline = Date.now() + 20000;
+    do {
+      if (received() || settled && !failure && !accepted) return { accepted: true };
+      if (settled && failure && (!(failure instanceof RemoteError) || failure.code !== 'OUTCOME_UNKNOWN')) throw failure;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < deadline);
+    throw new RemoteError('OUTCOME_UNKNOWN', '操作已发送，接收结果仍在核对，不会自动重复提交。');
+  }
+  private closeAcceptedQuestion(snap: Snapshot, request: Interaction, answers: Record<string, string[]>, authorize?: () => void) {
+    const key = JSON.stringify([snap.id, request.id]), identity = this.discovery;
+    if (this.questionClosures.has(key) || !identity) return;
+    const accepted = () => {
+      authorize?.();
+      const state = this.followed.get(snap.id)?.state, current = this.discovery;
+      if (!this.questionClosures.has(key) || !current || current.processId !== identity.processId || current.startedAt !== identity.startedAt || current.executablePath !== identity.executablePath || !asyncInputAccepted(state ?? {}, request, answers)) throw new RemoteError('STALE', '原回答状态已变化。');
+      if (asyncUserInputRequests(state).some(input => input.questions?.some(question => request.questions?.some(original => original.question === question.question && original.id !== question.id)))) throw new RemoteError('STALE', '电脑端已有新的提问。');
+    };
+    // Card cleanup is independent of the already confirmed task response.
+    const work = Promise.resolve().then(async () => {
+      await accepted();
+      try { await this.appTool('navigate_to_codex_page', { threadId: snap.id }, snap.id, accepted); } catch { await accepted(); }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await accepted();
+        try { if ((await reconcileDesktopQuestion(this.nativeExe, identity, snap.title, request, answers, async () => accepted())).closed) return; }
+        catch (error) { if (!(error instanceof RemoteError) || !['CLIENT_UNAVAILABLE', 'OUTCOME_UNKNOWN'].includes(error.code)) throw error; }
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }).catch(() => {}).finally(() => { if (this.questionClosures.get(key) === work) this.questionClosures.delete(key); });
+    this.questionClosures.set(key, work);
+  }
   private refreshProjectActivity() {
     if (this.projectScan || this.projectScanAt && Date.now() - this.projectScanAt < 30000) return;
     const generation = this.projectGeneration;
@@ -691,53 +734,24 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
             authorize?.();
             return current;
           };
-          let closed = false;
           const current = await check();
           const text = '<send_user_message_question_reply>\n' + JSON.stringify(request.questions!.map(question => ({ questionItemId: question.id, question: question.question, answer: answers[question.id][0].trim() }))) + '\n</send_user_message_question_reply>';
           const method = current.busy ? 'thread-follower-steer-turn' : 'thread-follower-start-turn';
           const params = current.busy ? this.steeringParams(snap.id, text, commandId) : { conversationId: snap.id, turnStart: { request: { threadId: snap.id, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: commandId }, context: { inheritThreadSettings: true, attachments: [], commentAttachments: [] } } };
-          try {
-            const response = await this.ipc.request(method, params, current.busy ? 1 : 2, this.current!.owner);
-            if (response.resultType === 'error') throw new RemoteError('CLIENT_REJECTED', '电脑客户端未接受此回答，手机回答已保留。');
-          }
-          catch (error) { if (!(error instanceof RemoteError) || error.code !== 'OUTCOME_UNKNOWN') throw error; }
-          const deadline = Date.now() + 5000;
-          do {
-            if (asyncInputAccepted(this.followed.get(snap.id)?.state ?? {}, request, answers)) {
-              if (!closed) {
-                await this.appTool('navigate_to_codex_page', { threadId: snap.id }, snap.id, authorize);
-                const accepted = async () => {
-                  authorize?.();
-                  if (!asyncInputAccepted(this.followed.get(snap.id)?.state ?? {}, request, answers)) throw new RemoteError('OUTCOME_UNKNOWN', '回答接收状态已变化，请核对原会话，勿重复提交。');
-                  const current = await this.snapshot();
-                  if (current.id !== snap.id) throw new RemoteError('STALE', '会话已切换，原回答不会重复提交。');
-                  if (current.requests.some(input => input.questions?.some(question => request.questions?.some(original => original.question === question.question && original.id !== question.id)))) throw new RemoteError('STALE', '电脑端已有新的提问，原回答不会重复提交。');
-                  authorize?.();
-                };
-                // Retrying a close is safe after exact acceptance; never resend an answer.
-                for (let attempt = 0; attempt < 3 && !closed; attempt++) {
-                  try { closed = (await reconcileDesktopQuestion(this.nativeExe, this.discovery, snap.title, request, answers, accepted)).closed; }
-                  catch (error) {
-                    if (!(error instanceof RemoteError) || !['CLIENT_UNAVAILABLE', 'OUTCOME_UNKNOWN'].includes(error.code)) throw error;
-                  }
-                  if (!closed && attempt < 2) await new Promise(resolve => setTimeout(resolve, 250));
-                }
-              }
-              if (closed) return { accepted: true };
-              break;
-            }
-            await new Promise(resolve => setTimeout(resolve, 100));
-          } while (Date.now() < deadline);
-          throw new RemoteError('OUTCOME_UNKNOWN', '回答已提交，但电脑卡片状态尚未确认，请核对原会话，勿重复提交。');
+          await this.dispatchMessage(snap.id, commandId, method, params, current.busy ? 1 : 2, () => asyncInputAccepted(this.followed.get(snap.id)?.state ?? {}, request, answers));
+          this.closeAcceptedQuestion(snap, request, answers, authorize);
+          return { accepted: true };
         } else { method = 'thread-follower-submit-user-input'; params.response = { answers: Object.fromEntries(Object.entries(answers).map(([k, v]) => [k, { answers: v }])) }; }
       } else throw new RemoteError('UNSUPPORTED', '请在电脑端处理此请求。');
     }
     authorize?.();
+    if (command.method === 'send') return this.dispatchMessage(snap.id, commandId, method, params, version);
     const response = await this.ipc.request(method, params, version, this.current!.owner);
     if (response.resultType === 'error') throw new RemoteError('CLIENT_REJECTED', '电脑客户端未接受此操作。');
     return { accepted: true };
   }
   close() {
+    this.questionClosures.clear();
     this.projectGeneration++;
     for (const id of this.followed.keys()) this.unfollow(id, true);
     this.ipc.close(); this.tools?.close(); this.current = undefined; this.images.clear();

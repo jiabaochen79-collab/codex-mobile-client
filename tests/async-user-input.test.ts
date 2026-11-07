@@ -87,6 +87,7 @@ it.each(['inProgress', 'completed'])('submits a %s async answer once through tas
   if (status === 'completed') current.threadRuntimeStatus.type = 'idle';
   try {
     await expect(adapter.execute(command, randomUUID())).resolves.toEqual({ accepted: true });
+    await Promise.all(Reflect.get(adapter, 'questionClosures').values());
     expect(request).toHaveBeenCalledOnce();
     const [method, params, version, owner] = request.mock.calls[0];
     expect(method).toBe(status === 'completed' ? 'thread-follower-start-turn' : 'thread-follower-steer-turn');
@@ -94,7 +95,7 @@ it.each(['inProgress', 'completed'])('submits a %s async answer once through tas
     const body = params as { turnStart: { request: { input: { text: string }[] } }; input: { text: string }[] };
     const input = status === 'completed' ? body.turnStart.request.input : body.input;
     expect(asyncInputReplies(input[0].text)).toEqual([{ questionItemId: questionId(), question: 'Which address?', answer: 'Custom address' }]);
-    expect(navigate).toHaveBeenCalledWith('navigate_to_codex_page', { threadId: current.id }, current.id, undefined);
+    expect(navigate).toHaveBeenCalledWith('navigate_to_codex_page', { threadId: current.id }, current.id, expect.any(Function));
     expect(submit).not.toHaveBeenCalled(); expect(reconcile).toHaveBeenCalledOnce();
     expect(reconcile.mock.calls[0].slice(2, 5)).toEqual(['Input fixture', normalizeSnapshot(state(), 'epoch').requests[0], command.params.answers]);
     expect(request.mock.invocationCallOrder[0]).toBeLessThan(navigate.mock.invocationCallOrder[0]);
@@ -127,7 +128,11 @@ it('does not dismiss a new question that repeats an earlier question text', asyn
     return { resultType: 'success' };
   });
   const reconcile = vi.spyOn(nativeQuestion, 'reconcileDesktopQuestion').mockImplementation(async (_exe, _identity, _title, _request, _answers, check) => { await check(); return { closed: true }; });
-  try { await expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'STALE' }); }
+  try {
+    await expect(adapter.execute(command, randomUUID())).resolves.toEqual({ accepted: true });
+    await Promise.all(Reflect.get(adapter, 'questionClosures').values());
+    expect(reconcile).not.toHaveBeenCalled();
+  }
   finally { adapter.close(); }
 });
 it.each(['new turn', 'answered', 'other question', 'empty answer', 'extra answer', 'decline'])('rejects %s async replies before native dispatch', async kind => {
@@ -193,7 +198,7 @@ it('accepts only exact question identities, text, and answers in native history'
   const current = state(); current.turns.push({ turnId: 'next', status: 'completed', turnStartedAtMs: 2, items: [{ type: 'userMessage', content: reply('accepted', 'Custom address').input }] });
   expect(asyncInputAccepted(current, request, { [questionId()]: ['Custom address'] })).toBe(true);
 });
-it.each(['missing reply', 'card still open', 'unknown outcome'])('never resends an answer after %s', async kind => {
+it.each(['missing reply', 'unknown outcome'])('never resends an answer after %s', async kind => {
   vi.useFakeTimers();
   const { adapter, command, submit, request, reconcile } = desktop();
   if (kind === 'unknown outcome') request.mockRejectedValue(new RemoteError('OUTCOME_UNKNOWN', 'Unconfirmed transport'));
@@ -201,18 +206,42 @@ it.each(['missing reply', 'card still open', 'unknown outcome'])('never resends 
   reconcile.mockResolvedValue({ closed: false });
   try {
     const assertion = expect(adapter.execute(command, randomUUID())).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
-    await vi.advanceTimersByTimeAsync(6000); await assertion;
+    await vi.advanceTimersByTimeAsync(21000); await assertion;
     expect(request).toHaveBeenCalledOnce(); expect(submit).not.toHaveBeenCalled();
-    expect(reconcile).toHaveBeenCalledTimes(kind === 'card still open' ? 3 : 0);
+    expect(reconcile).not.toHaveBeenCalled();
+  } finally { adapter.close(); vi.useRealTimers(); }
+});
+it('confirms a received answer even when the desktop card cannot close', async () => {
+  const { adapter, command, request, reconcile } = desktop();
+  reconcile.mockResolvedValue({ closed: false });
+  try {
+    await expect(adapter.execute(command, randomUUID())).resolves.toEqual({ accepted: true });
+    expect(request).toHaveBeenCalledOnce();
+  } finally { adapter.close(); }
+});
+it('accepts a late exact answer after the previous five-second window without resending', async () => {
+  vi.useFakeTimers();
+  const { adapter, current, command, request } = desktop();
+  request.mockResolvedValue({ resultType: 'success' });
+  try {
+    const result = expect(adapter.execute(command, randomUUID())).resolves.toEqual({ accepted: true });
+    await vi.advanceTimersByTimeAsync(7000);
+    current.turns[0].items.push(reply('accepted', 'Custom address'));
+    await vi.advanceTimersByTimeAsync(100);
+    await result;
+    expect(request).toHaveBeenCalledOnce();
   } finally { adapter.close(); vi.useRealTimers(); }
 });
 it('retries transient card closure without resubmitting the already accepted answer', async () => {
+  vi.useFakeTimers();
   const { adapter, command, request, reconcile } = desktop();
   reconcile.mockRejectedValueOnce(new RemoteError('OUTCOME_UNKNOWN', 'Stale accessibility element')).mockResolvedValueOnce({ closed: false });
   try {
     await expect(adapter.execute(command, randomUUID())).resolves.toEqual({ accepted: true });
+    await vi.advanceTimersByTimeAsync(2100);
+    await Promise.all(Reflect.get(adapter, 'questionClosures').values());
     expect(request).toHaveBeenCalledOnce(); expect(reconcile).toHaveBeenCalledTimes(3);
-  } finally { adapter.close(); }
+  } finally { adapter.close(); vi.useRealTimers(); }
 });
 it('continues using the legacy response protocol for blocking user input', async () => {
   const { adapter, current, request } = desktop();

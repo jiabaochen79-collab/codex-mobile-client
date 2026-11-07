@@ -15,7 +15,7 @@ function nativeGoal(threadId: string, status = 'active') {
   return { threadId, objective: '完成两步验收 <script>alert(1)</script>\n' + 'LongObjective'.repeat(40), status,
     tokenBudget: null, tokensUsed: 42, timeUsedSeconds: 2, createdAt: 1700000000, updatedAt: 1700000001, revision: 'a'.repeat(64) };
 }
-async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean; busy?: boolean; reject?: boolean; delayed?: boolean; mode?: 'plan'|'default'; unsynced?: boolean; permission?: 'ask'|'approve'|'full'|'custom'; permissionUnsynced?: boolean; secondTask?: boolean; inputRequest?: boolean; failedReason?: string | null } = {}) {
+async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean; busy?: boolean; reject?: boolean; delayed?: boolean; mode?: 'plan'|'default'; unsynced?: boolean; permission?: 'ask'|'approve'|'full'|'custom'; permissionUnsynced?: boolean; secondTask?: boolean; inputRequest?: boolean; uncertainAnswer?: boolean; failedReason?: string | null } = {}) {
   const conversation = { id: '12345678-1234-4234-8234-123456789abc', title: '计划模式验收', cwd: 'C:/fixture', updatedAt: 1 };
   const plan = { id: 'implement-plan:turn-plan', kind: 'plan', title: '实施此计划？', detail: '# 更新计划\n\n1. 保留已有数据。\n2. 验证结果。\n\n<script>alert(1)</script>', plan: { turnId: 'turn-plan', revision: 'a'.repeat(64) } };
   const inputRequest = { id: 'input-request', kind: 'input', title: '需要你的回复', detail: '', questions: [
@@ -30,7 +30,8 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
   const secondSnapshot = { ...snapshot, ...second, requests: [], settings: { ...snapshot.settings, mode: 'default', permission: 'full', revision: 'other-settings' } };
   const status: any = { type: 'status', online: true, enabled: true, helperVersion: options.legacy ? undefined : '0.4.4', subscription: { access: true },
     control: { role: options.viewer ? 'viewer' : 'controller', epoch: '12345678-1234-4234-8234-123456789abd', terminals: [] },
-    client: { available: true, version: '26.903.61454', capabilities: options.legacy ? [] : ['task-mode', 'plan-implementation', 'model-settings', 'permission-settings', 'goal-mode', 'safety-status', 'queued-send', 'attachments'] } };
+    client: { available: true, version: '26.903.61454', capabilities: options.legacy ? [] : ['task-mode', 'plan-implementation', 'model-settings', 'permission-settings', 'goal-mode', 'safety-status', 'queued-send', 'attachments', 'command-status'] } };
+  let answerState = 'unknown';
   const commands: any[] = []; let update!: () => void; let statusUpdate!: () => void; let disconnect!: () => void; let settle!: () => void;
   const reads: (() => void)[] = []; let holdReads = false; let readFailure = '';
   await mockPairedBrowser(page);
@@ -48,10 +49,11 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
         if (command.method === 'mode.update' && !options.reject) { snapshot.settings.mode = command.params.mode; snapshot.settings.revision = 'settings-2'; }
         if (command.method === 'permissions.update' && !options.reject) { snapshot.settings.permission = command.params.permission; snapshot.settings.revision = 'permission-settings-2'; }
         if (command.method === 'plan.respond' && !options.reject) { snapshot.requests = []; snapshot.busy = true; snapshot.turnId = 'next-turn'; snapshot.settings.mode = command.params.action === 'implement' ? 'default' : 'plan'; }
-        if (command.method === 'respond' && !options.reject) snapshot.requests = [];
+        if (command.method === 'respond' && !options.reject && !options.uncertainAnswer) snapshot.requests = [];
+        if (command.method === 'respond' && options.uncertainAnswer) { socket.send(JSON.stringify({ type: 'result', id, error: { code: 'OUTCOME_UNKNOWN', message: 'Desktop confirmation delayed' } })); return; }
         if (command.method === 'goal.pause' && !options.reject) snapshot.goal.status = 'paused';
         if (command.method === 'settings.update' && !options.reject) { snapshot.settings.model = command.params.model; snapshot.settings.revision = 'model-settings-2'; }
-        const result = command.method === 'list' ? { conversations: options.secondTask ? [conversation, second] : [conversation], hasMore: false } : command.method === 'read' || command.method === 'safety.status' ? command.params.id === second.id ? secondSnapshot : snapshot : command.method === 'models' ? { models: [{ id: 'fixture-model', name: 'Fixture', efforts: ['high'], defaultEffort: 'high' }, { id: 'other-model', name: 'Other', efforts: ['high'], defaultEffort: 'high' }] } : command.method === 'settings.update' ? { settings: snapshot.settings } : command.method === 'projects' ? { projects: [{ id: 'fixture-project', name: 'Fixture project' }] } : command.method === 'create' ? { threadId: conversation.id } : command.method === 'goal.pause' ? { accepted: true, goal: snapshot.goal } : { accepted: true };
+        const result = command.method === 'command.status' ? { state: answerState } : command.method === 'list' ? { conversations: options.secondTask ? [conversation, second] : [conversation], hasMore: false } : command.method === 'read' || command.method === 'safety.status' ? command.params.id === second.id ? secondSnapshot : snapshot : command.method === 'models' ? { models: [{ id: 'fixture-model', name: 'Fixture', efforts: ['high'], defaultEffort: 'high' }, { id: 'other-model', name: 'Other', efforts: ['high'], defaultEffort: 'high' }] } : command.method === 'settings.update' ? { settings: snapshot.settings } : command.method === 'projects' ? { projects: [{ id: 'fixture-project', name: 'Fixture project' }] } : command.method === 'create' ? { threadId: conversation.id } : command.method === 'goal.pause' ? { accepted: true, goal: snapshot.goal } : { accepted: true };
         if (options.reject && ['respond', 'plan.respond', 'mode.update', 'permissions.update', 'settings.update', 'goal.pause'].includes(command.method)) socket.send(JSON.stringify({ type: 'result', id, error: { code: 'STALE', message: '计划或设置已变化，请刷新后核对。' } }));
         else socket.send(JSON.stringify({ type: 'result', id, result }));
       };
@@ -63,7 +65,7 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
   await page.goto(origin);
   await page.getByRole('button', { name: conversation.title, exact: true }).click(); await expect(page.getByLabel('消息', { exact: true })).toBeVisible();
   await expect.poll(() => commands.filter(c => c.method === 'read').length).toBeGreaterThan(0);
-  return { snapshot, status, commands, update: () => update(), statusUpdate: () => statusUpdate(), disconnect: () => disconnect(), settle: () => settle(),
+  return { snapshot, status, commands, confirmAnswer: () => { answerState = 'succeeded'; snapshot.requests = []; update(); }, update: () => update(), statusUpdate: () => statusUpdate(), disconnect: () => disconnect(), settle: () => settle(),
     failReads: (message: string) => { readFailure = message; },
     holdReads: () => { holdReads = true; }, releaseReads: () => { holdReads = false; reads.splice(0).forEach(reply => reply()); } };
 }
@@ -268,6 +270,34 @@ test('shows unanswered async questions after completion and reload, and submits 
   expect(f.commands.some(c => c.method === 'send' || c.method === 'stop')).toBe(false);
   await expect(page.getByLabel('消息', { exact: true })).toHaveValue('保留普通消息草稿');
 });
+test('reconciles a delayed answer after reload without showing a rejection or submitting it twice', async ({ page }, info) => {
+  const f = await fixture(page, { mode: 'default', inputRequest: true, uncertainAnswer: true });
+  await page.getByLabel('消息', { exact: true }).fill('保留聊天草稿');
+  await page.getByLabel('修改范围', { exact: true }).selectOption('0');
+  await page.getByLabel('处理方式', { exact: true }).selectOption('1');
+  await page.getByLabel('补充要求', { exact: true }).fill('不得重复执行');
+  await page.locator('.questions').getByRole('button', { name: '提交', exact: true }).click();
+  await expect(page.locator('.response-confirmation')).toContainText('回答结果正在核对');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.locator('.questions').getByRole('button', { name: '提交', exact: true })).toBeDisabled();
+  await expect(page.getByLabel('补充要求', { exact: true })).toHaveValue('不得重复执行');
+  await page.reload(); await page.getByRole('button', { name: '计划模式验收', exact: true }).click();
+  await expect(page.locator('.response-confirmation')).toBeVisible();
+  await expect(page.locator('.questions').getByRole('button', { name: '提交', exact: true })).toBeDisabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath(`answer-confirmation-${width}.png`) });
+  }
+  f.confirmAnswer(); await page.getByRole('button', { name: '核对结果', exact: true }).click();
+  await expect(page.locator('.response-confirmation')).toHaveCount(0);
+  await expect(page.locator('.questions')).toHaveCount(0);
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('保留聊天草稿');
+  expect(f.commands.filter(c => c.method === 'respond')).toHaveLength(1);
+  expect(f.commands.some(c => c.method === 'send' || c.method === 'stop')).toBe(false);
+});
+
 test('closes task-bound model and permission dialogs when a notification opens another task', async ({ page }) => {
   const f = await fixture(page, { mode: 'default', secondTask: true });
   const notification = '12345678-1234-4234-8234-123456789abf'; const second = '12345678-1234-4234-8234-123456789abe';

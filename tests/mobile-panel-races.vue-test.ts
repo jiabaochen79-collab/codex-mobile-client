@@ -143,6 +143,67 @@ describe('goal drafts', () => {
   });
 });
 
+describe('late answer confirmations', () => {
+  function answering() {
+    const { p, a } = goalPage();
+    const request = { id: 'question-request', kind: 'input', title: 'Question', detail: '', questions: [{ id: 'choice', question: 'Which?', options: [] }] };
+    p.snapshot.value.requests = [request];
+    const key = p.answerKey(request, request.questions[0]); p.answers.value[key] = 'Original answer';
+    const work = p.respond(request); const frame = FakeSocket.latest.frames.at(-1);
+    return { p, a, request, key, work, frame };
+  }
+  async function finishRead(f: ReturnType<typeof answering>) {
+    await vi.waitFor(() => expect(FakeSocket.latest.frames.at(-1).command.method).toBe('read'));
+    FakeSocket.latest.reply(FakeSocket.latest.frames.at(-1), f.p.snapshot.value); await f.work;
+    await nextTick();
+    const query = FakeSocket.latest.frames.at(-1); if (query.command.method === 'command.status') FakeSocket.latest.reply(query, { state: 'unknown' });
+    await nextTick();
+  }
+  it('keeps an uncertain answer neutral and confirms the original request without resending', async () => {
+    const f = answering();
+    FakeSocket.latest.receive({ type: 'result', id: f.frame.id, error: { code: 'OUTCOME_UNKNOWN', message: 'late native confirmation' } });
+    await finishRead(f);
+    expect(f.p.error.value).toBe(''); expect(f.p.pendingResponses[f.a.id]?.requestId).toBe(f.frame.id);
+    expect(f.p.answers.value[f.key]).toBe('Original answer');
+    await f.p.respond(f.request); expect(FakeSocket.latest.frames.filter(row => row.command.method === 'respond')).toHaveLength(1);
+    const checking = f.p.reconcileSends(); const query = FakeSocket.latest.frames.at(-1);
+    expect(query.command).toEqual({ method: 'command.status', params: { id: f.a.id, requestId: f.frame.id } });
+    FakeSocket.latest.reply(query, { state: 'succeeded' }); await checking;
+    expect(f.p.pendingResponses[f.a.id]).toBeUndefined(); expect(f.p.answers.value[f.key]).toBeUndefined(); expect(f.p.error.value).toBe('');
+  });
+  it('does not infer answer acceptance from a disappearing question and accepts a delayed result frame', async () => {
+    const f = answering();
+    FakeSocket.latest.receive({ type: 'result', id: f.frame.id, error: { code: 'OUTCOME_UNKNOWN', message: 'late native confirmation' } });
+    f.p.snapshot.value.requests = []; await finishRead(f);
+    expect(f.p.pendingResponses[f.a.id]).toBeDefined();
+    FakeSocket.latest.reply(f.frame, { accepted: true });
+    expect(f.p.pendingResponses[f.a.id]).toBeUndefined(); expect(f.p.error.value).toBe('');
+  });
+  it('retains a real rejection and the answer for correction', async () => {
+    const f = answering(); FakeSocket.latest.reject(f.frame, 'The original question rejected the reply'); await finishRead(f);
+    expect(f.p.pendingResponses[f.a.id]).toBeUndefined(); expect(f.p.answers.value[f.key]).toBe('Original answer');
+    expect(f.p.error.value).toBe('The original question rejected the reply');
+  });
+  it('persists only operation identities and blocks a duplicate answer after reloading', async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key), get length() { return values.size; }, key: (index: number) => [...values.keys()][index] ?? null });
+    const f = answering();
+    const saved = values.get(f.p.pendingResponseKey(f.a.id)); expect(saved).toContain(f.frame.id); expect(saved).not.toContain('Original answer');
+    FakeSocket.latest.receive({ type: 'result', id: f.frame.id, error: { code: 'OUTCOME_UNKNOWN', message: 'late confirmation' } }); await finishRead(f);
+    const reloaded = setup(); reloaded.showConversation(f.a); reloaded.snapshot.value = f.p.snapshot.value;
+    expect(reloaded.pendingResponses[f.a.id]?.requestId).toBe(f.frame.id);
+    await reloaded.respond(f.request); expect(FakeSocket.latest.frames.filter(row => row.command.method === 'respond')).toHaveLength(0);
+  });
+  it('does not clear another task answer, draft or error when the original answer is confirmed', async () => {
+    const f = answering();
+    FakeSocket.latest.receive({ type: 'result', id: f.frame.id, error: { code: 'OUTCOME_UNKNOWN', message: 'late confirmation' } }); await finishRead(f);
+    const b = task(); f.p.showConversation(b); f.p.answers.value[f.key] = 'Other task answer'; f.p.draft.value = 'Other task draft'; f.p.error.value = 'Unrelated error';
+    FakeSocket.latest.reply(f.frame, { accepted: true });
+    expect(f.p.answers.value[f.key]).toBe('Other task answer'); expect(f.p.draft.value).toBe('Other task draft'); expect(f.p.error.value).toBe('Unrelated error');
+    expect(f.p.pendingResponses[f.a.id]).toBeUndefined();
+  });
+});
+
 describe('M02: notification badge snapshot boundaries', () => {
   for (const withSequence of [true, false]) it(`keeps new arrivals during an auto-read (${withSequence ? 'sequenced' : 'legacy'})`, async () => {
     const p = setup(), a = task(), receipt = deferred();

@@ -151,6 +151,7 @@ describe('A03: native acceptance and attachment retention', () => {
     vi.spyOn(desktop as any, 'ready').mockResolvedValue(undefined); vi.spyOn(desktop as any, 'follow').mockResolvedValue(undefined);
     vi.spyOn(desktop as any, 'snapshot').mockReturnValue({ id: f.taskId, epoch: 'fixture', busy: false, messages: [], requests: [] });
     (desktop as any).current = { id: f.taskId, owner: 'fixture', state: {} };
+    (desktop as any).followed.set(f.taskId, (desktop as any).current);
     const native = vi.spyOn(NativeIpc.prototype, 'request').mockResolvedValue({ resultType: 'error' });
     const requestId = await f.submit({ method: 'send', params: { id: f.taskId, epoch: 'fixture', text: 'fixture', attachmentIds: [id] } }); await f.state.queue;
     expect(f.frames.find(frame => frame.id === requestId)?.error.code).toBe('CLIENT_REJECTED');

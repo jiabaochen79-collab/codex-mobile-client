@@ -263,7 +263,7 @@ export class Agent {
         else if (command.method === 'upload.complete') result = await this.uploads.complete(command.params.attachmentId, sessionId, authorize);
         else if (command.method === 'upload.remove') result = this.uploads.remove(command.params.attachmentId, sessionId);
         else if (command.method === 'queue.list') result = { queued: this.sends.list(command.params.id) };
-        else if (command.method === 'command.status') result = this.store.commandStatus(command.params.requestId, sessionId, command.params.id);
+        else if (command.method === 'command.status') result = this.store.commandStatus(command.params.requestId, sessionId, command.params.id, () => this.options.adapter.commandAccepted?.(command.params.id, command.params.requestId) === true);
         else if (command.method === 'read') {
           const snapshot = await this.options.adapter.execute({ ...command, params: { ...command.params, ifRevision: undefined } }, frame.id) as Snapshot;
           result = snapshotResponse({ ...snapshot, queued: this.sends.list(command.params.id) }, command.params.ifRevision);

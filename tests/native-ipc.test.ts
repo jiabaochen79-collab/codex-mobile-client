@@ -24,6 +24,12 @@ describe('native IPC transport', () => {
     await start((socket, m) => socket.write(frame(m.method === 'initialize' ? { type: 'response', requestId: m.requestId, resultType: 'success', result: { clientId: 'fixture' } } : { type: 'response', requestId: m.requestId, resultType: 'error', error: { code: 'PERMISSION_DENIED', message: 'workspace is read-only; token=fixture-secret\nprivate details' } })));
     await expect(client.request('write', {})).rejects.toMatchObject({ code: 'CLIENT_DENIED', message: '电脑客户端拒绝操作：workspace is read-only; token=[redacted]' });
   });
+  it.each(['thread-follower-start-turn', 'thread-follower-steer-turn'])('does not classify a %s handler timeout as rejection', async method => {
+    await start((socket, m) => socket.write(frame(m.method === 'initialize'
+      ? { type: 'response', requestId: m.requestId, resultType: 'success', result: { clientId: 'fixture' } }
+      : { type: 'response', requestId: m.requestId, resultType: 'error', handledByClientId: 'owner', error: m.method + '-timeout' })));
+    await expect(client.request(method, {})).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+  });
   it('does not claim it can handle requests for the desktop client', async () => {
     let response: any;
     await start((socket, m) => { if (m.method === 'initialize') socket.write(frame({ type: 'response', requestId: m.requestId, resultType: 'success', result: { clientId: 'fixture' } })); else response = m; });

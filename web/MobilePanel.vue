@@ -53,8 +53,18 @@ let readFailures = 0; let readRetry: ReturnType<typeof setTimeout> | undefined;
 const taskSynced = ref(false);
 type PendingSend = { requestId: string; text: string; message: string; attachments: Attachment[]; goal?: boolean };
 const pendingSends = reactive<Record<string, PendingSend>>({});
+type PendingResponse = { requestId: string; interactionId: string | number; questionKeys: string[] };
+const pendingResponses = reactive<Record<string, PendingResponse>>({});
 const checkingSend = ref(false);
 function pendingSendKey(id: string) { return `pending-send:${props.deviceId}:${id}`; }
+function pendingResponseKey(id: string) { return `pending-response:${props.deviceId}:${id}`; }
+function storedPendingResponse(value: string | null): PendingResponse | undefined {
+  try {
+    const row = JSON.parse(value ?? 'null');
+    if (!row || row.outcome || !/^[a-f0-9-]{36}$/.test(row.requestId) || !(typeof row.interactionId === 'string' && row.interactionId.length <= 2000 || Number.isSafeInteger(row.interactionId)) || !Array.isArray(row.questionKeys) || row.questionKeys.length > 20 || row.questionKeys.some((key: unknown) => typeof key !== 'string' || key.length > 4000)) return;
+    return { requestId: row.requestId, interactionId: row.interactionId, questionKeys: row.questionKeys };
+  } catch { return; }
+}
 function storedPendingSend(value: string | null): PendingSend | undefined {
   try {
     const row = JSON.parse(value ?? 'null') as PendingSend & { outcome?: string };
@@ -68,11 +78,14 @@ try {
   for (const [id, row] of Object.entries(legacy)) if (/^[a-f0-9-]{36}$/.test(id) && storedPendingSend(JSON.stringify(row)) && localStorage.getItem(pendingSendKey(id)) === null) localStorage.setItem(pendingSendKey(id), JSON.stringify(row));
   localStorage.removeItem(legacyKey); sessionStorage.removeItem(legacyKey);
   for (let index = 0; index < localStorage.length; index++) {
+    const responseKey = localStorage.key(index), prefix = `pending-response:${props.deviceId}:`;
+    if (responseKey?.startsWith(prefix)) { const id = responseKey.slice(prefix.length), row = storedPendingResponse(localStorage.getItem(responseKey)); if (/^[a-f0-9-]{36}$/.test(id) && row) pendingResponses[id] = row; }
     const key = localStorage.key(index); const id = key?.startsWith(`pending-send:${props.deviceId}:`) ? key.slice(`pending-send:${props.deviceId}:`.length) : '';
     const row = key && storedPendingSend(localStorage.getItem(key)); if (/^[a-f0-9-]{36}$/.test(id) && row) pendingSends[id] = row;
   }
 } catch {}
 const pendingSend = computed(() => selected.value ? pendingSends[selected.value.id] : undefined);
+const pendingResponse = computed(() => selected.value ? pendingResponses[selected.value.id] : undefined);
 const modeSynced = ref(false); const modeChanging = ref(false); let modeSyncCycle = 0;
 const goalDrafts = reactive(new Set<string>());
 try { const saved = JSON.parse(sessionStorage.getItem('goal-drafts:' + props.deviceId) ?? '[]'); if (Array.isArray(saved)) for (const id of saved) if (typeof id === 'string' && /^[a-f0-9-]{36}$/.test(id)) goalDrafts.add(id); } catch {}
@@ -406,7 +419,13 @@ function openSocket() {
       if (firstStatus || becameReady) { void refreshNotificationBadge(); void openNotificationFromUrl(); void reconcileSends(); }
       firstStatus = false;
     } else if (m.type === 'result') {
-      const p = pending.get(m.id); if (!p) { const attempt = Object.entries(pendingSends).find(([, value]) => value.requestId === m.id); if (attempt && !['OUTCOME_UNKNOWN', 'INTERNAL'].includes(m.error?.code)) settleSend(attempt[0], attempt[1], m.error); return; } pending.delete(m.id); clearTimeout(p.timer);
+      const p = pending.get(m.id); if (!p) {
+        if (!['OUTCOME_UNKNOWN', 'INTERNAL'].includes(m.error?.code)) {
+          const attempt = Object.entries(pendingSends).find(([, value]) => value.requestId === m.id); if (attempt) settleSend(attempt[0], attempt[1], m.error);
+          const response = Object.entries(pendingResponses).find(([, value]) => value.requestId === m.id); if (response) settleResponse(response[0], response[1], m.error);
+        }
+        return;
+      } pending.delete(m.id); clearTimeout(p.timer);
       if (m.error) p.reject(Object.assign(new Error(m.error.message), { code: m.error.code })); else p.resolve(m.result);
     } else if (m.type === 'notification-read' && m.deviceId === props.deviceId) {
       notificationReadRevision++;
@@ -682,6 +701,15 @@ function clearPendingSend(id: string, attempt: PendingSend, outcome: 'succeeded'
   delete pendingSends[id]; try { savePendingSends(); } catch {}
 }
 function syncPendingSend(event: StorageEvent) {
+  const responsePrefix = `pending-response:${props.deviceId}:`;
+  if (event.key?.startsWith(responsePrefix)) {
+    const id = event.key.slice(responsePrefix.length); if (!/^[a-f0-9-]{36}$/.test(id)) return;
+    if (event.newValue === null) { delete pendingResponses[id]; return; }
+    const saved = storedPendingResponse(event.newValue);
+    if (saved) pendingResponses[id] = saved;
+    else try { const row = JSON.parse(event.newValue), attempt = pendingResponses[id]; if (attempt?.requestId === row?.requestId && ['succeeded', 'failed'].includes(row.outcome)) settleResponse(id, attempt, row.outcome === 'failed' ? { message: '电脑端未接受操作，请核对原问题后重试。' } : undefined); } catch {}
+    return;
+  }
   const prefix = `pending-send:${props.deviceId}:`; if (!event.key?.startsWith(prefix)) return;
   const id = event.key.slice(prefix.length); if (!/^[a-f0-9-]{36}$/.test(id)) return;
   if (event.newValue === null) { delete pendingSends[id]; return; }
@@ -706,6 +734,15 @@ function settleSend(id: string, attempt: PendingSend, failure?: { message: strin
   const awaiting = pending.get(attempt.requestId);
   if (awaiting) { pending.delete(attempt.requestId); clearTimeout(awaiting.timer); if (failure) awaiting.reject(Object.assign(new Error(failure.message), { code: 'SEND_REJECTED' })); else awaiting.resolve({ accepted: true }); }
 }
+function settleResponse(id: string, attempt: PendingResponse, failure?: { message: string }) {
+  if (pendingResponses[id]?.requestId !== attempt.requestId) return;
+  if (!failure && selected.value?.id === id) for (const key of attempt.questionKeys) { delete answers.value[key]; delete answerModes[key]; delete customAnswers[key]; }
+  if (failure && active.value && selected.value?.id === id) error.value = failure.message;
+  try { const saved = JSON.parse(localStorage.getItem(pendingResponseKey(id)) ?? 'null'); if (saved?.requestId === attempt.requestId) localStorage.setItem(pendingResponseKey(id), JSON.stringify({ requestId: attempt.requestId, outcome: failure ? 'failed' : 'succeeded' })); } catch {}
+  delete pendingResponses[id];
+  const awaiting = pending.get(attempt.requestId);
+  if (awaiting) { pending.delete(attempt.requestId); clearTimeout(awaiting.timer); if (failure) awaiting.reject(Object.assign(new Error(failure.message), { code: 'CLIENT_REJECTED' })); else awaiting.resolve({ accepted: true }); }
+}
 async function reconcileSends() {
   if (checkingSend.value || !connected.value || !status.value.online || !status.value.enabled || !hasCapability('command-status')) return;
   checkingSend.value = true;
@@ -714,6 +751,11 @@ async function reconcileSends() {
       const result = await request({ method: 'command.status', params: { id, requestId: attempt.requestId } });
       if (result.state === 'succeeded') settleSend(id, attempt);
       else if (result.state === 'failed' && result.error?.message) settleSend(id, attempt, result.error);
+    }
+    for (const [id, attempt] of Object.entries(pendingResponses)) {
+      const result = await request({ method: 'command.status', params: { id, requestId: attempt.requestId } });
+      if (result.state === 'succeeded') settleResponse(id, attempt);
+      else if (result.state === 'failed' && result.error?.message) settleResponse(id, attempt, result.error);
     }
   } catch {} finally { checkingSend.value = false; }
 }
@@ -733,6 +775,7 @@ async function perform(command: Command) {
   busy.value = true; error.value = '';
   const requestId = crypto.randomUUID();
   let sendAttempt: PendingSend | undefined;
+  let responseAttempt: PendingResponse | undefined;
   try {
     if (command.method === 'send') {
       const saved = storedPendingSend(localStorage.getItem(pendingSendKey(command.params.id)));
@@ -742,14 +785,24 @@ async function perform(command: Command) {
       try { savePendingSends(command.params.id); }
       catch { throw new Error('无法保存发送确认记录，本次未发送。草稿和附件已保留，请检查浏览器存储权限或释放空间，恢复后再次点击发送。'); }
     }
+    if (command.method === 'respond') {
+      const saved = storedPendingResponse(localStorage.getItem(pendingResponseKey(command.params.id)));
+      if (saved) { pendingResponses[command.params.id] = saved; return false; }
+      responseAttempt = { requestId, interactionId: command.params.requestId, questionKeys: Object.keys(command.params.answers ?? {}).map(key => JSON.stringify([command.params.requestId, key])) };
+      pendingResponses[command.params.id] = responseAttempt;
+      try { localStorage.setItem(pendingResponseKey(command.params.id), JSON.stringify(responseAttempt)); }
+      catch { throw new Error('无法保存操作确认记录，本次未提交，请检查浏览器存储权限后重试。'); }
+    }
     const result = await request(command, requestId);
     if (command.method === 'goal.pause' && result.accepted && snapshot.value?.id === command.params.id) snapshot.value.goal = result.goal;
     if (command.method === 'send' && sendAttempt) settleSend(command.params.id, sendAttempt);
+    if (command.method === 'respond' && responseAttempt) settleResponse(command.params.id, responseAttempt);
     return true;
   }
   catch (e: any) {
     if (command.method === 'send' && ['OUTCOME_UNKNOWN', 'INTERNAL'].includes(e.code)) { const attempt = pendingSends[command.params.id]; if (attempt?.requestId === requestId) { attempt.message = '发送结果待核对，内容已保留，不会自动重发。'; try { savePendingSends(command.params.id); } catch {} } }
-    else { if (command.method === 'send' && pendingSends[command.params.id]?.requestId === requestId) clearPendingSend(command.params.id, pendingSends[command.params.id], 'failed'); if (active.value && (!('id' in command.params) || selected.value?.id === command.params.id)) error.value = e.message; }
+    else if (command.method === 'respond' && ['OUTCOME_UNKNOWN', 'INTERNAL'].includes(e.code)) { /* Query the original operation; never submit the answer again automatically. */ }
+    else { if (command.method === 'send' && pendingSends[command.params.id]?.requestId === requestId) clearPendingSend(command.params.id, pendingSends[command.params.id], 'failed'); if (command.method === 'respond' && responseAttempt) settleResponse(command.params.id, responseAttempt, e); if (active.value && (!('id' in command.params) || selected.value?.id === command.params.id)) error.value = e.message; }
     return false;
   }
   finally { busy.value = false; await read(); }
@@ -775,9 +828,8 @@ function composerPointerdown(event: PointerEvent) {
 async function stop() { sendMenu.value = false; const s = snapshot.value; if (s?.turnId) await perform({ method: 'stop', params: { id: s.id, turnId: s.turnId, epoch: s.epoch } }); }
 async function pauseGoal() { const s = snapshot.value; if (s?.goal && canPauseGoal.value) await perform({ method: 'goal.pause', params: { id: s.id, epoch: s.epoch, revision: s.goal.revision } }); }
 async function respond(r: Interaction, decision?: 'accept' | 'decline') {
-  const s = snapshot.value; if (!s) return;
-  const accepted = await perform({ method: 'respond', params: { id: s.id, requestId: r.id, epoch: s.epoch, ...(decision ? { decision } : { answers: Object.fromEntries((r.questions ?? []).map(q => [q.id, [answers.value[answerKey(r, q)] ?? '']])) }) } });
-  if (accepted && !decision && selected.value?.id === s.id) for (const question of r.questions ?? []) { delete answers.value[answerKey(r, question)]; delete answerModes[answerKey(r, question)]; }
+  const s = snapshot.value; if (!s || busy.value || pendingResponses[s.id]) return;
+  await perform({ method: 'respond', params: { id: s.id, requestId: r.id, epoch: s.epoch, ...(decision ? { decision } : { answers: Object.fromEntries((r.questions ?? []).map(q => [q.id, [answers.value[answerKey(r, q)] ?? '']])) }) } });
 }
 const customAnswerMode = 'custom';
 function answerKey(request: Interaction, question: NonNullable<Interaction['questions']>[number]) { return JSON.stringify([request.id, question.id]); }
@@ -1041,6 +1093,7 @@ onActivated(async () => {
   window.addEventListener('pointerdown', composerPointerdown, true);
   window.addEventListener('storage', syncPendingSend);
   for (const id of Object.keys(pendingSends)) syncPendingSend({ key: pendingSendKey(id), newValue: localStorage.getItem(pendingSendKey(id)) } as StorageEvent);
+  for (const id of Object.keys(pendingResponses)) syncPendingSend({ key: pendingResponseKey(id), newValue: localStorage.getItem(pendingResponseKey(id)) } as StorageEvent);
   document.addEventListener('visibilitychange', foreground); void refreshNotificationBadge(); void openNotificationFromUrl(); poll = setInterval(() => { if (document.visibilityState === 'visible') {if(selected.value)void read();if(listVisible.value)void refreshActivity();void reconcileSends();} }, 10000);
   navigationPoll = setInterval(() => { if (document.visibilityState === 'visible' && listVisible.value) void loadNavigation(); }, 15000);
 });
@@ -1127,8 +1180,9 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
           <section v-for="r in snapshot?.requests ?? []" :key="r.id" class="approval" :data-scroll-key="`approval:${r.id}`">
             <h2>{{ r.title }}</h2><pre v-if="r.detail && r.kind !== 'plan'">{{ r.detail }}</pre>
             <PlanRequest v-if="r.kind === 'plan'" :key="`${selected.id}:${r.plan?.revision}`" :request="r" :conversation-id="selected.id" :device-id="deviceId" :supported="hasCapability('plan-implementation')" :disabled="busy || !modeReady || !canControl || !hasCapability('plan-implementation') || !!snapshot?.busy || !!queuedMessages.length || snapshot?.settings?.mode !== 'plan'" @submit="(action, feedback) => respondPlan(r, action, feedback)" @resized="queueResized"/>
-            <div v-else-if="r.kind === 'input'" class="questions"><div v-for="q in r.questions" :key="q.id"><label :for="questionId(r, q)">{{ q.question }}</label><select v-if="q.options.length" :id="questionId(r, q)" :value="answerModes[answerKey(r, q)] ?? ''" @change="chooseAnswer(r, q, $event)"><option value="">请选择</option><option v-for="(o, index) in q.options" :key="o.label" :value="String(index)">{{ o.label }}</option><option :value="customAnswerMode">其他（手动输入）</option></select><input v-if="!q.options.length || answerModes[answerKey(r, q)] === customAnswerMode" :id="q.options.length ? `${questionId(r, q)}-custom` : questionId(r, q)" v-model="answers[answerKey(r, q)]" class="custom-answer" :aria-label="q.options.length ? `${q.question}：其他` : undefined" :placeholder="q.options.length ? '请输入其他回答' : '请输入回答'" maxlength="4000"></div><button class="button primary" :disabled="busy || !canApprove || !answersComplete(r)" @click="respond(r)">提交</button></div><div v-else-if="r.kind !== 'unsupported'" class="approval-actions"><button class="button" :disabled="busy || !canDecline" @click="respond(r, 'decline')"><X :size="16"/>拒绝</button><button class="button primary" :disabled="busy || !canApprove" @click="respond(r, 'accept')"><Check :size="16"/>允许本次</button></div>
+            <div v-else-if="r.kind === 'input'" class="questions"><div v-for="q in r.questions" :key="q.id"><label :for="questionId(r, q)">{{ q.question }}</label><select v-if="q.options.length" :disabled="busy || !!pendingResponse" :id="questionId(r, q)" :value="answerModes[answerKey(r, q)] ?? ''" @change="chooseAnswer(r, q, $event)"><option value="">请选择</option><option v-for="(o, index) in q.options" :key="o.label" :value="String(index)">{{ o.label }}</option><option :value="customAnswerMode">其他（手动输入）</option></select><input v-if="!q.options.length || answerModes[answerKey(r, q)] === customAnswerMode" :id="q.options.length ? `${questionId(r, q)}-custom` : questionId(r, q)" v-model="answers[answerKey(r, q)]" :disabled="busy || !!pendingResponse" class="custom-answer" :aria-label="q.options.length ? `${q.question}：其他` : undefined" :placeholder="q.options.length ? '请输入其他回答' : '请输入回答'" maxlength="4000"></div><button class="button primary" :disabled="busy || !!pendingResponse || !canApprove || !answersComplete(r)" @click="respond(r)">提交</button></div><div v-else-if="r.kind !== 'unsupported'" class="approval-actions"><button class="button" :disabled="busy || !!pendingResponse || !canDecline" @click="respond(r, 'decline')"><X :size="16"/>拒绝</button><button class="button primary" :disabled="busy || !!pendingResponse || !canApprove" @click="respond(r, 'accept')"><Check :size="16"/>允许本次</button></div>
           </section>
+          <p v-if="pendingResponse" class="response-confirmation" role="status">{{ pendingResponse.questionKeys.length ? '回答结果正在核对，请勿重复提交。' : '操作结果正在核对，请勿重复提交。' }}<button type="button" class="text-button" :disabled="checkingSend || !connected || !status.online || !hasCapability('command-status')" @click="reconcileSends">核对结果</button><small v-if="!hasCapability('command-status')">更新电脑助手后可自动核对。</small></p>
         </div></div><button v-if="chatScroll.awayFromBottom.value" class="jump-to-bottom" title="回到最新消息" @click="chatScroll.toBottom"><ArrowDown :size="19"/></button></div>
         <form class="composer compact-composer" @submit.prevent="sendFromButton()">
           <div v-if="pendingSend" class="send-confirmation" role="status"><span>{{ pendingSend.message }}</span><div><button type="button" class="text-button" :disabled="busy || checkingSend || !connected || !status.online || !hasCapability('command-status')" @click="reconcileSends"><RefreshCw :size="14"/>核对发送结果</button><button type="button" class="text-button" :disabled="busy" @click="keepUnconfirmedDraft">已核对，保留为草稿</button></div><small v-if="!hasCapability('command-status')">更新电脑助手后可自动核对。</small></div>
@@ -1161,6 +1215,7 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
 .plan-chip{display:flex;align-items:center;gap:3px;flex:0 0 auto;height:32px;align-self:flex-end;margin-bottom:6px;padding:0 3px 0 6px;border-radius:6px;background:#edf3ee;color:#436b4a;font-size:12px;white-space:nowrap}.plan-chip-close{display:flex;align-items:center;justify-content:center;min-width:24px;height:30px;padding:0;border:0;background:none;color:inherit}.plan-chip-close:hover{background:#dde9df}.plan-chip svg{flex-shrink:0}.connection-versions{display:grid;gap:3px;padding:6px 10px 10px;font-size:11px;color:#63767e;overflow-wrap:anywhere}
 .plan-source span{min-width:0}.plan-source strong{font-weight:400}.plan-source small{display:block;font-size:12px;color:#697a83;white-space:normal;overflow-wrap:anywhere}.attachment-picker .compatibility-notice{padding:7px 4px}
 .questions .custom-answer{margin-top:8px}
+.response-confirmation{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;font-size:12px;line-height:1.5;color:#63767e;overflow-wrap:anywhere}.response-confirmation .text-button{padding:3px 0;font-size:12px}
 .search-task-title{display:flex;gap:9px;align-items:center;min-width:0}.search-task-title>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .attachment-strip{display:flex;gap:8px;overflow:auto;padding:0 0 8px}.pending-attachment{display:flex;align-items:center;gap:8px;flex:0 0 250px;min-width:0;border:1px solid #dbe4e7;border-radius:6px;padding:7px;background:#fafcfc}.pending-attachment>img{width:34px;height:34px;object-fit:contain}.pending-attachment>div{flex:1;min-width:0}.pending-attachment strong{display:block;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pending-attachment small{display:block;font-size:10px;color:#688279;overflow-wrap:anywhere}.pending-attachment small.warning{color:#ae593f}.pending-attachment .icon-button{width:28px;height:30px;flex-basis:28px}
 .composer-field .attach-button{align-self:end;height:44px;width:32px;flex-basis:32px}.terminal-row{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #e1e7ea}.terminal-row span{flex:1;font-size:13px;overflow-wrap:anywhere}.terminal-row small{font-size:11px;color:#6e827b}.settings-backdrop{z-index:40!important}

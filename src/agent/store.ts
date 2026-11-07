@@ -139,11 +139,18 @@ export class AgentStore {
       catch (error: any) { if (error.code === 'ENOENT') { this.db.prepare('DELETE FROM notification_cursors WHERE path=?').run(row.path); this.db.prepare('DELETE FROM notification_baselines WHERE path=?').run(row.path); } }
     }
   }
-  commandStatus(id: string, session: string, conversation: string) {
+  commandStatus(id: string, session: string, conversation: string, accepted?: () => boolean) {
     const row = this.db.prepare('SELECT result FROM commands WHERE id=? AND session=? AND conversation=?').get(id, session, conversation);
     if (!row) return { state: 'unknown' };
-    if (!row.result) return { state: this.runningCommands.has(id) ? 'pending' : 'unknown' };
-    const saved = JSON.parse(row.result as string);
+    if (this.runningCommands.has(id)) return { state: 'pending' };
+    const saved = row.result ? JSON.parse(row.result as string) : {};
+    const uncertain = !row.result || ['OUTCOME_UNKNOWN', 'INTERNAL'].includes(saved.error?.code)
+      || saved.error?.code === 'CLIENT_REJECTED' && /(?:^|：)thread-follower-(?:start|steer)-turn-timeout$/.test(saved.error.message);
+    if (uncertain && accepted?.()) {
+      this.db.prepare('UPDATE commands SET result=? WHERE id=? AND session=? AND conversation=?').run(JSON.stringify({ result: { accepted: true } }), id, session, conversation);
+      return { state: 'succeeded' };
+    }
+    if (!row.result) return { state: 'unknown' };
     if (['OUTCOME_UNKNOWN', 'INTERNAL'].includes(saved.error?.code)) return { state: 'unknown' };
     return saved.error ? { state: 'failed', error: saved.error } : { state: 'succeeded' };
   }

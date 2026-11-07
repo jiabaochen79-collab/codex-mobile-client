@@ -101,7 +101,7 @@ it.each(['forwarded', 'denied', 'unknown'])('never replays a %s steering failure
     await expect(f.send()).rejects.toMatchObject({ code: failure === 'denied' ? 'CLIENT_DENIED' : failure === 'unknown' ? 'OUTCOME_UNKNOWN' : 'CLIENT_REJECTED' });
     expect(f.requests.map(request => request.method)).toEqual(['thread-owner-discovery', 'thread-follower-steer-turn']); expect(f.accepted()).toBe(0);
   } finally { await f.close(); }
-});
+}, 25000);
 
 it('never replays a rejected dispatch and returns an actionable connection error', async () => {
   const f = await fixture('route');

@@ -24,6 +24,7 @@ function fixture() {
   vi.spyOn(adapter as any, 'follow').mockResolvedValue(undefined);
   vi.spyOn(adapter as any, 'snapshot').mockImplementation(() => normalizeSnapshot(value, 'epoch'));
   Reflect.set(adapter, 'current', { id: value.id, owner: 'desktop-owner', state: value, revision: 1 });
+  Reflect.get(adapter, 'followed').set(value.id, Reflect.get(adapter, 'current'));
   const ipc = vi.spyOn(NativeIpc.prototype, 'request').mockImplementation(async () => {
     value.threadGoal.status = 'paused'; return { result: { ok: true } };
   });

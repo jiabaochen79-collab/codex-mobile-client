@@ -2,6 +2,18 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.61 - 2026-11-07
+
+### Fixed
+
+- Confirm sent messages using their exact native client IDs when desktop acknowledgements time out. Keep uncertain operations pending without resending; preserve genuine rejections.
+- Confirm accepted question answers independently of desktop card cleanup, and reconcile delayed results after reconnecting or reloading the mobile page.
+
+### 中文
+
+- 修复消息已经发出却提示“客户端拒绝”的问题，按原消息唯一 ID 核对接收结果；未确认时继续核对，不自动重发，真实拒绝仍显示原因。
+- 修复问题已回答却因电脑卡片关闭延迟而误报失败的问题。手机重连或刷新后继续核对原回答，确认期间防止重复提交。
+
 ## 0.4.60 - 2026-10-28
 
 ### Fixed

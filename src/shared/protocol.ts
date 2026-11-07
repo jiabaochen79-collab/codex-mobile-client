@@ -96,6 +96,7 @@ export type Snapshot = { id: string; title: string; epoch: string; turnId: strin
 export interface DesktopAdapter {
   desktopProcess?(): DesktopProcess | null | undefined;
   hasConversation?(id: string): boolean | undefined;
+  commandAccepted?(id: string, commandId: string): boolean;
   updateBlockers?(): Promise<string[]>;
   notificationSources?(taskIds?: string[]): Promise<{ id: string; path: string }[]>;
   notificationSnapshot?(taskId: string): Promise<import('./notifications.js').DecisionSnapshot>;

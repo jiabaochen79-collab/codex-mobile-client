@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -45,5 +45,36 @@ describe('durable command confirmation', () => {
     expect(store.commandStatus(id, session, task)).toEqual({ state: 'unknown' });
     await expect(store.once(id, command, async () => { performed++; }, session)).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
     expect(performed).toBe(1);
+  });
+  it('persists a late native receipt without replaying the command or crossing authorization boundaries', async () => {
+    store = new AgentStore(dir);
+    const task = randomUUID(), session = randomUUID(), id = randomUUID();
+    const command: Command = { method: 'send', params: { id: task, text: 'fixture', epoch: 'fixture' } };
+    await expect(store.once(id, command, async () => { throw new RemoteError('OUTCOME_UNKNOWN', 'confirmation delayed'); }, session)).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+    const receipt = vi.fn(() => true);
+    expect(store.commandStatus(id, randomUUID(), task, receipt)).toEqual({ state: 'unknown' });
+    expect(store.commandStatus(id, session, randomUUID(), receipt)).toEqual({ state: 'unknown' });
+    expect(store.commandStatus(randomUUID(), session, task, receipt)).toEqual({ state: 'unknown' });
+    expect(receipt).not.toHaveBeenCalled();
+    expect(store.commandStatus(id, session, task, () => false)).toEqual({ state: 'unknown' });
+    expect(store.commandStatus(id, session, task, receipt)).toEqual({ state: 'succeeded' });
+    store.close(); store = new AgentStore(dir);
+    expect(store.commandStatus(id, session, task)).toEqual({ state: 'succeeded' });
+    await expect(store.once(id, command, async () => { throw new Error('must not resend'); }, session)).resolves.toEqual({ accepted: true });
+  });
+  it.each(['CLIENT_DENIED', 'BUSY', 'CLIENT_REJECTED'])('does not replace a definite %s failure with a receipt check', async code => {
+    store = new AgentStore(dir);
+    const task = randomUUID(), session = randomUUID(), id = randomUUID();
+    await expect(store.once(id, { method: 'send', params: { id: task, text: 'fixture', epoch: 'fixture' } }, async () => { throw new RemoteError(code, 'explicit rejection'); }, session)).rejects.toMatchObject({ code });
+    const receipt = vi.fn(() => true);
+    expect(store.commandStatus(id, session, task, receipt)).toEqual({ state: 'failed', error: { code, message: 'explicit rejection' } });
+    expect(receipt).not.toHaveBeenCalled();
+  });
+  it('repairs only legacy timeout rejections when the exact native receipt exists', async () => {
+    store = new AgentStore(dir);
+    const task = randomUUID(), session = randomUUID(), id = randomUUID();
+    await expect(store.once(id, { method: 'send', params: { id: task, text: 'fixture', epoch: 'fixture' } }, async () => { throw new RemoteError('CLIENT_REJECTED', '电脑客户端拒绝操作：thread-follower-start-turn-timeout'); }, session)).rejects.toMatchObject({ code: 'CLIENT_REJECTED' });
+    expect(store.commandStatus(id, session, task, () => false)).toMatchObject({ state: 'failed' });
+    expect(store.commandStatus(id, session, task, () => true)).toEqual({ state: 'succeeded' });
   });
 });
