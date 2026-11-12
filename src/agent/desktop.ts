@@ -11,7 +11,7 @@ import { IpcRoutingError, NativeIpc, unusedHistoryOutput } from './ipc.js';
 import { DesktopCompatibility, assessProtocols, type DesktopContract } from './compatibility.js';
 import { normalizeProjectPath, projectForConversation, type IndexedProject } from './projects.js';
 import { collaborationMode, desktopModels, threadSettings, validateModel } from './models.js';
-import { DesktopActivity, DesktopRuntimeActivity, runtimeRunning } from './activity.js';
+import { DesktopActivity, DesktopRuntimeActivity, rolloutPath, runtimeRunning } from './activity.js';
 import { errorText } from './error-text.js';
 import { ConversationImages, markdownImages, userImageContent } from './images.js';
 import { snapshotResponse } from './snapshot-response.js';
@@ -339,7 +339,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (!existsSync(file)) throw new RemoteError('UNSUPPORTED', '未找到此版本的会话索引。');
     // Only metadata is read. The original database is never migrated or written.
     const db = new DatabaseSync(file, { readOnly: true });
-    db.function('remote_rollout_exists', file => typeof file === 'string' && !win32.normalize(file).toLowerCase().split(win32.sep).includes('archived_sessions') && existsSync(file) ? 1 : 0);
+    db.function('remote_rollout_exists', file => rolloutPath(file) ? 1 : 0);
     return db;
   }
   private async projects(refresh = false): Promise<IndexedProject[]> {
@@ -379,7 +379,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     try {
       const row = db.prepare("SELECT rollout_path FROM threads WHERE id=? AND archived=0 AND source='vscode'").get(id);
       if (!row || typeof row.rollout_path === 'string' && win32.normalize(row.rollout_path).toLowerCase().split(win32.sep).includes('archived_sessions')) throw new RemoteError('NOT_FOUND', '会话已归档或删除，已从列表移除。');
-      if (typeof row.rollout_path !== 'string' || !existsSync(row.rollout_path)) throw new RemoteError('CLIENT_UNAVAILABLE', '任务记录正在恢复，请稍后重试。');
+      if (!rolloutPath(row.rollout_path)) throw new RemoteError('CLIENT_UNAVAILABLE', '任务记录正在恢复，请稍后重试。');
     }
     finally { db.close(); }
   }

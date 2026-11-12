@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { zstdCompressSync } from 'node:zlib';
 import { CodexDesktop } from '../src/agent/desktop.js';
 import { normalizeProjectPath, projectForConversation, type IndexedProject } from '../src/agent/projects.js';
 import { commandSchema } from '../src/shared/protocol.js';
@@ -13,6 +14,36 @@ const projects: IndexedProject[] = [
 let directory: string | undefined;
 afterEach(() => { if (directory) rmSync(directory, { recursive: true, force: true }); directory = undefined; });
 describe('project navigation', () => {
+  it('keeps compressed desktop sessions in project counts, pages, search and reads', async () => {
+    directory = mkdtempSync(join(tmpdir(), 'remote-compressed-project-'));
+    const db = new DatabaseSync(join(directory, 'state_5.sqlite'));
+    db.exec('CREATE TABLE threads(id TEXT,name TEXT,title TEXT,cwd TEXT,updated_at_ms INTEGER,updated_at INTEGER,archived INTEGER,source TEXT,project_id TEXT,rollout_path TEXT); CREATE TABLE projects(id TEXT,name TEXT); CREATE TABLE project_roots(project_id TEXT,path TEXT)');
+    const file = join(directory, 'history.jsonl');
+    writeFileSync(file + '.zst', zstdCompressSync(Buffer.from(JSON.stringify({ type: 'event_msg', timestamp: '2026-11-12T00:00:00Z', payload: { type: 'task_complete', turn_id: 'old-turn' } }) + '\n')));
+    const insert = db.prepare("INSERT INTO threads VALUES(?,NULL,?,'E:/work/app',?,0,0,'vscode',NULL,?)");
+    for (let i = 0; i < 35; i++) insert.run('task-' + i, 'Compressed task ' + i, i, file);
+    const archived = join(directory, 'archived_sessions', 'old.jsonl'); mkdirSync(join(directory, 'archived_sessions'));
+    writeFileSync(archived + '.zst', zstdCompressSync(Buffer.from('{}\n')));
+    insert.run('moved', 'Hidden archived', 100, archived);
+    insert.run('deleted', 'Hidden deleted', 101, join(directory, 'missing.jsonl'));
+    db.prepare("UPDATE threads SET archived=1 WHERE id='task-0'").run();
+    const adapter = new CodexDesktop('unused', directory);
+    vi.spyOn(adapter as any, 'appTool').mockResolvedValue({ projects: [{ id: 'parent', name: 'Parent', path: 'E:/work/app' }] });
+    try {
+      const first = adapter.list(0, { projectId: 'parent', cursor: 'new' }, projects);
+      expect(first.conversations).toHaveLength(30); expect(first.hasMore).toBe(true);
+      const last = adapter.list(first.nextOffset!, { projectId: 'parent', cursor: first.cursor }, projects);
+      expect(last.conversations).toHaveLength(4); expect(last.hasMore).toBe(false);
+      expect(adapter.list(0, { query: 'Compressed task 1' }, projects).conversations).toHaveLength(11);
+      expect((await (adapter as any).projects(true))[0].count).toBe(34);
+      expect(() => (adapter as any).known('task-1')).not.toThrow();
+      const index = (adapter as any).index();
+      try { expect(await (adapter as any).readyTaskActivity('task-1', index)).toMatchObject({ completionId: 'old-turn:2026-11-12T00:00:00Z' }); }
+      finally { index.close(); }
+      for (const id of ['task-0', 'moved']) expect(() => (adapter as any).known(id)).toThrow(expect.objectContaining({ code: 'NOT_FOUND' }));
+      expect(() => (adapter as any).known('deleted')).toThrow(expect.objectContaining({ code: 'CLIENT_UNAVAILABLE' }));
+    } finally { adapter.close(); db.close(); vi.restoreAllMocks(); }
+  });
   it('paginates a frozen task order even when older tasks move to the top', () => {
     directory = mkdtempSync(join(tmpdir(), 'remote-page-test-'));
     const db = new DatabaseSync(join(directory, 'state_5.sqlite'));

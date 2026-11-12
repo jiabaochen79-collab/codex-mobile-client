@@ -1,7 +1,8 @@
 const { spawnSync } = require('node:child_process');
 const node = process.env.npm_node_execpath || process.execPath;
 const version = spawnSync(node, ['--version'], { encoding: 'utf8', windowsHide: true }).stdout?.trim();
-if (!version || Number(version.slice(1).split('.')[0]) < 22) { console.error('Node.js 22.13+ is required. Run npm using that Node installation.'); process.exit(1); }
+const [major, minor] = (version?.slice(1) ?? '').split('.').map(Number);
+if (!version || major < 22 || major === 22 && minor < 15) { console.error('Node.js 22.15+ is required. Run npm using that Node installation.'); process.exit(1); }
 const ts = (file) => ['--import', 'tsx', file];
 const check = [['node_modules/vue-tsc/bin/vue-tsc.js', '--noEmit'], ['node_modules/typescript/bin/tsc', '--noEmit']];
 const tasks = {

@@ -2,6 +2,16 @@
 
 Dates describe development baselines, not a guarantee that a public binary release exists.
 
+## 0.4.62 - 2026-11-12
+
+### Fixed
+
+- Keep compressed `.jsonl.zst` desktop sessions visible in project counts, conversation pages and search. Read activity metadata asynchronously without expanding files or retaining message bodies.
+
+### 中文
+
+- 修复旧会话压缩为 `.jsonl.zst` 后从项目列表消失、项目数量错误显示为 0 的问题。异步读取活动状态，不解压写回原文件，不保留消息正文。
+
 ## 0.4.61 - 2026-11-07
 
 ### Fixed

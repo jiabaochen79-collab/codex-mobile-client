@@ -2,10 +2,34 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DesktopActivity } from '../src/agent/activity.js';
+import { zstdCompressSync } from 'node:zlib';
+import { DesktopActivity, rolloutPath } from '../src/agent/activity.js';
 import { catalogModels, threadSettings, validateModel } from '../src/agent/models.js';
 describe('task activity and model metadata',()=>{
   let dir:string;beforeEach(()=>{dir=mkdtempSync(join(tmpdir(),'remote-activity-'));});afterEach(()=>rmSync(dir,{recursive:true,force:true}));
+  it('streams compressed history without retaining large message bodies and prefers the resumed plain file', async () => {
+    const file = join(dir, 'compressed.jsonl'), activity = new DesktopActivity(dir);
+    const events = [
+      { type: 'event_msg', timestamp: 'finished', payload: { type: 'task_complete', turn_id: 'done', last_agent_message: '中'.repeat(3 * 1024 * 1024) } },
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'next' } }
+    ];
+    writeFileSync(file + '.zst', zstdCompressSync(Buffer.from(events.map(event => JSON.stringify(event)).join('\n'))));
+    expect(rolloutPath(file)).toBe(file + '.zst');
+    const first = activity.read(file); expect(first.completionId).toBe('');
+    const saved = await activity.readAsync(file);
+    expect(saved).toMatchObject({ completionId: 'done:finished', pending: true });
+    expect(activity.read(file)).toBe(saved);
+    writeFileSync(file, JSON.stringify({ type: 'event_msg', timestamp: 'resumed', payload: { type: 'task_complete', turn_id: 'next' } }) + '\n');
+    expect(rolloutPath(file)).toBe(file);
+    expect(await activity.readAsync(file)).toMatchObject({ completionId: 'next:resumed', pending: false });
+  });
+  it('rejects damaged compressed history and retries after it is replaced', async () => {
+    const file = join(dir, 'damaged.jsonl'), activity = new DesktopActivity(dir);
+    writeFileSync(file + '.zst', 'not zstd');
+    await expect(activity.readAsync(file)).rejects.toThrow();
+    writeFileSync(file + '.zst', zstdCompressSync(Buffer.from(JSON.stringify({ type: 'event_msg', timestamp: 'now', payload: { type: 'task_failed', turn_id: 'failed' } }) + '\n')));
+    expect(await activity.readAsync(file)).toMatchObject({ completionId: 'failed:now', pending: false });
+  });
   it('tracks completion identity without treating unfinished history as live activity',()=>{
     const file=join(dir,'task.jsonl');const activity=new DesktopActivity(dir);
     writeFileSync(file,JSON.stringify({type:'event_msg',payload:{type:'task_started',turn_id:'turn-1'}})+'\n');
