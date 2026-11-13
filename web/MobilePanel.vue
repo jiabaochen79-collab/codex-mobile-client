@@ -184,6 +184,8 @@ const canUse = (feature: string) => !hasCapability('compatibility-checked') || h
 const ownsControl = computed(() => canReach.value && (status.value.control ? status.value.control.role === 'controller' : true));
 const canStop = computed(() => ownsControl.value && canUse('stop-generation'));
 const canPauseGoal = computed(() => ownsControl.value && hasCapability('goal-mode') && snapshot.value?.goal?.status === 'active' && !busy.value);
+const goalActionReason = computed(() => !canReach.value ? connectionLabel.value : !ownsControl.value ? '请升级电脑助手以支持所有终端操作' : !hasCapability('goal-controls') ? '请升级电脑助手以继续或删除目标' : !taskSynced.value ? '目标状态待同步' : busy.value ? '正在处理目标操作' : '');
+const goalResumeReason = computed(() => goalActionReason.value || (!serviceActive.value ? '订阅未开通或已到期' : recoveryActive.value ? '电脑客户端正在恢复' : snapshot.value?.busy ? '请等待当前执行结束后继续目标' : snapshot.value?.requests.length ? '请先处理待确认问题后继续目标' : queuedMessages.value.length || snapshot.value?.nativeQueuedCount ? '请先处理待发送队列后继续目标' : ''));
 const canDecline = computed(() => ownsControl.value && canUse('respond-approval'));
 const canControl = computed(() => canRead.value && !recoveryBusy.value && !recoveryActive.value && (status.value.control ? status.value.control.role === 'controller' : true));
 const canCreate = computed(() => canControl.value && canUse('create-tasks'));
@@ -794,7 +796,7 @@ async function perform(command: Command) {
       catch { throw new Error('无法保存操作确认记录，本次未提交，请检查浏览器存储权限后重试。'); }
     }
     const result = await request(command, requestId);
-    if (command.method === 'goal.pause' && result.accepted && snapshot.value?.id === command.params.id) snapshot.value.goal = result.goal;
+    if ((command.method === 'goal.pause' || command.method === 'goal.resume' || command.method === 'goal.clear') && result.accepted && snapshot.value?.id === command.params.id && snapshot.value.epoch === command.params.epoch && snapshot.value.goal?.revision === command.params.revision) snapshot.value.goal = result.goal;
     if (command.method === 'send' && sendAttempt) settleSend(command.params.id, sendAttempt);
     if (command.method === 'respond' && responseAttempt) settleResponse(command.params.id, responseAttempt);
     return true;
@@ -827,6 +829,7 @@ function composerPointerdown(event: PointerEvent) {
 }
 async function stop() { sendMenu.value = false; const s = snapshot.value; if (s?.turnId) await perform({ method: 'stop', params: { id: s.id, turnId: s.turnId, epoch: s.epoch } }); }
 async function pauseGoal() { const s = snapshot.value; if (s?.goal && canPauseGoal.value) await perform({ method: 'goal.pause', params: { id: s.id, epoch: s.epoch, revision: s.goal.revision } }); }
+async function operateGoal(method: 'goal.resume' | 'goal.clear') { const s = snapshot.value; if (s?.goal && !(method === 'goal.resume' ? goalResumeReason.value : goalActionReason.value)) await perform({ method, params: { id: s.id, epoch: s.epoch, revision: s.goal.revision } }); }
 async function respond(r: Interaction, decision?: 'accept' | 'decline') {
   const s = snapshot.value; if (!s || busy.value || pendingResponses[s.id]) return;
   await perform({ method: 'respond', params: { id: s.id, requestId: r.id, epoch: s.epoch, ...(decision ? { decision } : { answers: Object.fromEntries((r.questions ?? []).map(q => [q.id, [answers.value[answerKey(r, q)] ?? '']])) }) } });
@@ -1139,7 +1142,7 @@ defineExpose({ leaveState: () => ({ busy: busy.value, uploading: attachments.upl
           <div v-if="moreMenu" class="chat-menu"><div class="menu-device"><span :title="status.client?.reason">{{ formattedId }}</span><span :class="canControl ? 'good' : 'warning'">{{ connectionLabel }}</span></div><div class="connection-versions"><span>助手 {{ status.helperVersion ? `v${status.helperVersion}` : '版本未知' }}</span><span>Codex {{ status.client?.version || '版本未知' }}</span></div><button type="button" class="notification-menu-item" @click="openNotifications"><Bell :size="17"/><span>任务提醒</span><span v-if="notificationUnread" class="notification-unread-dot" aria-label="有未读提醒"></span></button><button type="button" class="permission-menu-item" :class="{ full: snapshot?.settings?.permission === 'full' }" @click="openPermissionMenu"><ShieldAlert v-if="snapshot?.settings?.permission === 'full'" :size="17"/><ShieldCheck v-else-if="snapshot?.settings?.permission === 'approve'" :size="17"/><Shield v-else :size="17"/><span><strong>任务权限</strong><small>{{ permissionReason || permissionLabel }}</small></span><ChevronRight :size="16"/></button><button @click="openRecovery"><Monitor :size="17"/>客户端恢复</button><FeedbackButton mode="mobile" :device-id="deviceId" :status="status"/><button :disabled="!canRead" @click="moreMenu = false; retryRead()"><RefreshCw :size="16"/>刷新会话</button><button v-if="hasCapability('multi-terminal')" @click="openTerminals"><MonitorSmartphone :size="17"/>在线终端 {{ status.control?.terminals.length ?? 1 }}</button><button :disabled="!canCreate" @click="newConversation()"><Plus :size="17"/>新建任务</button><button @click="logout"><LogOut :size="16"/>退出登录</button></div>
         </div>
       </header>
-      <TaskGoal v-if="selected && snapshot?.goal && snapshot.goal.status !== 'complete'" :key="selected.id" :goal="snapshot.goal" :synced="taskSynced && canRead" :turn-stopped="!snapshot.busy && snapshot.lastTurnStatus === 'interrupted'" :can-pause="canPauseGoal" @pause="pauseGoal"/>
+        <TaskGoal v-if="selected && snapshot?.goal && snapshot.goal.status !== 'complete'" :key="selected.id" :goal="snapshot.goal" :synced="taskSynced && canRead" :turn-stopped="!snapshot.busy && snapshot.lastTurnStatus === 'interrupted'" :can-pause="canPauseGoal" :action-reason="goalActionReason" :resume-reason="goalResumeReason" @pause="pauseGoal" @resume="operateGoal('goal.resume')" @clear="operateGoal('goal.clear')"/>
       <button v-if="moreMenu" class="chat-menu-scrim" aria-label="关闭菜单" @click="moreMenu = false"></button>
       <div v-if="selected && !canReach" class="chat-status recovery-chat-status" role="status"><span>{{ recoveryActive ? status.client.recovery.reason : connectionLabel }}</span><button v-if="connected && status.online && status.enabled && !status.client?.available" class="text-button" @click="openRecovery">客户端恢复</button></div>
       <div v-else-if="selected && snapshot && canRead && readRecovering" class="chat-status" role="status">正在同步会话</div>

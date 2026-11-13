@@ -18,6 +18,7 @@ import { snapshotResponse } from './snapshot-response.js';
 import { asyncInputReplies, asyncInputAccepted, asyncUserInputRequests, hasPendingInteractions } from './async-user-input.js';
 import { reconcileDesktopQuestion } from './desktop-question.js';
 import { threadGoal } from './goals.js';
+import { operateDesktopGoal } from './desktop-goal.js';
 import { RemoteError, supportsDesktopCommand, uid, type ClientStatus, type Command, type DesktopAdapter, type Snapshot, type Interaction, type Conversation, type Message, type LocalAttachment, type Activity, type PermissionMode } from '../shared/protocol.js';
 
 enablePatches();
@@ -243,7 +244,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       if (!next.processId || !next.version) return { available: false, version: null, reason: '未检测到正在运行的 Codex，请先打开客户端。' };
       if (!next.executablePath || !isAbsolute(next.executablePath)) return { available: false, version, reason: '无法确认客户端安装位置，请使用完整的新版助手安装包。' };
       this.contract = this.compatibility.inspect(next.executablePath); version = this.contract.appVersion;
-      const assessment = assessProtocols(this.contract.protocols, this.contract.goalMode);
+      const assessment = assessProtocols(this.contract.protocols, this.contract.goalMode, this.contract.goalControls);
       const db = this.index(); let anchor: string | undefined;
       try {
         db.prepare('SELECT id,name,title,cwd,updated_at_ms,updated_at,project_id,source,archived,rollout_path FROM threads LIMIT 0').all();
@@ -631,13 +632,45 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       if (!uid.safeParse(result?.threadId).success) throw new RemoteError('OUTCOME_UNKNOWN', '客户端新建任务的返回格式已变化，请先在电脑核对结果，勿重复创建。');
       return result;
     }
-    if (!['read','send','stop','goal.pause','respond','settings.update','mode.update','permissions.update','plan.respond'].includes(command.method)) throw new RemoteError('INVALID', '操作无效。');
+    if (!['read','send','stop','goal.pause','goal.resume','goal.clear','respond','settings.update','mode.update','permissions.update','plan.respond'].includes(command.method)) throw new RemoteError('INVALID', '操作无效。');
     if (command.method === 'queue.list' || command.method === 'queue.remove' || command.method === 'queue.resume') throw new RemoteError('INVALID', '排队操作需要通过助手处理。');
     if (command.method === 'upload.begin' || command.method === 'upload.status' || command.method === 'upload.complete' || command.method === 'upload.remove') throw new RemoteError('INVALID', '操作无效。');
     await this.follow(command.params.id, command.method === 'read' && command.params.activate, authorize);
     if (command.method === 'read') return snapshotResponse(await this.snapshot(command.params.limit, command.params.before), command.params.ifRevision);
     const snap = await this.snapshot();
     if (command.params.epoch !== snap.epoch) throw new RemoteError('STALE', '客户端已重新连接，请刷新会话。');
+    if (command.method === 'goal.resume' || command.method === 'goal.clear') {
+      const original = snap.goal;
+      if (!original || original.status === 'complete' || original.revision !== command.params.revision) throw new RemoteError('STALE', '目标已变化，请重新查看后操作。');
+      if (command.method === 'goal.resume') {
+        if (!['paused', 'blocked', 'usageLimited'].includes(original.status)) throw new RemoteError('INVALID', '此目标不能直接继续，请先在 Codex 中调整目标预算。');
+        if (snap.busy || snap.requests.length || (snap.nativeQueuedCount ?? 0) > 0) throw new RemoteError('BUSY', '请先处理当前执行、待确认问题或电脑端队列，再继续目标。');
+      }
+      if (!this.discovery) throw new RemoteError('CLIENT_UNAVAILABLE', '电脑客户端尚未连接。');
+      await this.appTool('navigate_to_codex_page', { threadId: snap.id }, snap.id, authorize);
+      const check = async () => {
+        authorize?.();
+        const followed = this.followed.get(snap.id); if (followed) followed.state = undefined;
+        await this.follow(snap.id);
+        const current = await this.snapshot();
+        if (current.id !== snap.id || current.epoch !== snap.epoch || current.goal?.threadId !== original.threadId || current.goal.revision !== original.revision) throw new RemoteError('STALE', '目标已变化，操作未提交，请重新核对。');
+        if (command.method === 'goal.resume' && (current.busy || current.requests.length || (current.nativeQueuedCount ?? 0) > 0)) throw new RemoteError('BUSY', '任务状态已变化，请先处理当前执行或待确认问题。');
+        authorize?.();
+      };
+      await operateDesktopGoal(this.nativeExe, this.discovery, snap.title, original, command.method === 'goal.resume' ? 'resume' : 'clear', check);
+      try { for (let attempt = 0; attempt < 6; attempt++) {
+        const followed = this.followed.get(snap.id); if (followed) followed.state = undefined;
+        await this.follow(snap.id);
+        const current = await this.snapshot();
+        if (current.id !== snap.id || current.epoch !== snap.epoch) break;
+        const goal = current.goal;
+        const same = goal?.threadId === original.threadId && goal.createdAt === original.createdAt && goal.objective === original.objective;
+        if (command.method === 'goal.clear' ? !goal || same && goal.status === 'complete' : same && ['active', 'complete'].includes(goal.status)) return { accepted: true, goal: goal ?? null };
+        if (goal && !same) break;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      } } catch { /* A native action was dispatched; a read failure cannot prove rejection. */ }
+      throw new RemoteError('OUTCOME_UNKNOWN', '目标操作结果待确认，请重新同步后核对，勿重复操作。');
+    }
     if (command.method === 'goal.pause') {
       if (!snap.goal || snap.goal.status !== 'active' || snap.goal.revision !== command.params.revision) throw new RemoteError('STALE', '目标已变化，请重新查看后暂停。');
       // A turn-scoped interrupt deliberately skips native goal pausing. Goal pause

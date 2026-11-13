@@ -5,9 +5,11 @@ import { CodexDesktop, normalizeSnapshot } from '../src/agent/desktop.js';
 import { threadGoal } from '../src/agent/goals.js';
 import { nativeGoalSupport, assessProtocols } from '../src/agent/compatibility.js';
 import { NativeIpc } from '../src/agent/ipc.js';
+import { operateDesktopGoal } from '../src/agent/desktop-goal.js';
 import { commandSchema, isSafetyCommand, supportsDesktopCommand, type LocalAttachment } from '../src/shared/protocol.js';
 
 afterEach(() => vi.restoreAllMocks());
+vi.mock('../src/agent/desktop-goal.js', () => ({ operateDesktopGoal: vi.fn() }));
 const protocols = {
   'thread-stream-state-changed': 11, 'thread-stream-following-changed': 1, 'thread-owner-discovery': 1,
   'thread-follower-start-turn': 2, 'thread-follower-interrupt-turn': 4
@@ -33,6 +35,91 @@ function fixture() {
   return { value, adapter, ipc, command };
 }
 describe('native task goals', () => {
+  it.each(['before click', 'after click'])('does not confirm a different conversation %s', async phase => {
+    const { value, adapter } = fixture(); value.threadGoal.status = 'blocked';
+    Reflect.set(adapter, 'discovery', { processId: 42, startedAt: 'ticks', executablePath: 'desktop' });
+    vi.spyOn(adapter as any, 'appTool').mockResolvedValue({});
+    vi.mocked(operateDesktopGoal).mockImplementationOnce(async (_exe, _identity, _title, _goal, _action, check) => {
+      if (phase === 'after click') await check();
+      const other = normalizeSnapshot({ ...value, id: randomUUID(), threadGoal: null }, 'epoch');
+      vi.mocked((adapter as any).snapshot).mockResolvedValue(other);
+      if (phase === 'before click') await check();
+    });
+    try {
+      await expect(adapter.execute(commandSchema.parse({ method: 'goal.clear', params: { id: value.id, epoch: 'epoch', revision: threadGoal(value)!.revision } }), randomUUID())).rejects.toMatchObject({ code: phase === 'before click' ? 'STALE' : 'OUTCOME_UNKNOWN' });
+    } finally { adapter.close(); }
+  });
+  it('does not confirm a goal belonging to another thread even with identical content', async () => {
+    const { value, adapter } = fixture(); value.threadGoal.status = 'blocked';
+    Reflect.set(adapter, 'discovery', { processId: 42, startedAt: 'ticks', executablePath: 'desktop' });
+    vi.spyOn(adapter as any, 'appTool').mockResolvedValue({});
+    vi.mocked(operateDesktopGoal).mockImplementationOnce(async (_exe, _identity, _title, _goal, _action, check) => {
+      await check(); value.threadGoal.threadId = randomUUID(); value.threadGoal.status = 'active';
+    });
+    try {
+      await expect(adapter.execute(commandSchema.parse({ method: 'goal.resume', params: { id: value.id, epoch: 'epoch', revision: threadGoal(value)!.revision } }), randomUUID())).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+    } finally { adapter.close(); }
+  });
+  it('does not turn a post-action read failure into a definite rejection', async () => {
+    const { value, adapter } = fixture(); value.threadGoal.status = 'blocked';
+    Reflect.set(adapter, 'discovery', { processId: 42, startedAt: 'ticks', executablePath: 'desktop' });
+    vi.spyOn(adapter as any, 'appTool').mockResolvedValue({});
+    vi.mocked(operateDesktopGoal).mockImplementationOnce(async (_exe, _identity, _title, _goal, _action, check) => {
+      await check(); vi.mocked((adapter as any).snapshot).mockRejectedValueOnce(new Error('Disconnected after click'));
+    });
+    try {
+      await expect(adapter.execute(commandSchema.parse({ method: 'goal.resume', params: { id: value.id, epoch: 'epoch', revision: threadGoal(value)!.revision } }), randomUUID())).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+    } finally { adapter.close(); }
+  });
+  it.each(['goal.resume', 'goal.clear'] as const)('does not operate on a replacement goal during %s preparation', async method => {
+    const { value, adapter } = fixture(); value.threadGoal.status = 'blocked';
+    Reflect.set(adapter, 'discovery', { processId: 42, startedAt: 'ticks', executablePath: 'desktop' });
+    vi.spyOn(adapter as any, 'appTool').mockImplementation(async () => { value.threadGoal.objective = 'A replacement goal'; });
+    vi.mocked(operateDesktopGoal).mockImplementationOnce(async (_exe, _identity, _title, _goal, _action, check) => { await check(); throw new Error('Must never click'); });
+    try {
+      await expect(adapter.execute(commandSchema.parse({ method, params: { id: value.id, epoch: 'epoch', revision: threadGoal(value)!.revision } }), randomUUID())).rejects.toMatchObject({ code: 'STALE' });
+    } finally { adapter.close(); }
+  });
+  it.each(['goal.resume', 'goal.clear'] as const)('requires the new capability and a strict revision for %s', method => {
+    const command = commandSchema.parse({ method, params: { id: randomUUID(), epoch: 'epoch', revision: 'a'.repeat(64) } });
+    expect(supportsDesktopCommand(['goal-mode'], command)).toBe(false);
+    expect(supportsDesktopCommand(['goal-controls'], command)).toBe(true);
+    expect(isSafetyCommand(command)).toBe(method === 'goal.clear');
+    expect(commandSchema.safeParse({ ...command, params: { ...command.params, objective: 'replacement' } }).success).toBe(false);
+  });
+  it.each(['paused', 'blocked', 'usageLimited'])('resumes the same %s goal through its native control without sending a message', async status => {
+    const { value, adapter, ipc } = fixture(); value.threadGoal.status = status;
+    Reflect.set(adapter, 'discovery', { processId: 42, startedAt: 'ticks', executablePath: 'desktop' });
+    const navigate = vi.spyOn(adapter as any, 'appTool').mockResolvedValue({});
+    vi.mocked(operateDesktopGoal).mockImplementationOnce(async (_exe, _identity, _title, _goal, action, check) => {
+      expect(action).toBe('resume'); await check(); value.threadGoal.status = 'active';
+    });
+    try {
+      const result = await adapter.execute(commandSchema.parse({ method: 'goal.resume', params: { id: value.id, epoch: 'epoch', revision: threadGoal(value)!.revision } }), randomUUID());
+      expect(result).toMatchObject({ accepted: true, goal: { status: 'active', createdAt: value.threadGoal.createdAt } });
+      expect(navigate).toHaveBeenCalledWith('navigate_to_codex_page', { threadId: value.id }, value.id, undefined);
+      expect(ipc).not.toHaveBeenCalled();
+    } finally { adapter.close(); }
+  });
+  it.each(['active', 'paused', 'blocked', 'budgetLimited', 'usageLimited'])('clears a %s goal without stopping or deleting the conversation', async status => {
+    const { value, adapter, ipc } = fixture(); value.threadGoal.status = status;
+    Reflect.set(adapter, 'discovery', { processId: 42, startedAt: 'ticks', executablePath: 'desktop' });
+    vi.spyOn(adapter as any, 'appTool').mockResolvedValue({});
+    vi.mocked(operateDesktopGoal).mockImplementationOnce(async (_exe, _identity, _title, _goal, action, check) => {
+      expect(action).toBe('clear'); await check(); (value as any).threadGoal = null;
+    });
+    try {
+      expect(await adapter.execute(commandSchema.parse({ method: 'goal.clear', params: { id: value.id, epoch: 'epoch', revision: threadGoal(value)!.revision } }), randomUUID())).toEqual({ accepted: true, goal: null });
+      expect(ipc).not.toHaveBeenCalled(); expect(value.id).toBeDefined();
+    } finally { adapter.close(); }
+  });
+  it.each(['active', 'complete', 'budgetLimited'])('does not resume a %s goal or reset its budget', async status => {
+    const { value, adapter, ipc } = fixture(); value.threadGoal.status = status;
+    try {
+      await expect(adapter.execute(commandSchema.parse({ method: 'goal.resume', params: { id: value.id, epoch: 'epoch', revision: threadGoal(value)!.revision } }), randomUUID())).rejects.toBeInstanceOf(Error);
+      expect(ipc).not.toHaveBeenCalled();
+    } finally { adapter.close(); }
+  });
   it.each(['active', 'paused', 'complete', 'blocked', 'budgetLimited', 'usageLimited'])('projects native %s without inferring it from turn completion', status => {
     const value = state(); value.threadGoal.status = status;
     const snapshot = normalizeSnapshot(value, 'epoch');

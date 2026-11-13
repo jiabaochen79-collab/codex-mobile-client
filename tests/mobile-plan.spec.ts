@@ -30,9 +30,9 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
   const secondSnapshot = { ...snapshot, ...second, requests: [], settings: { ...snapshot.settings, mode: 'default', permission: 'full', revision: 'other-settings' } };
   const status: any = { type: 'status', online: true, enabled: true, helperVersion: options.legacy ? undefined : '0.4.4', subscription: { access: true },
     control: { role: options.viewer ? 'viewer' : 'controller', epoch: '12345678-1234-4234-8234-123456789abd', terminals: [] },
-    client: { available: true, version: '26.903.61454', capabilities: options.legacy ? [] : ['task-mode', 'plan-implementation', 'model-settings', 'permission-settings', 'goal-mode', 'safety-status', 'queued-send', 'attachments', 'command-status'] } };
+    client: { available: true, version: '26.903.61454', capabilities: options.legacy ? [] : ['task-mode', 'plan-implementation', 'model-settings', 'permission-settings', 'goal-mode', 'goal-controls', 'safety-status', 'queued-send', 'attachments', 'command-status'] } };
   let answerState = 'unknown';
-  const commands: any[] = []; let update!: () => void; let statusUpdate!: () => void; let disconnect!: () => void; let settle!: () => void;
+  const commands: any[] = []; let update!: () => void; let statusUpdate!: () => void; let disconnect!: () => void; let settle!: (result?: unknown) => void;
   const reads: (() => void)[] = []; let holdReads = false; let readFailure = '';
   await mockPairedBrowser(page);
   await page.route('**/api/bootstrap', route => route.fulfill({ json: { mode: 'mobile' } }));
@@ -44,7 +44,8 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
     statusUpdate();
     socket.onMessage(raw => {
       const { id, command } = JSON.parse(String(raw)); commands.push(command);
-      const reply = () => {
+      const reply = (override?: unknown) => {
+        if (override) { socket.send(JSON.stringify({ type: 'result', id, result: override })); return; }
         if (command.method === 'read' && readFailure) { socket.send(JSON.stringify({ type: 'result', id, error: { code: 'CLIENT_UNAVAILABLE', message: readFailure } })); return; }
         if (command.method === 'mode.update' && !options.reject) { snapshot.settings.mode = command.params.mode; snapshot.settings.revision = 'settings-2'; }
         if (command.method === 'permissions.update' && !options.reject) { snapshot.settings.permission = command.params.permission; snapshot.settings.revision = 'permission-settings-2'; }
@@ -52,12 +53,14 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
         if (command.method === 'respond' && !options.reject && !options.uncertainAnswer) snapshot.requests = [];
         if (command.method === 'respond' && options.uncertainAnswer) { socket.send(JSON.stringify({ type: 'result', id, error: { code: 'OUTCOME_UNKNOWN', message: 'Desktop confirmation delayed' } })); return; }
         if (command.method === 'goal.pause' && !options.reject) snapshot.goal.status = 'paused';
+       if (command.method === 'goal.resume' && !options.reject) snapshot.goal.status = 'active';
+       if (command.method === 'goal.clear' && !options.reject) snapshot.goal = null;
         if (command.method === 'settings.update' && !options.reject) { snapshot.settings.model = command.params.model; snapshot.settings.revision = 'model-settings-2'; }
-        const result = command.method === 'command.status' ? { state: answerState } : command.method === 'list' ? { conversations: options.secondTask ? [conversation, second] : [conversation], hasMore: false } : command.method === 'read' || command.method === 'safety.status' ? command.params.id === second.id ? secondSnapshot : snapshot : command.method === 'models' ? { models: [{ id: 'fixture-model', name: 'Fixture', efforts: ['high'], defaultEffort: 'high' }, { id: 'other-model', name: 'Other', efforts: ['high'], defaultEffort: 'high' }] } : command.method === 'settings.update' ? { settings: snapshot.settings } : command.method === 'projects' ? { projects: [{ id: 'fixture-project', name: 'Fixture project' }] } : command.method === 'create' ? { threadId: conversation.id } : command.method === 'goal.pause' ? { accepted: true, goal: snapshot.goal } : { accepted: true };
-        if (options.reject && ['respond', 'plan.respond', 'mode.update', 'permissions.update', 'settings.update', 'goal.pause'].includes(command.method)) socket.send(JSON.stringify({ type: 'result', id, error: { code: 'STALE', message: '计划或设置已变化，请刷新后核对。' } }));
+       const result = command.method === 'command.status' ? { state: answerState } : command.method === 'list' ? { conversations: options.secondTask ? [conversation, second] : [conversation], hasMore: false } : command.method === 'read' || command.method === 'safety.status' ? command.params.id === second.id ? secondSnapshot : snapshot : command.method === 'models' ? { models: [{ id: 'fixture-model', name: 'Fixture', efforts: ['high'], defaultEffort: 'high' }, { id: 'other-model', name: 'Other', efforts: ['high'], defaultEffort: 'high' }] } : command.method === 'settings.update' ? { settings: snapshot.settings } : command.method === 'projects' ? { projects: [{ id: 'fixture-project', name: 'Fixture project' }] } : command.method === 'create' ? { threadId: conversation.id } : ['goal.pause', 'goal.resume', 'goal.clear'].includes(command.method) ? { accepted: true, goal: snapshot.goal } : { accepted: true };
+       if (options.reject && ['respond', 'plan.respond', 'mode.update', 'permissions.update', 'settings.update', 'goal.pause', 'goal.resume', 'goal.clear'].includes(command.method)) socket.send(JSON.stringify({ type: 'result', id, error: { code: 'STALE', message: '计划或设置已变化，请刷新后核对。' } }));
         else socket.send(JSON.stringify({ type: 'result', id, result }));
       };
-      if (options.delayed && ['mode.update', 'settings.update'].includes(command.method)) settle = reply;
+       if (options.delayed && ['mode.update', 'settings.update', 'goal.resume', 'goal.clear'].includes(command.method)) settle = reply;
       else if (command.method === 'read' && holdReads) reads.push(reply);
       else reply();
     });
@@ -66,7 +69,7 @@ async function fixture(page: Page, options: { viewer?: boolean; legacy?: boolean
   await page.getByRole('button', { name: conversation.title, exact: true }).click(); await expect(page.getByLabel('消息', { exact: true })).toBeVisible();
   await expect.poll(() => commands.filter(c => c.method === 'read').length).toBeGreaterThan(0);
   return { snapshot, status, commands, confirmAnswer: () => { answerState = 'succeeded'; snapshot.requests = []; update(); }, update: () => update(), statusUpdate: () => statusUpdate(), disconnect: () => disconnect(), settle: () => settle(),
-    failReads: (message: string) => { readFailure = message; },
+    settleGoal: (goal: unknown) => settle({ accepted: true, goal }), failReads: (message: string) => { readFailure = message; },
     holdReads: () => { holdReads = true; }, releaseReads: () => { holdReads = false; reads.splice(0).forEach(reply => reply()); } };
 }
 
@@ -139,7 +142,7 @@ test('keeps goal detail collapsed and pauses the whole goal at 320px and 390px',
   expect(await page.locator('.task-goal').getAttribute('open')).toBeNull();
   for (const width of [320, 390]) {
     await page.setViewportSize({ width, height: 844 });
-    await page.locator('.task-goal summary').click(); await expect(page.locator('.goal-detail p')).toHaveText(f.snapshot.goal.objective);
+    await page.locator('.task-goal summary').click(); await expect(page.locator('.goal-detail p').first()).toHaveText(f.snapshot.goal.objective);
     expect(await page.locator('.goal-detail script').count()).toBe(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: info.outputPath('goal-detail-' + width + '.png') });
@@ -159,6 +162,65 @@ test('shows actual goal termination and does not confuse a stopped turn with a p
     f.snapshot.goal.status = status; f.update(); await expect(page.locator('.task-goal summary')).toContainText(label);
   }
   expect(f.commands.some(c => ['send', 'goal.pause'].includes(c.method))).toBe(false);
+});
+for (const width of [320, 390]) test(`resumes a blocked goal and confirms its removal without losing history or drafts at ${width}px`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 844 });
+  const f = await fixture(page, { mode: 'default' }); f.snapshot.requests = []; f.snapshot.goal = nativeGoal(f.snapshot.id, 'blocked'); f.update();
+  await page.getByLabel('消息', { exact: true }).fill('保留目标草稿');
+  await page.getByRole('button', { name: '继续目标', exact: true }).click();
+  await expect(page.locator('.task-goal summary')).toContainText('正在执行目标');
+  expect(f.commands.filter(c => c.method === 'goal.resume')).toHaveLength(1);
+  await page.locator('.task-goal summary').click();
+  await page.getByRole('button', { name: '删除目标', exact: true }).click();
+  await expect(page.locator('.goal-clear-confirm')).toContainText('会话和历史消息会保留');
+  await expect(page.getByRole('button', { name: '确认删除目标', exact: true })).toBeInViewport();
+  expect(f.commands.filter(c => c.method === 'goal.clear')).toHaveLength(0);
+  await page.screenshot({ path: info.outputPath('goal-confirm-' + width + '.png') });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole('button', { name: '确认删除目标', exact: true }).click();
+  await expect(page.locator('.task-goal')).toHaveCount(0);
+  await expect(page.getByLabel('消息', { exact: true })).toHaveValue('保留目标草稿');
+  await expect(page.getByText('保留已有数据。', { exact: false }).first()).toBeVisible();
+  expect(f.commands.some(c => ['send', 'stop', 'create'].includes(c.method))).toBe(false);
+});
+test('keeps a rejected goal operation visible and blocks duplicate taps while it is pending', async ({ page }) => {
+  const f = await fixture(page, { mode: 'default', reject: true, delayed: true }); f.snapshot.requests = []; f.snapshot.goal = nativeGoal(f.snapshot.id, 'blocked'); f.update();
+  await page.getByRole('button', { name: '继续目标', exact: true }).click();
+  await expect(page.getByRole('button', { name: '继续目标', exact: true })).toBeDisabled();
+  f.settle(); await expect(page.getByRole('alert')).toContainText('已变化');
+  await expect(page.locator('.task-goal summary')).toContainText('目标暂时受阻');
+  expect(f.commands.filter(c => c.method === 'goal.resume')).toHaveLength(1);
+});
+test('explains goal limits and old helpers instead of showing dead controls', async ({ page }) => {
+  const f = await fixture(page, { mode: 'default' }); f.snapshot.requests = []; f.snapshot.goal = nativeGoal(f.snapshot.id, 'budgetLimited'); f.update();
+  await page.locator('.task-goal summary').click();
+  await expect(page.locator('.goal-explanation')).toContainText('调整预算');
+  await expect(page.getByRole('button', { name: '继续目标', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '删除目标', exact: true })).toBeEnabled();
+  f.snapshot.goal.status = 'blocked'; f.status.client.capabilities = ['goal-mode']; f.statusUpdate(); f.update();
+  await expect(page.getByRole('button', { name: '继续目标', exact: true })).toBeDisabled();
+  await expect(page.locator('.goal-reason')).toContainText('升级电脑助手');
+  await expect(page.getByRole('button', { name: '删除目标', exact: true })).toBeDisabled();
+});
+test('requires the newly displayed goal to be confirmed again before removal', async ({ page }) => {
+  const f = await fixture(page, { mode: 'default' }); f.snapshot.requests = []; f.snapshot.goal = nativeGoal(f.snapshot.id, 'blocked'); f.update();
+  await page.locator('.task-goal summary').click(); await page.getByRole('button', { name: '删除目标', exact: true }).click();
+  f.snapshot.goal = { ...nativeGoal(f.snapshot.id, 'paused'), revision: 'b'.repeat(64) }; f.update();
+  await expect(page.getByRole('button', { name: '确认删除目标', exact: true })).toHaveCount(0);
+  expect(f.commands.some(c => c.method === 'goal.clear')).toBe(false);
+});
+for (const change of ['goal', 'epoch']) test('ignores a late goal operation after the ' + change + ' changes', async ({ page }) => {
+  const f = await fixture(page, { mode: 'default', delayed: true }); f.snapshot.requests = []; f.snapshot.goal = nativeGoal(f.snapshot.id, 'blocked'); f.update();
+  await page.getByRole('button', { name: '继续目标', exact: true }).click();
+  await expect.poll(() => f.commands.filter(c => c.method === 'goal.resume').length).toBe(1);
+  const oldResult = { ...f.snapshot.goal, status: 'active' };
+  if (change === 'goal') f.snapshot.goal = { ...nativeGoal(f.snapshot.id, 'paused'), revision: 'b'.repeat(64) };
+  else { f.snapshot.epoch = 'reconnected'; f.snapshot.goal.status = 'paused'; }
+  f.update(); await expect(page.locator('.task-goal summary')).toContainText('目标已暂停');
+  f.holdReads(); f.settleGoal(oldResult);
+  await expect(page.getByRole('button', { name: '继续目标', exact: true })).toBeEnabled();
+  await expect(page.locator('.task-goal summary')).toContainText('目标已暂停');
+  f.releaseReads();
 });
 test('removes completed goals from the chat header while preserving the conversation and showing new goals', async ({ page }, info) => {
   const f = await fixture(page, { mode: 'default' }); f.snapshot.requests = []; f.snapshot.goal = nativeGoal(f.snapshot.id); f.update();

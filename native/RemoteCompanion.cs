@@ -65,6 +65,7 @@ internal static class Program {
                 using (var writer = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false))) writer.Write(args[0] == "--protect" ? Convert.ToBase64String(result) : Encoding.UTF8.GetString(result)); return 0;
             }
             if (args.Length > 0 && args[0] == "--discover") { Discover(); return 0; }
+            if (args.Length == 1 && args[0] == "--desktop-goal") { DesktopGoal.Run(); return 0; }
             if (args.Length == 1 && args[0] == "--desktop-question") { DesktopQuestion.Run(); return 0; }
             if (args.Length == 1 && args[0] == "--desktop-question-step") { DesktopQuestion.Run(true); return 0; }
             if (args.Length == 1 && args[0] == "--desktop-question-reconcile") { DesktopQuestion.Run(false, true); return 0; }

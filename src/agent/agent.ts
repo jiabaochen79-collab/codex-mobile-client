@@ -270,6 +270,7 @@ export class Agent {
         }
         else result = await this.store.once(command.method === 'plan.respond' ? `plan:${hash(JSON.stringify([this.origin, command.params.id, command.params.requestId]))}` : frame.id, command, async () => {
           if (command.method === 'plan.respond' && this.sends.entries(command.params.id).length) throw new RemoteError('QUEUE_PENDING', '请先处理待发送消息，再确认计划。');
+          if (command.method === 'goal.resume' && this.sends.entries(command.params.id).length) throw new RemoteError('QUEUE_PENDING', '请先处理待发送消息，再继续目标。');
           if (command.method === 'queue.remove') { authorize(); const result = this.sends.remove(command.params.queuedId, command.params.id); this.notifyQueue(command.params.id); this.updateSubscriptions(); return result; }
           if (command.method === 'queue.resume') {
             const current = await this.options.adapter.execute({ method: 'read', params: { id: command.params.id, limit: 20 } }, frame.id) as Snapshot;
@@ -284,7 +285,7 @@ export class Agent {
           }
           if (command.method === 'send' && command.params.mode !== 'steer' && this.sends.entries(command.params.id).length) throw new RemoteError('QUEUE_PENDING', '当前任务已有待发送消息，请使用排队发送或先处理队列。');
           const startedAt = Date.now();
-          if (command.method === 'send' || command.method === 'plan.respond') await this.completionMonitor.watch(command.params.id, startedAt);
+          if (command.method === 'send' || command.method === 'plan.respond' || command.method === 'goal.resume') await this.completionMonitor.watch(command.params.id, startedAt);
           let executed: unknown;
           const pauseStoppedQueue = () => { if (command.method === 'stop' || command.method === 'goal.pause') for (const id of this.sends.pause('任务已停止，待发送消息已暂停。', command.params.id)) this.notifyQueue(id); };
           try { executed = command.method === 'send' ? await this.executeSend(command, frame.id, authorize, attachments) : await this.options.adapter.execute(command, frame.id, authorize, attachments); }

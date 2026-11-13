@@ -4,7 +4,7 @@ import { extractFile, listPackage, statFile, uncache } from '@electron/asar';
 import { parseExpressionAt, tokenizer, type ObjectExpression } from 'acorn';
 import { RemoteError } from '../shared/protocol.js';
 
-export type DesktopContract = { appVersion: string; protocols: Record<string, number>; goalMode?: boolean };
+export type DesktopContract = { appVersion: string; protocols: Record<string, number>; goalMode?: boolean; goalControls?: boolean };
 const core = { 'thread-stream-state-changed': 11, 'thread-stream-following-changed': 1, 'thread-owner-discovery': 1 };
 const features = [
   { name: '发送消息', capability: 'send-messages', methods: { 'thread-follower-start-turn': 2 } },
@@ -45,7 +45,7 @@ export function nativeGoalSupport(source: string) {
   return required.size === 0;
 }
 
-export function assessProtocols(protocols: Record<string, number>, goalMode = false) {
+export function assessProtocols(protocols: Record<string, number>, goalMode = false, goalControls = false) {
   const changed = Object.entries(core).filter(([method, version]) => protocols[method] !== version);
   if (changed.length) throw new RemoteError('UNSUPPORTED', `会话通讯接口已变化（${changed[0][0]}），请更新助手。`);
   const capabilities = ['compatibility-checked', 'project-navigation', 'task-list-cursor', 'task-list-lookup', 'turn-details', 'activity', 'live-activity', 'multi-terminal', 'message-images', 'conditional-read', 'safety-status', 'history-pages'];
@@ -56,6 +56,7 @@ export function assessProtocols(protocols: Record<string, number>, goalMode = fa
   }
   if (capabilities.includes('send-messages')) capabilities.push('attachments', 'create-tasks');
   if (goalMode && capabilities.includes('send-messages') && capabilities.includes('stop-generation')) capabilities.push('goal-mode');
+  if (goalControls && capabilities.includes('goal-mode')) capabilities.push('goal-controls');
   return { capabilities, reason: limited.length ? `以下功能的接口需适配：${limited.join('、')}。其他功能仍可使用。` : null };
 }
 
@@ -72,17 +73,18 @@ export class DesktopCompatibility {
       if (typeof pkg.version !== 'string' || !pkg.version.trim() || pkg.version.length > 100) throw new Error('Unknown version metadata');
       const candidates = listPackage(path, { isPack: false }).map(file => file.replace(/^[/\\]/, '')).filter(file => /^\.vite\/build\/[^/]+\.js$/.test(file.replaceAll('\\', '/')));
       if (candidates.length > 128) throw new Error('Too many desktop modules');
-      const registries: Record<string, number>[] = []; let bytes = 0; let goalMode = false;
+      const registries: Record<string, number>[] = []; let bytes = 0; let goalMode = false; let goalControls = false;
       for (const file of candidates) {
         const entry = statFile(path, file) as { size?: number };
         if (!entry.size || entry.size > 8 * 1024 * 1024) continue;
         bytes += entry.size; if (bytes > 32 * 1024 * 1024) throw new Error('Desktop modules exceed inspection limit');
         const text = extractFile(path, file).toString('utf8');
         if (text.includes('thread/goal/set') && nativeGoalSupport(text)) goalMode = true;
+        if (text.includes('thread/goal/clear') && text.includes('setThreadGoalStatus(') && text.includes('clearThreadGoal(')) goalControls = true;
         if (text.includes('thread-stream-state-changed') && text.includes('thread-owner-discovery')) registries.push(...protocolRegistries(text));
       }
       if (!registries.length || registries.some(registry => JSON.stringify(Object.entries(registry).sort()) !== JSON.stringify(Object.entries(registries[0]).sort()))) throw new Error('Protocol registry missing or ambiguous');
-      const contract = { appVersion: pkg.version, protocols: registries[0], goalMode };
+      const contract = { appVersion: pkg.version, protocols: registries[0], goalMode, goalControls };
       this.cached = { path, size: stat.size, mtime: stat.mtimeMs, contract }; return contract;
     } catch { throw new RemoteError('UNSUPPORTED', '无法确认当前客户端的通讯接口定义，请更新助手或检查 Codex 安装是否完整。'); }
   }

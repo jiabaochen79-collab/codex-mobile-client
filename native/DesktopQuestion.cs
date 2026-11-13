@@ -14,7 +14,7 @@ using System.Windows.Automation;
 // Submit through the question card so the desktop also records its submission.
 internal static class DesktopQuestion {
     internal sealed class Answer { public string question { get; set; } public string answer { get; set; } }
-    internal sealed class Request { public int processId { get; set; } public string startedAt { get; set; } public string executablePath { get; set; } public string title { get; set; } public Answer[] answers { get; set; } public string action { get; set; } public int index { get; set; } }
+    internal class Request { public int processId { get; set; } public string startedAt { get; set; } public string executablePath { get; set; } public string title { get; set; } public Answer[] answers { get; set; } public string action { get; set; } public int index { get; set; } }
     private sealed class Result { public bool found { get; set; } public bool filled { get; set; } public bool submitted { get; set; } public bool closed { get; set; } public string error { get; set; } public string stage { get; set; } public string reason { get; set; } }
     private sealed class Card { public AutomationElement editor, submit, panel; }
     private static readonly string[] Editors = { "Reply…", "Reply...", "Or write your own response", "回复…", "回复...", "或自行撰写回复" };
@@ -27,7 +27,7 @@ internal static class DesktopQuestion {
     private delegate bool EnumWindow(IntPtr window, IntPtr parameter);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
-    private sealed class WindowLease : IDisposable {
+    internal sealed class WindowLease : IDisposable {
         private readonly Process process;
         private readonly IntPtr handle;
         private readonly bool minimized;
@@ -230,7 +230,7 @@ internal static class DesktopQuestion {
             return process;
         } catch { process.Dispose(); throw; }
     }
-    private static AutomationElement Window(Request request) {
+    internal static AutomationElement Window(Request request) {
         using (var process = CheckedProcess(request)) {
             var windows = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, request.processId));
             var candidates = windows.Cast<AutomationElement>().Where(w => w.FindAll(TreeScope.Descendants, new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document), new PropertyCondition(AutomationElement.NameProperty, request.title))).Count == 1).ToArray();
@@ -238,7 +238,7 @@ internal static class DesktopQuestion {
             return candidates[0];
         }
     }
-    private static WindowLease PrepareWindow(Request request) {
+    internal static WindowLease PrepareWindow(Request request) {
         var process = CheckedProcess(request);
         try {
             // Keep the coordinator free of UIA references so worker connections can refresh.

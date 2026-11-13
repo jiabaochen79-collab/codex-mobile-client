@@ -30,6 +30,8 @@ export const commandSchema = z.discriminatedUnion('method', [
   z.object({ method: z.literal('queue.resume'), params: z.object({ id: uid, queuedId: uid, epoch: epochSchema }).strict() }).strict(),
   z.object({ method: z.literal('stop'), params: z.object({ id: uid, turnId: z.string().min(1).max(200), epoch: z.string().min(1).max(200) }).strict() }).strict(),
   z.object({ method: z.literal('goal.pause'), params: z.object({ id: uid, epoch: epochSchema, revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict() }).strict(),
+  z.object({ method: z.literal('goal.resume'), params: z.object({ id: uid, epoch: epochSchema, revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict() }).strict(),
+  z.object({ method: z.literal('goal.clear'), params: z.object({ id: uid, epoch: epochSchema, revision: z.string().regex(/^[a-f0-9]{64}$/) }).strict() }).strict(),
   z.object({ method: z.literal('respond'), params: z.object({ id: uid, requestId: z.union([z.string().max(200), z.number()]), decision: z.enum(['accept', 'decline']).optional(), answers: z.record(z.string(), z.array(z.string().max(4000))).optional(), epoch: z.string().min(1).max(200) }).strict().refine(params => params.decision === undefined || params.answers === undefined) }).strict(),
   z.object({ method: z.literal('projects'), params: z.object({}).strict() }).strict(),
   z.object({ method: z.literal('create'), params: z.object({ projectId: z.string().min(1).max(200), text: z.string().trim().min(1).max(32000), model: modelSchema.optional(), effort: effortSchema.optional() }).strict() }).strict(),
@@ -49,6 +51,7 @@ export const commandSchema = z.discriminatedUnion('method', [
 ]);
 export type Command = z.infer<typeof commandSchema>;
 export function supportsDesktopCommand(capabilities: string[] | undefined, command: Command) {
+  if (command.method === 'goal.resume' || command.method === 'goal.clear') return capabilities?.includes('goal-controls') === true;
   if (command.method === 'goal.pause') return capabilities?.includes('goal-mode') === true;
   if (command.method === 'client.recover') return capabilities?.includes('desktop-recovery') === true;
   if (command.method === 'plan.respond') return capabilities?.includes('plan-implementation') === true;
@@ -62,7 +65,7 @@ export function supportsDesktopCommand(capabilities: string[] | undefined, comma
 }
 export const commandFrame = z.object({ type: z.literal('command'), id: uid, command: commandSchema, controlEpoch: uid.optional() }).strict();
 export const readMethods = new Set<Command['method']>(['list', 'read', 'image.read', 'safety.status', 'projects', 'models', 'activity', 'seen', 'upload.status', 'queue.list', 'command.status']);
-export const isSafetyCommand = (command: Command) => command.method === 'stop' || command.method === 'goal.pause' || command.method === 'safety.status' || command.method === 'command.status' || command.method === 'upload.remove' || command.method === 'queue.list' || command.method === 'queue.remove' || command.method === 'respond' && command.params.decision === 'decline' && command.params.answers === undefined;
+export const isSafetyCommand = (command: Command) => command.method === 'stop' || command.method === 'goal.pause' || command.method === 'goal.clear' || command.method === 'safety.status' || command.method === 'command.status' || command.method === 'upload.remove' || command.method === 'queue.list' || command.method === 'queue.remove' || command.method === 'respond' && command.params.decision === 'decline' && command.params.answers === undefined;
 export type ControlLease = { sessionId: string; clientId: string; epoch: string; expires: number };
 export type ControlState = { role: 'controller' | 'viewer'; shared?: boolean; epoch: string | null; expires: number | null; terminals: { id: string; label: string; controlling: boolean }[] };
 export type ModelOption = { id: string; name: string; efforts: string[]; defaultEffort: string; images: boolean };
