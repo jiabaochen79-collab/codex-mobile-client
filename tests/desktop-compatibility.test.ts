@@ -49,11 +49,27 @@ describe('desktop contract compatibility', () => {
   });
   it('blocks incompatible transcript protocols but limits only affected write capabilities', () => {
     expect(() => assessProtocols({ ...protocols, 'thread-stream-state-changed': 12 })).toThrow('thread-stream-state-changed');
+    expect(() => assessProtocols({ ...protocols, 'thread-stream-state-changed': 14 })).toThrow('thread-stream-state-changed');
     const limited = assessProtocols({ ...protocols, 'thread-follower-start-turn': 3 });
     expect(limited.capabilities).toContain('stop-generation'); expect(limited.capabilities).not.toContain('send-messages'); expect(limited.capabilities).not.toContain('attachments'); expect(limited.reason).toContain('发送消息');
     const id = randomUUID(); expect(supportsDesktopCommand(limited.capabilities, { method: 'send', params: { id, epoch: 'x', text: 'blocked' } })).toBe(false);
     expect(supportsDesktopCommand(limited.capabilities, { method: 'stop', params: { id, epoch: 'x', turnId: 'turn' } })).toBe(true);
     expect(supportsDesktopCommand(undefined, { method: 'send', params: { id, epoch: 'x', text: 'legacy' } })).toBe(true);
+  });
+  it('reads a v13 snapshot and text patch while ignoring mismatched wire versions', async () => {
+    const registry = { ...protocols, 'thread-stream-state-changed': 13, 'thread-read-state-changed': 3 };
+    const app = await installed('26.1111.21308', registry); const contract = new DesktopCompatibility().inspect(app.exe);
+    expect(assessProtocols(contract.protocols).reason).toBeNull();
+    const adapter = new CodexDesktop('unused', app.dir);
+    const id = randomUUID(), owner = 'desktop', entry = { id, owner, revision: 0, state: undefined as any };
+    Reflect.set(adapter, 'contract', contract); Reflect.get(adapter, 'followed').set(id, entry);
+    const broadcast = (version: number, change: unknown) => Reflect.get(adapter, 'onBroadcast').call(adapter, { version, method: 'thread-stream-state-changed', sourceClientId: owner, params: { hostId: 'local', conversationId: id, change } });
+    try {
+      broadcast(13, { type: 'snapshot', revision: 1, conversationState: { id, turns: [{ items: [{ type: 'agentMessage', text: 'first' }] }] } });
+      const patch = { type: 'patches', baseRevision: 1, revision: 2, patches: [{ op: 'replace', path: ['turns', 0, 'items', 0, 'text'], value: 'first update' }], acceptedTextChanges: [] };
+      broadcast(11, patch); expect(entry.revision).toBe(1);
+      broadcast(13, patch); expect(entry.revision).toBe(2); expect(entry.state.turns[0].items[0].text).toBe('first update');
+    } finally { adapter.close(); }
   });
   it('supports the verified v2 settings contract without allowing unknown future versions', () => {
     const current = assessProtocols({ ...protocols, 'thread-follower-update-thread-settings': 2 });

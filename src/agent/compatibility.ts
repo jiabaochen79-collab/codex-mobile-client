@@ -5,7 +5,7 @@ import { parseExpressionAt, tokenizer, type ObjectExpression } from 'acorn';
 import { RemoteError } from '../shared/protocol.js';
 
 export type DesktopContract = { appVersion: string; protocols: Record<string, number>; goalMode?: boolean; goalControls?: boolean };
-const core = { 'thread-stream-state-changed': 11, 'thread-stream-following-changed': 1, 'thread-owner-discovery': 1 };
+const core = { 'thread-stream-state-changed': [11, 13], 'thread-stream-following-changed': [1], 'thread-owner-discovery': [1] };
 const features = [
   { name: '发送消息', capability: 'send-messages', methods: { 'thread-follower-start-turn': 2 } },
   { name: '停止任务', capability: 'stop-generation', methods: { 'thread-follower-interrupt-turn': 4 } },
@@ -46,7 +46,7 @@ export function nativeGoalSupport(source: string) {
 }
 
 export function assessProtocols(protocols: Record<string, number>, goalMode = false, goalControls = false) {
-  const changed = Object.entries(core).filter(([method, version]) => protocols[method] !== version);
+  const changed = Object.entries(core).filter(([method, versions]) => !versions.includes(protocols[method]));
   if (changed.length) throw new RemoteError('UNSUPPORTED', `会话通讯接口已变化（${changed[0][0]}），请更新助手。`);
   const capabilities = ['compatibility-checked', 'project-navigation', 'task-list-cursor', 'task-list-lookup', 'turn-details', 'activity', 'live-activity', 'multi-terminal', 'message-images', 'conditional-read', 'safety-status', 'history-pages'];
   const limited: string[] = [];
