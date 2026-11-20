@@ -46,7 +46,9 @@ export function nativeGoalSupport(source: string) {
 }
 
 export function assessProtocols(protocols: Record<string, number>, goalMode = false, goalControls = false) {
-  const changed = Object.entries(core).filter(([method, versions]) => !versions.includes(protocols[method]));
+  const changed = Object.entries(core).filter(([method, versions]) => method === 'thread-stream-state-changed'
+    ? !Number.isSafeInteger(protocols[method]) || protocols[method] < 0
+    : !versions.includes(protocols[method]));
   if (changed.length) throw new RemoteError('UNSUPPORTED', `会话通讯接口已变化（${changed[0][0]}），请更新助手。`);
   const capabilities = ['compatibility-checked', 'project-navigation', 'task-list-cursor', 'task-list-lookup', 'turn-details', 'activity', 'live-activity', 'multi-terminal', 'message-images', 'conditional-read', 'safety-status', 'history-pages'];
   const limited: string[] = [];

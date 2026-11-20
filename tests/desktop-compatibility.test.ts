@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { assessProtocols, DesktopCompatibility, protocolRegistries } from '../src/agent/compatibility.js';
 import { CodexDesktop } from '../src/agent/desktop.js';
 import { NativeIpc } from '../src/agent/ipc.js';
-import { supportsDesktopCommand } from '../src/shared/protocol.js';
+import { RemoteError, supportsDesktopCommand } from '../src/shared/protocol.js';
 
 const protocols = {
   'thread-stream-state-changed': 11, 'thread-stream-following-changed': 1, 'thread-owner-discovery': 1,
@@ -47,17 +47,18 @@ describe('desktop contract compatibility', () => {
     await createPackage(source, join(app.dir, 'app/resources/app.asar'));
     expect(() => new DesktopCompatibility().inspect(app.exe)).toThrow('通讯接口定义');
   });
-  it('blocks incompatible transcript protocols but limits only affected write capabilities', () => {
-    expect(() => assessProtocols({ ...protocols, 'thread-stream-state-changed': 12 })).toThrow('thread-stream-state-changed');
-    expect(() => assessProtocols({ ...protocols, 'thread-stream-state-changed': 14 })).toThrow('thread-stream-state-changed');
+  it('allows new stream revisions and limits only affected write capabilities', () => {
+    expect(assessProtocols({ ...protocols, 'thread-stream-state-changed': 12 }).reason).toBeNull();
+    expect(assessProtocols({ ...protocols, 'thread-stream-state-changed': 14 }).reason).toBeNull();
+    expect(() => assessProtocols({ ...protocols, 'thread-stream-state-changed': -1 })).toThrow('thread-stream-state-changed');
     const limited = assessProtocols({ ...protocols, 'thread-follower-start-turn': 3 });
     expect(limited.capabilities).toContain('stop-generation'); expect(limited.capabilities).not.toContain('send-messages'); expect(limited.capabilities).not.toContain('attachments'); expect(limited.reason).toContain('发送消息');
     const id = randomUUID(); expect(supportsDesktopCommand(limited.capabilities, { method: 'send', params: { id, epoch: 'x', text: 'blocked' } })).toBe(false);
     expect(supportsDesktopCommand(limited.capabilities, { method: 'stop', params: { id, epoch: 'x', turnId: 'turn' } })).toBe(true);
     expect(supportsDesktopCommand(undefined, { method: 'send', params: { id, epoch: 'x', text: 'legacy' } })).toBe(true);
   });
-  it('reads a v13 snapshot and text patch while ignoring mismatched wire versions', async () => {
-    const registry = { ...protocols, 'thread-stream-state-changed': 13, 'thread-read-state-changed': 3 };
+  it.each([13, 14, 99])('reads a v%s snapshot and text patch while ignoring mismatched wire versions', async version => {
+    const registry = { ...protocols, 'thread-stream-state-changed': version, 'thread-read-state-changed': 3 };
     const app = await installed('26.1111.21308', registry); const contract = new DesktopCompatibility().inspect(app.exe);
     expect(assessProtocols(contract.protocols).reason).toBeNull();
     const adapter = new CodexDesktop('unused', app.dir);
@@ -65,10 +66,10 @@ describe('desktop contract compatibility', () => {
     Reflect.set(adapter, 'contract', contract); Reflect.get(adapter, 'followed').set(id, entry);
     const broadcast = (version: number, change: unknown) => Reflect.get(adapter, 'onBroadcast').call(adapter, { version, method: 'thread-stream-state-changed', sourceClientId: owner, params: { hostId: 'local', conversationId: id, change } });
     try {
-      broadcast(13, { type: 'snapshot', revision: 1, conversationState: { id, turns: [{ items: [{ type: 'agentMessage', text: 'first' }] }] } });
+      broadcast(version, { type: 'snapshot', revision: 1, conversationState: { id, turns: [{ items: [{ type: 'agentMessage', text: 'first' }] }] } });
       const patch = { type: 'patches', baseRevision: 1, revision: 2, patches: [{ op: 'replace', path: ['turns', 0, 'items', 0, 'text'], value: 'first update' }], acceptedTextChanges: [] };
       broadcast(11, patch); expect(entry.revision).toBe(1);
-      broadcast(13, patch); expect(entry.revision).toBe(2); expect(entry.state.turns[0].items[0].text).toBe('first update');
+      broadcast(version, patch); expect(entry.revision).toBe(2); expect(entry.state.turns[0].items[0].text).toBe('first update');
     } finally { adapter.close(); }
   });
   it('supports the verified v2 settings contract without allowing unknown future versions', () => {
@@ -118,6 +119,41 @@ describe('desktop contract compatibility', () => {
     const app = await installed('26.903.61454'); index(app.dir); const db = new DatabaseSync(join(app.dir, 'state_5.sqlite')); const file = join(app.dir, 'task.jsonl'); writeFileSync(file, ''); db.prepare('INSERT INTO threads(id,archived,source,rollout_path,updated_at) VALUES(?,0,?,?,1)').run(randomUUID(), 'vscode', file); db.close();
     const adapter = new CodexDesktop('unused', app.dir); vi.spyOn(adapter as any, 'discover').mockResolvedValue({ version: '26.903.8094.0', processId: 123, executablePath: app.exe, toolsPipe: 'fixture' }); vi.spyOn(NativeIpc.prototype, 'connect').mockResolvedValue(); const tool = vi.spyOn(adapter as any, 'appTool').mockResolvedValue({ unexpected: [] });
     try { expect(await adapter.status()).toMatchObject({ available: false, reason: expect.stringContaining('项目接口') }); expect(tool.mock.calls.map(call => call[0])).toEqual(['list_projects']); } finally { adapter.close(); }
+  });
+  it('keeps native task tools usable after the legacy registry and follower pipe are removed', async () => {
+    const app = await installed('26.1117.31558', {} as typeof protocols); index(app.dir);
+    const id = randomUUID(), file = join(app.dir, 'task.jsonl'); writeFileSync(file, '');
+    const db = new DatabaseSync(join(app.dir, 'state_5.sqlite')); db.prepare('INSERT INTO threads(id,archived,source,rollout_path,updated_at) VALUES(?,0,?,?,1)').run(id, 'vscode', file); db.close();
+    const adapter = new CodexDesktop('unused', app.dir);
+    vi.spyOn(adapter as any, 'discover').mockResolvedValue({ version: '26.1117.3838.0', processId: 123, executablePath: app.exe, toolsPipe: 'fixture' });
+    const connect = vi.spyOn(NativeIpc.prototype, 'connect').mockResolvedValue();
+    const tools = ['read_thread', 'list_threads', 'list_projects', 'send_message_to_thread', 'create_thread'].map(name => ({ name, namespace: 'codex_app', inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, prompt: { type: 'string' } } } }));
+    let sendFailure: Error | undefined;
+    const request = vi.spyOn(NativeIpc.prototype, 'request').mockImplementation(async (method, params: any) => {
+      expect(method).not.toBe('initialize'); expect(method).not.toBe('thread-owner-discovery');
+      if (method === 'tools/list') return { result: { tools } };
+      if (params.tool === 'send_message_to_thread' && sendFailure) throw sendFailure;
+      const result = params.tool === 'read_thread' ? { thread: { id, kind: 'codex', hostId: 'local', status: { type: 'idle' } }, turns: [{ id: 'turn', status: 'completed', items: [{ id: 'message', type: 'agentMessage', phase: 'final_answer', text: 'Ready' }] }], page: { hasMore: false } }
+        : params.tool === 'list_projects' ? { projects: [] } : params.tool === 'list_threads' ? { pinnedThreads: [], threads: [{ id, kind: 'codex', hostId: 'local', status: { type: 'idle' } }] } : { threadId: id };
+      return { result: { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(result) }] } };
+    });
+    try {
+      expect(await adapter.status()).toMatchObject({ available: true, capabilities: expect.arrayContaining(['send-messages']) }); expect(connect.mock.contexts.every(context => !!context && typeof context === 'object' && Reflect.get(context, 'pipe') === 'fixture')).toBe(true);
+      const snapshot = await adapter.execute({ method: 'read', params: { id, limit: 20 } }, randomUUID()) as any;
+      expect(snapshot.messages).toContainEqual(expect.objectContaining({ text: 'Ready', phase: 'final' }));
+      const send = { method: 'send' as const, params: { id, epoch: snapshot.epoch, text: 'Continue' } };
+      await expect(adapter.execute({ ...send, params: { ...send.params, epoch: 'old' } }, randomUUID())).rejects.toMatchObject({ code: 'STALE' });
+      expect(request.mock.calls.filter(call => (call[1] as any)?.tool === 'send_message_to_thread')).toHaveLength(0);
+      const authorize = vi.fn(); expect(await adapter.execute(send, randomUUID(), authorize)).toEqual({ accepted: true }); expect(authorize).toHaveBeenCalledTimes(1);
+      expect(request).toHaveBeenCalledWith('tools/call', expect.objectContaining({ tool: 'send_message_to_thread', arguments: { threadId: id, hostId: 'local', prompt: 'Continue' } }));
+      sendFailure = new RemoteError('OUTCOME_UNKNOWN', 'Timed out');
+      await expect(adapter.execute(send, randomUUID())).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+      expect(request.mock.calls.filter(call => (call[1] as any)?.tool === 'send_message_to_thread')).toHaveLength(2);
+      sendFailure = new RemoteError('CLIENT_REJECTED', 'Rejected');
+      await expect(adapter.execute(send, randomUUID())).rejects.toMatchObject({ code: 'CLIENT_REJECTED' });
+      expect(request.mock.calls.filter(call => (call[1] as any)?.tool === 'send_message_to_thread')).toHaveLength(3);
+      await expect(adapter.execute({ method: 'stop', params: { id, epoch: snapshot.epoch, turnId: 'turn' } }, randomUUID())).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+    } finally { adapter.close(); }
   });
   it.each([2, 3])('keeps mobile read markers while only publishing the supported v2 desktop payload (v%s)', async version => {
     const app = await installed('fixture'); index(app.dir); const adapter = new CodexDesktop('unused', app.dir); const id = randomUUID();
