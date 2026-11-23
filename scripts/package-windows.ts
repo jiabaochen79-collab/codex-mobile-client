@@ -17,6 +17,7 @@ const publicPackage = origin.startsWith('https:');
 const output = resolve('release', publicPackage ? 'windows-public' : 'windows'); mkdirSync(output, { recursive: true });
 copyFileSync(process.execPath, join(output, 'node.exe'));
 copyFileSync('release/RemoteCompanion.exe', join(output, 'RemoteCompanion.exe'));
+copyFileSync('release/CodexMobileBridge.exe', join(output, 'CodexMobileBridge.exe'));
 copyFileSync('release/companion.ico', join(output, 'companion.ico'));
 cpSync('release/icons', join(output, 'icons'), { recursive: true });
 rmSync(join(output, 'dist'), { recursive: true, force: true });
@@ -37,7 +38,7 @@ const npmCli = process.env.npm_execpath ?? join(dirname(process.execPath), 'node
 execFileSync(process.execPath, [npmCli, 'ci', '--omit=dev', '--ignore-scripts', '--registry=https://registry.npmjs.org'], { cwd: output, stdio: 'inherit', windowsHide: true });
 const archiveName = publicPackage ? 'codex-mobile-windows-public.zip' : 'codex-mobile-windows.zip';
 const archive = resolve('release', archiveName);
-const distributable = ['node.exe', 'RemoteCompanion.exe', 'companion.ico', 'icons', 'dist', 'node_modules', 'package.json', 'package-lock.json', 'relay.json', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'NODE-LICENSE.txt', 'INSTALLER.md', 'REMEMBERED-LOGIN.md', 'COMPATIBILITY.md', 'PLAN-MODE.md', 'QUEUED-SEND.md', 'CLIENT-RECOVERY.md'];
+const distributable = ['node.exe', 'RemoteCompanion.exe', 'CodexMobileBridge.exe', 'companion.ico', 'icons', 'dist', 'node_modules', 'package.json', 'package-lock.json', 'relay.json', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'NODE-LICENSE.txt', 'INSTALLER.md', 'REMEMBERED-LOGIN.md', 'COMPATIBILITY.md', 'PLAN-MODE.md', 'QUEUED-SEND.md', 'CLIENT-RECOVERY.md'];
 for (const file of distributable) if (!existsSync(join(output, file))) throw new Error(`Missing distributable: ${file}`);
 await writeWindowsArchive(output, archive, distributable);
 const digest = createHash('sha256').update(readFileSync(archive)).digest('hex');

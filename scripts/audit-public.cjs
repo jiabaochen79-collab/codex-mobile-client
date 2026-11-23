@@ -1,6 +1,6 @@
 const { execFileSync } = require('node:child_process');
 const { readFileSync } = require('node:fs');
-const allowed = /^(?:\.github\/|doc\/|installer\/|native\/|scripts\/|src\/(?:agent|shared)\/|src\/web-server\.ts$|tests\/|web\/|(?:\.dockerignore|\.gitattributes|\.gitignore|[A-Z][A-Z_\-.a-z]*\.md|LICENSE|NOTICE|contracts-manifest\.json|package(?:-lock)?\.json|tsconfig\.json|(?:vite|vitest)\.config\.ts)$)/;
+const allowed = /^(?:\.github\/|doc\/|installer\/|native\/|scripts\/|src\/(?:agent|bridge|shared)\/|src\/web-server\.ts$|tests\/|web\/|(?:\.dockerignore|\.gitattributes|\.gitignore|[A-Z][A-Z_\-.a-z]*\.md|LICENSE|NOTICE|contracts-manifest\.json|package(?:-lock)?\.json|tsconfig\.json|(?:vite|vitest)\.config\.ts)$)/;
 const privatePath = /(?:^|\/)(?:deploy|secrets|data|relay|admin)(?:\/|$)|(?:^|\/)Admin[^/]*|\.(?:sqlite(?:-.*)?|db(?:-.*)?|pem|key|p12|pfx)$|(?:^|\/)\.env(?:\.|$)/i;
 const secret = /-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----|\bgh[pousr]_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{40,}\b|\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}\b/;
 const relayImport = /(?:from\s*|import\s*\()\s*['"][^'"\n]*(?:\/relay\/|\/relay\.|\/deploy\/)/;

@@ -4,13 +4,14 @@ import { homedir } from 'node:os';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { Agent, createLocalServer } from './agent.js';
 import { CodexDesktop } from './desktop.js';
+import { prepareDesktopBridge } from './desktop-bridge-setup.js';
 import packageInfo from '../../package.json' with { type: 'json' };
 if (process.argv.includes('--version')) { console.log(packageInfo.version); process.exit(0); }
 const root = resolve(process.env.APP_ROOT ?? '.');
 const settingsFile = join(root, 'relay.json');
 const origin = process.env.RELAY_URL ?? (existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile, 'utf8')).origin : 'http://127.0.0.1:8790');
 const nativeExe = process.env.NATIVE_EXE ?? join(root, 'release/RemoteCompanion.exe');
-const agent = new Agent({ origin, root, dir: process.env.AGENT_DATA_DIR ?? join(homedir(), 'AppData/Local/CodexMobile'), nativeExe, adapter: new CodexDesktop(nativeExe) });
+const agent = new Agent({ origin, root, dir: process.env.AGENT_DATA_DIR ?? join(homedir(), 'AppData/Local/CodexMobile'), nativeExe, adapter: new CodexDesktop(nativeExe, undefined, () => prepareDesktopBridge(root, nativeExe, packageInfo.version)) });
 let port = Number(process.env.LOCAL_PORT ?? 8791); let app: FastifyInstance | undefined;
 for (let attempt = 0; attempt < 20; attempt++, port++) {
   app = await createLocalServer(agent, { port, webDir: join(root, 'dist/web') });

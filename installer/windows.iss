@@ -57,6 +57,9 @@ Name: "{userdesktop}\{#AppName}"; Filename: "{app}\RemoteCompanion.exe"; Working
 [Run]
 Filename: "{app}\RemoteCompanion.exe"; Description: "运行 {#AppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
+[UninstallRun]
+Filename: "{app}\RemoteCompanion.exe"; Parameters: "--bridge-disable"; Flags: runhidden waituntilterminated; RunOnceId: "RestoreCodexCLI"
+
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var

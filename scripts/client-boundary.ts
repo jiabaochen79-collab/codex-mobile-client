@@ -1,13 +1,13 @@
 import { lstatSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-const clientOutputs = new Set(['agent.mjs', 'updater.mjs', 'client-web-manifest.json', 'web']);
+const clientOutputs = new Set(['agent.mjs', 'updater.mjs', 'desktop-bridge.mjs', 'client-web-manifest.json', 'web']);
 const privateOutput = /(?:^|\/)(?:relay|billing|admin)(?:[./-]|$)|\.(?:sqlite(?:-.*)?|db|pem|key|p12|pfx)$|(?:^|\/)\.env(?:\.|$)/i;
 
 export function assertClientDist(root: string): void {
   const entries = readdirSync(root);
   if (entries.length !== clientOutputs.size || entries.some(name => !clientOutputs.has(name))) {
-    throw new Error('Client dist must contain only agent.mjs, updater.mjs, client-web-manifest.json and web.');
+    throw new Error('Client dist must contain only agent.mjs, updater.mjs, desktop-bridge.mjs, client-web-manifest.json and web.');
   }
   function inspect(directory: string, prefix = ''): void {
     for (const name of readdirSync(directory)) {

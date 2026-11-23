@@ -10,6 +10,9 @@ import { applyPatches, enablePatches, type Patch } from 'immer';
 import { IpcRoutingError, NativeIpc, unusedHistoryOutput } from './ipc.js';
 import { DesktopCompatibility, assessProtocols, type DesktopContract } from './compatibility.js';
 import { ToolSession, toolSessionCapabilities } from './tool-session.js';
+import { DesktopConnection } from './desktop-connection.js';
+import { NativeSession } from './native-session.js';
+import { nativeCapabilities, nativeControl } from './native-control.js';
 import { normalizeProjectPath, projectForConversation, type IndexedProject } from './projects.js';
 import { collaborationMode, desktopModels, threadSettings, validateModel } from './models.js';
 import { DesktopActivity, DesktopRuntimeActivity, rolloutPath, runtimeRunning } from './activity.js';
@@ -34,7 +37,7 @@ const permissionSettings: Record<PermissionMode, { permissions: string; approval
 };
 
 export function normalizeSnapshot(state: any, epoch: string, limit = 100, images?: ConversationImages, before?: string): Snapshot {
-  const idle = runtimeRunning(state.threadRuntimeStatus) === false;
+  const idle = state.nativeProtocol !== true && runtimeRunning(state.threadRuntimeStatus) === false;
   const turnStatus = (turn: any) => idle && turn?.status === 'inProgress' ? 'interrupted' : turn?.status;
   const failureReason = (turn: any) => {
     const raw = turn?.status === 'failed' ? (typeof turn.error === 'string' ? turn.error : turn.error?.message) : undefined;
@@ -140,7 +143,9 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
   private checking?: Promise<ClientStatus>;
   private compatibility = new DesktopCompatibility();
   private contract?: DesktopContract;
-  private toolSession?: ToolSession;
+  private toolSession?: ToolSession | NativeSession;
+  private bridge?: DesktopConnection;
+  private bridgePrepared = false;
   private projectCache?: { updated: number; projects: IndexedProject[] };
   private projectStates = new Map<string, boolean | undefined>();
   private projectScan?: Promise<void>;
@@ -177,7 +182,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
   }
   private wake = new EventEmitter();
   onChange?: (id: string) => void;
-  constructor(private nativeExe: string, private codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex')) {
+  constructor(private nativeExe: string, private codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex'), private prepareBridge?: () => Promise<boolean>) {
     super();
     this.activity = new DesktopActivity(codexHome);
     if (!isAbsolute(codexHome) || /%[^%]+%/.test(codexHome)) throw new Error('CODEX_HOME must resolve to an absolute directory.');
@@ -241,7 +246,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       if (sameDesktop && !next.toolsPipe && previous.toolsPipe) next = { ...next, toolsPipe: previous.toolsPipe, cliExecutablePath: next.cliExecutablePath ?? previous.cliExecutablePath };
       const desktopChanged = !sameDesktop;
       const toolsChanged = previous?.toolsPipe !== next.toolsPipe;
-      if (desktopChanged) { this.ipc.close(); this.tools?.close(); this.tools = undefined; this.current = undefined; this.contract = undefined; this.projectCache = undefined; }
+      if (desktopChanged) { this.bridge?.close(); this.bridge = undefined; this.ipc.close(); this.tools?.close(); this.tools = undefined; this.current = undefined; this.contract = undefined; this.projectCache = undefined; }
       else if (toolsChanged) { this.tools?.close(); this.tools = undefined; }
       this.discovery = next; version = next.version;
       if (!next.processId || !next.version) return { available: false, version: null, reason: '未检测到正在运行的 Codex，请先打开客户端。' };
@@ -263,12 +268,25 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       if (assessment) await this.ipc.connect();
       if (!next.toolsPipe) throw new RemoteError('UNSUPPORTED', '未找到通过验证的 Codex 工具接口，请更新助手；若仍不可用，请检查 Codex 是否启动完成。');
       this.tools ??= this.createTools(next.toolsPipe); await this.tools.connect();
+      if (!assessment && !(this.toolSession instanceof NativeSession) && existsSync(join(process.env.LOCALAPPDATA ?? '', 'CodexMobile', 'bridge', `session-${next.processId}.dpapi`))) {
+        const bridge = new DesktopConnection(this.nativeExe, next.processId);
+        try {
+          await bridge.connect(); this.toolSession?.clear();
+          const session = new NativeSession((method, params) => bridge.request(method, params));
+          this.bridge = bridge; this.toolSession = session;
+          bridge.on('notification', message => { const id = session.notification(message); if (id) this.onChange?.(id); });
+          bridge.on('disconnected', () => { if (this.bridge === bridge) { session.clear(); this.toolSession = undefined; this.bridge = undefined; this.followed.clear(); this.current = undefined; this.checkedAt = 0; this.checkedStatus = undefined; } });
+        } catch { bridge.close(); }
+      }
+      if (this.toolSession instanceof NativeSession && this.bridge?.connected) assessment = { capabilities: nativeCapabilities, reason: null };
       if (!assessment) {
         const catalog = await this.tools.request('tools/list', { threadStartKind: 'all' });
         if (!Array.isArray(catalog.result?.tools)) throw new RemoteError('UNSUPPORTED', 'Codex 任务工具尚未启动完成，请稍后重试。');
         assessment = toolSessionCapabilities(catalog.result.tools);
         this.toolSession ??= new ToolSession((name, args, contextId, authorize) => this.appTool(name, args, contextId, authorize));
         if (anchor) await this.toolSession.read(anchor);
+        if (!this.bridgePrepared && this.prepareBridge) { try { this.bridgePrepared = await this.prepareBridge(); } catch { /* Retain the existing working read/send connection and custom CLI settings. */ } }
+        if (this.bridgePrepared) assessment.reason = '新版 Codex 的兼容组件已准备好。请保存当前任务后，完全退出并重新打开 Codex，完成连接切换。';
       }
       if (anchor) { const result = await this.appTool('list_projects', {}, anchor); if (!Array.isArray(result?.projects)) throw new RemoteError('UNSUPPORTED', '客户端项目接口返回格式已变化，请更新助手。'); }
       return { available: true, version, ...assessment };
@@ -279,7 +297,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     tools.on('disconnected', () => {
       if (this.tools !== tools) return;
       this.tools = undefined;
-      this.toolSession?.clear(); this.toolSession = undefined;
+      if (!(this.toolSession instanceof NativeSession)) { this.toolSession?.clear(); this.toolSession = undefined; }
       if (this.discovery?.toolsPipe === pipe) this.discovery = { ...this.discovery, toolsPipe: null };
       this.checkedAt = 0; this.checkedStatus = undefined;
     });
@@ -443,6 +461,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (this.toolSession) {
       const state = await this.toolSession.read(id, older);
       const current: Followed = this.followed.get(id) ?? { id, owner: 'task-tools', state, revision: 0 };
+      if (this.toolSession instanceof NativeSession) current.owner = `native:${this.bridge!.sessionId}`;
       current.state = state;
       this.followed.set(id, current); this.current = current;
       if (this.followed.size > 6) {
@@ -612,7 +631,14 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       const image = await this.images.read(command.params.id, command.params.imageId, command.params.variant);
       this.known(command.params.id); authorize?.(); return image;
     }
-    if (command.method === 'models') return { models: await desktopModels(this.discovery?.cliExecutablePath) };
+    if (command.method === 'models') {
+      if (this.toolSession instanceof NativeSession) {
+        const result = await this.toolSession.request('model/list', {});
+        if (!Array.isArray(result?.data)) throw new RemoteError('UNSUPPORTED', 'Codex 模型列表尚未返回。');
+        return { models: result.data.filter((m: any) => m.hidden !== true).map((m: any) => ({ id: m.model, name: m.displayName, efforts: (m.supportedReasoningEfforts ?? []).map((e: any) => e.reasoningEffort), defaultEffort: m.defaultReasoningEffort, images: m.inputModalities?.includes('image') ?? false })) };
+      }
+      return { models: await desktopModels(this.discovery?.cliExecutablePath) };
+    }
     if (command.method === 'activity' || command.method === 'seen') {
       const db = this.index();
       try {
@@ -655,7 +681,10 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
       }
       if (!projects.some((p: any) => p.id === command.params.projectId)) throw new RemoteError('NOT_FOUND', '项目不在原客户端的本机项目列表中。');
       authorize?.();
-      if (command.params.model) validateModel(await desktopModels(this.discovery?.cliExecutablePath), command.params.model, command.params.effort);
+      if (command.params.model) {
+        const models = this.toolSession instanceof NativeSession ? (await this.execute({ method: 'models', params: {} }, commandId, authorize)).models : await desktopModels(this.discovery?.cliExecutablePath);
+        validateModel(models, command.params.model, command.params.effort);
+      }
       authorize?.();
       const result = await this.appTool('create_thread', { prompt: command.params.text, ...(command.params.model ? { model: command.params.model, thinking: command.params.effort } : {}), target: { type: 'project', projectId: command.params.projectId, environment: { type: 'local' } } }, anchor, authorize);
       if (!uid.safeParse(result?.threadId).success) throw new RemoteError('OUTCOME_UNKNOWN', '客户端新建任务的返回格式已变化，请先在电脑核对结果，勿重复创建。');
@@ -668,6 +697,19 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     if (command.method === 'read') return snapshotResponse(await this.snapshot(command.params.limit, command.params.before), command.params.ifRevision);
     const snap = await this.snapshot();
     if (command.params.epoch !== snap.epoch) throw new RemoteError('STALE', '客户端已重新连接，请刷新会话。');
+    if (this.toolSession instanceof NativeSession) {
+      if (command.method === 'settings.update') {
+        const result = await this.execute({ method: 'models', params: {} }, commandId, authorize);
+        validateModel(result.models, command.params.model, command.params.effort);
+      }
+      const result = await nativeControl(this.toolSession, command, commandId, snap, attachments, authorize);
+      this.onChange?.(snap.id);
+      if (['settings.update', 'mode.update', 'permissions.update', 'goal.pause', 'goal.resume', 'goal.clear'].includes(command.method)) {
+        await this.follow(snap.id); const updated = await this.snapshot();
+        return { ...result, settings: updated.settings, goal: updated.goal };
+      }
+      return result;
+    }
     if (this.toolSession && command.method === 'send') {
       if (command.params.mode === 'queue') throw new RemoteError('INVALID', '排队消息需要由电脑助手管理。');
       if (command.params.mode === 'steer') throw new RemoteError('UNSUPPORTED', '当前 Codex 的调整方向操作请在电脑端处理。');
@@ -829,6 +871,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
     return { accepted: true };
   }
   close() {
+    this.bridge?.close(); this.bridge = undefined;
     this.toolSession?.clear(); this.toolSession = undefined;
     this.questionClosures.clear();
     this.projectGeneration++;

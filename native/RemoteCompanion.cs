@@ -32,8 +32,33 @@ internal static class Program {
     private static extern bool AllowSetForegroundWindow(uint processId);
     [DllImport("user32.dll")]
     internal static extern bool SetForegroundWindow(IntPtr window);
+    private static readonly object HelperLogGate = new object();
+    private static bool HelperDiagnosticsEnabled;
+    internal static void EnableHelperDiagnostics() {
+        if (HelperDiagnosticsEnabled) return; HelperDiagnosticsEnabled = true;
+        AppDomain.CurrentDomain.UnhandledException += (s, e) => LogHelperEvent("helper.unhandled", e.IsTerminating ? "terminating" : "non-terminating", e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (s, e) => LogHelperEvent("helper.unobserved-task", null, e.Exception);
+        AppDomain.CurrentDomain.ProcessExit += (s, e) => LogHelperEvent("helper.exited");
+    }
+    internal static void LogHelperEvent(string kind, string reason = null, Exception failure = null) {
+        if (!HelperDiagnosticsEnabled) return;
+        try {
+            lock (HelperLogGate) {
+                var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexMobile", "logs"); Directory.CreateDirectory(directory);
+                var file = Path.Combine(directory, "helper-lifecycle.jsonl");
+                if (File.Exists(file) && new FileInfo(file).Length > 1024 * 1024) { var previous = file + ".1"; if (File.Exists(previous)) File.Delete(previous); File.Move(file, previous); }
+                var frames = failure == null ? null : new StackTrace(failure, false).GetFrames();
+                var record = new { at = DateTime.UtcNow.ToString("o"), kind = kind, reason = reason, pid = Process.GetCurrentProcess().Id, version = HelperVersion, exitCode = kind == "helper.exited" || kind == "helper.failed" ? (int?)Environment.ExitCode : null,
+                    exceptionType = failure == null ? null : failure.GetType().FullName, hresult = failure == null ? null : "0x" + failure.HResult.ToString("x8"),
+                    innerType = failure == null || failure.InnerException == null ? null : failure.InnerException.GetType().FullName,
+                    stack = frames == null ? null : frames.Take(16).Select(frame => { var method = frame.GetMethod(); return method == null ? "[unresolved]" : method.DeclaringType == null ? method.Name : method.DeclaringType.FullName + "." + method.Name; }).ToArray() };
+                File.AppendAllText(file, new JavaScriptSerializer().Serialize(record) + Environment.NewLine, Encoding.UTF8);
+            }
+        } catch { }
+    }
     [STAThread]
     private static int Main(string[] args) {
+        bool runningUi = false;
         try {
             if (args.Length > 0 && args[0] == "--version") { Console.Write(HelperVersion); return 0; }
             if (args.Length == 2 && args[0] == "--update-processes") { UpdateProcesses(args[1]); return 0; }
@@ -65,6 +90,8 @@ internal static class Program {
                 using (var writer = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false))) writer.Write(args[0] == "--protect" ? Convert.ToBase64String(result) : Encoding.UTF8.GetString(result)); return 0;
             }
             if (args.Length > 0 && args[0] == "--discover") { Discover(); return 0; }
+            if (args.Length == 2 && args[0] == "--bridge-configure") { DesktopBridgeSetup.Configure(args[1]); return 0; }
+            if (args.Length == 1 && args[0] == "--bridge-disable") { DesktopBridgeSetup.Disable(); return 0; }
             if (args.Length == 1 && args[0] == "--desktop-goal") { DesktopGoal.Run(); return 0; }
             if (args.Length == 1 && args[0] == "--desktop-question") { DesktopQuestion.Run(); return 0; }
             if (args.Length == 1 && args[0] == "--desktop-question-step") { DesktopQuestion.Run(true); return 0; }
@@ -89,11 +116,13 @@ internal static class Program {
                     }
                     showSignal.Set(); return 0;
                 }
+                runningUi = true; EnableHelperDiagnostics(); LogHelperEvent("helper.started");
                 try { Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false); Application.Run(new CompanionForm(showSignal, closeSignal)); }
                 finally { mutex.ReleaseMutex(); }
             }
             return 0;
         } catch (Exception e) {
+            if (runningUi) { Environment.ExitCode = 1; LogHelperEvent("helper.failed", null, e); }
             if (args.Length > 0) { Console.Error.WriteLine(e.GetType().Name + (args[0] == "--discover" ? ": " + e.Message : "")); return 1; }
             MessageBox.Show("助手未能启动：" + e.Message, ProductName, MessageBoxButtons.OK, MessageBoxIcon.Error); return 1;
         }
@@ -166,10 +195,23 @@ internal static class Program {
         var toolPipes = new List<string>();
         var toolOwnerProcessIds = new List<int> { pid };
         var cliExecutables = new List<string>();
-        using (var query = new ManagementObjectSearcher("SELECT ProcessId, ExecutablePath, CommandLine, SessionId FROM Win32_Process WHERE ParentProcessId=" + pid + " AND Name='codex.exe'")) {
+        var cliParents = new List<int> { pid };
+        // New desktop builds start their CLI through an Electron utility host.
+        using (var query = new ManagementObjectSearcher("SELECT * FROM Win32_Process WHERE ParentProcessId=" + pid)) {
+            foreach (ManagementObject child in query.Get()) {
+                var command = Convert.ToString(child["CommandLine"]);
+                if (!String.Equals(Convert.ToString(child["ExecutablePath"]), executable, StringComparison.OrdinalIgnoreCase) || !Regex.IsMatch(command, @"(?:^|\s)--type=utility(?:\s|$)") || !OwnProcess(child)) continue;
+                var childPid = Convert.ToInt32(child["ProcessId"]);
+                cliParents.Add(childPid); toolOwnerProcessIds.Add(childPid);
+            }
+        }
+        var parentFilter = String.Join(" OR ", cliParents.Select(parent => "ParentProcessId=" + parent));
+        using (var query = new ManagementObjectSearcher("SELECT ProcessId, ParentProcessId, ExecutablePath, CommandLine, SessionId FROM Win32_Process WHERE (" + parentFilter + ") AND Name='codex.exe'")) {
             foreach (ManagementObject p in query.Get()) {
                 var childPid = Convert.ToInt32(p["ProcessId"]);
-                var match = Regex.Match(Convert.ToString(p["CommandLine"]), @"codex-(?:browser-use|app-tools)-[a-f0-9-]+");
+                var command = Convert.ToString(p["CommandLine"]);
+                if (Convert.ToInt32(p["ParentProcessId"]) != pid && !Regex.IsMatch(command, @"(?:^|[\s""])app-server(?=[\s""]|$)")) continue;
+                var match = Regex.Match(command, @"codex-(?:browser-use|app-tools)-[a-f0-9-]+");
                 var cliPath = Convert.ToString(p["ExecutablePath"]);
                 if (Convert.ToInt32(p["SessionId"]) != session || !File.Exists(cliPath) || !String.Equals(Path.GetFileName(cliPath), "codex.exe", StringComparison.OrdinalIgnoreCase)) continue;
                 using (var processObject = new ManagementObject("Win32_Process.Handle='" + Convert.ToString(p["ProcessId"]) + "'")) {
@@ -339,8 +381,8 @@ internal sealed class CompanionForm : Form {
         FormatLabel(serverAddress, true); serverAddress.Font = new Font("Segoe UI", 9); footer.Controls.Add(serverAddress, 0, 1); footer.SetColumnSpan(serverAddress, 3);
         FormatLabel(error); error.ForeColor = Color.FromArgb(169, 61, 65); error.Font = new Font(Font.FontFamily, 8.5f); footer.Controls.Add(error, 0, 2); footer.SetColumnSpan(error, 3);
         tray.Icon = Icon; tray.Text = Program.ProductName; tray.Visible = true; tray.DoubleClick += (s, e) => ShowWindow();
-        var trayMenu = new ContextMenuStrip(); trayMenu.Items.Add("打开", null, (s, e) => ShowWindow()); updateMenu = new ToolStripMenuItem("检查更新", LoadImage("refresh"), async (s, e) => await CheckForUpdate()); trayMenu.Items.Add(updateMenu); trayFeedbackMenu = new ToolStripMenuItem("问题反馈", LoadImage("feedback"), (s, e) => OpenPanel("feedback")); trayMenu.Items.Add(trayFeedbackMenu); trayMenu.Items.Add("退出助手", null, (s, e) => { exiting = true; Close(); }); tray.ContextMenuStrip = trayMenu;
-        FormClosing += (s, e) => { if (!exiting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
+        var trayMenu = new ContextMenuStrip(); trayMenu.Items.Add("打开", null, (s, e) => ShowWindow()); updateMenu = new ToolStripMenuItem("检查更新", LoadImage("refresh"), async (s, e) => await CheckForUpdate()); trayMenu.Items.Add(updateMenu); trayFeedbackMenu = new ToolStripMenuItem("问题反馈", LoadImage("feedback"), (s, e) => OpenPanel("feedback")); trayMenu.Items.Add(trayFeedbackMenu); trayMenu.Items.Add("退出助手", null, (s, e) => { Program.LogHelperEvent("helper.exit-request", "tray-menu"); exiting = true; Close(); }); tray.ContextMenuStrip = trayMenu;
+        FormClosing += (s, e) => { if (!exiting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } else Program.LogHelperEvent("helper.closing", e.CloseReason.ToString()); };
         FormClosed += (s, e) => { exiting = true; if (showRegistration != null) showRegistration.Unregister(null); if (closeRegistration != null) closeRegistration.Unregister(null); if (updateExitRegistration != null) updateExitRegistration.Unregister(null); if (updateExitSignal != null) updateExitSignal.Dispose(); timer.Stop(); updateAnimationTimer.Stop(); tray.Visible = false; tray.Dispose(); StopAgent(); http.Dispose(); tooltips.Dispose(); if (updateButtonImage != null) updateButtonImage.Dispose(); foreach (var image in images.Values) image.Dispose(); };
         Shown += async (s, e) => { RefreshPowerSettings(); timer.Start(); await Poll(); };
         Activated += (s, e) => RefreshPowerSettings();
@@ -416,7 +458,7 @@ internal sealed class CompanionForm : Form {
         }, null, Timeout.Infinite, false);
     }
     private void ShowWindow() { Show(); if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal; BringToFront(); Activate(); Program.SetForegroundWindow(Handle); }
-    private void ExitForInstall() { exiting = true; Close(); }
+    private void ExitForInstall() { Program.LogHelperEvent("helper.exit-request", "local-exit-signal"); exiting = true; Close(); }
     private void OpenPanel(string panel) { if (token != null) Process.Start(new ProcessStartInfo("http://127.0.0.1:" + port + "/?panel=" + panel + "#token=" + Uri.EscapeDataString(token)) { UseShellExecute = true }); }
     private async Task CheckForUpdate() {
         if (token == null || working) return;
