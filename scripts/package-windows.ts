@@ -1,5 +1,6 @@
-import { cpSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { resolve, join, dirname } from 'node:path';
+import { cpSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { resolve, join, dirname, basename } from 'node:path';
+import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { originUrl } from '../src/shared/security.js';
@@ -36,6 +37,16 @@ copyFileSync('doc/client-recovery.md', join(output, 'CLIENT-RECOVERY.md'));
 const license = join(dirname(process.execPath), 'LICENSE'); if (existsSync(license)) copyFileSync(license, join(output, 'NODE-LICENSE.txt'));
 const npmCli = process.env.npm_execpath ?? join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
 execFileSync(process.execPath, [npmCli, 'ci', '--omit=dev', '--ignore-scripts', '--registry=https://registry.npmjs.org'], { cwd: output, stdio: 'inherit', windowsHide: true });
+const standalone = mkdtempSync(join(tmpdir(), 'codex-mobile-bridge-package-'));
+try {
+  for (const file of ['node.exe', 'RemoteCompanion.exe', 'CodexMobileBridge.exe']) copyFileSync(join(output, file), join(standalone, file));
+  copyFileSync(join(output, 'dist/desktop-bridge.mjs'), join(standalone, 'desktop-bridge.mjs'));
+  cpSync(join(output, 'node_modules/ws'), join(standalone, 'node_modules/ws'), { recursive: true });
+  if (execFileSync(join(standalone, 'CodexMobileBridge.exe'), ['--codex-mobile-runtime-check'], { cwd: standalone, encoding: 'utf8', windowsHide: true, timeout: 10000 }).trim() !== 'codex-mobile-bridge-v1') throw new Error('Standalone desktop bridge failed its runtime check.');
+} finally {
+  if (dirname(resolve(standalone)) !== resolve(tmpdir()) || !basename(standalone).startsWith('codex-mobile-bridge-package-')) throw new Error('Unexpected standalone check directory');
+  rmSync(standalone, { recursive: true, force: true });
+}
 const archiveName = publicPackage ? 'codex-mobile-windows-public.zip' : 'codex-mobile-windows.zip';
 const archive = resolve('release', archiveName);
 const distributable = ['node.exe', 'RemoteCompanion.exe', 'CodexMobileBridge.exe', 'companion.ico', 'icons', 'dist', 'node_modules', 'package.json', 'package-lock.json', 'relay.json', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'NODE-LICENSE.txt', 'INSTALLER.md', 'REMEMBERED-LOGIN.md', 'COMPATIBILITY.md', 'PLAN-MODE.md', 'QUEUED-SEND.md', 'CLIENT-RECOVERY.md'];

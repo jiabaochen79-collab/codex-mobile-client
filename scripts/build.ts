@@ -4,13 +4,14 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { VERSION as protocolVersion } from '../src/shared/protocol.js';
+import { buildDesktopBridge } from './build-desktop-bridge.js';
 mkdirSync('dist', { recursive: true });
 for (const [name, entry] of [['agent', 'src/agent/main.ts']] as const) {
   // The bundled applications use a modern Node runtime; SQLite is a built-in module.
   await build({ entryPoints: [entry], bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', outfile: `dist/${name}.mjs` });
 }
 await build({ entryPoints: ['src/agent/update-runner.ts'], bundle: true, platform: 'node', format: 'esm', target: 'node22', outfile: 'dist/updater.mjs' });
-await build({ entryPoints: ['src/bridge/main.ts'], bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', outfile: 'dist/desktop-bridge.mjs' });
+await buildDesktopBridge('dist/desktop-bridge.mjs');
 
 const webRoot = join('dist', 'web');
 if (!statSync(webRoot, { throwIfNoEntry: false } )?.isDirectory()) throw new Error('Run the Vite web build before generating the client artifact manifest.');
