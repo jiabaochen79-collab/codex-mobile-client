@@ -21,7 +21,7 @@ function cursorFingerprint(path: string, offset: number) {
 }
 
 function eventStatus(payload: any): LocalNotificationEvent['status'] | undefined {
-  if (payload?.type === 'task_complete') return 'completed';
+  if (payload?.type === 'task_complete') return payload.error != null ? 'failed' : 'completed';
   if (payload?.type === 'task_failed') return 'failed';
   if (payload?.type === 'turn_aborted') {
     const reason = String(payload.reason ?? payload.stop_reason ?? '').toLowerCase();
