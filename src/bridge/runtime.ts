@@ -51,11 +51,13 @@ export async function managedCli(desktop: string | undefined, base: string) {
 export async function runBridge(executable: string, args: string[], base: string, helper: string, desktopPid: number) {
   const environment = { ...process.env };
   delete environment.CODEX_CLI_PATH;
+  delete environment.CODEX_MOBILE_DESKTOP_EXE;
+  delete environment.CODEX_MOBILE_DESKTOP_PID;
   // The desktop's supported override omits these registered-package fields.
   // The actual runtime is the verified copy of the same bundled CLI and peers.
   const child = spawn(executable, args, { env: environment, windowsHide: true, stdio: ['pipe', 'pipe', 'inherit'] });
   const exit = new Promise<number>(resolve => { child.once('error', () => resolve(1)); child.once('close', code => resolve(code ?? 1)); });
-  if (!args.includes('app-server')) {
+  if (!args.includes('app-server') || !Number.isSafeInteger(desktopPid) || desktopPid <= 0) {
     process.stdin.pipe(child.stdin); child.stdout.pipe(process.stdout);
     const result = await exit; process.stdin.unpipe(child.stdin); process.stdin.pause(); return result;
   }

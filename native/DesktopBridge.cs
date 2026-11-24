@@ -26,6 +26,8 @@ internal static class DesktopBridge {
             start.Arguments = Quote(Path.Combine(directory, "desktop-bridge.mjs")) + " " + String.Join(" ", Array.ConvertAll(args, Quote));
             start.UseShellExecute = false; start.CreateNoWindow = true;
             start.RedirectStandardInput = true; start.RedirectStandardOutput = true; start.RedirectStandardError = true;
+            start.EnvironmentVariables.Remove("CODEX_MOBILE_DESKTOP_EXE");
+            start.EnvironmentVariables.Remove("CODEX_MOBILE_DESKTOP_PID");
             var pid = Process.GetCurrentProcess().Id;
             for (var depth = 0; depth < 6; depth++) {
                 using (var process = new ManagementObject("Win32_Process.Handle='" + pid + "'")) {
@@ -38,6 +40,7 @@ internal static class DesktopBridge {
                         start.EnvironmentVariables["CODEX_MOBILE_DESKTOP_PID"] = pid.ToString();
                         break;
                     }
+                    if (depth > 0 && (!String.Equals(Path.GetFileName(executable), "ChatGPT.exe", StringComparison.OrdinalIgnoreCase) || !File.Exists(Path.Combine(Path.GetDirectoryName(executable), "resources", "app.asar")))) break;
                     pid = Convert.ToInt32(process["ParentProcessId"]);
                 }
             }
