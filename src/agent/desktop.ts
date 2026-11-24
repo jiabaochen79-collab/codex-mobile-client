@@ -125,7 +125,7 @@ export function normalizeSnapshot(state: any, epoch: string, limit = 100, images
     }
     return { id, kind: 'unsupported', title: '请在电脑端确认', detail: '此请求尚未支持远程处理。' };
   }).filter((r: Interaction) => r.id !== undefined).concat(asyncUserInputRequests(state));
-  const active = idle ? undefined : turns.findLast(t => t.status === 'inProgress');
+  const active = !idle && turns.at(-1)?.status === 'inProgress' ? turns.at(-1) : undefined;
   let bytes = 0;
   const bounded: Message[] = [];
   for (const m of messages.slice(-limit).reverse()) { bytes += Buffer.byteLength(JSON.stringify(m)); if (bytes > 700000) break; bounded.unshift(m); }

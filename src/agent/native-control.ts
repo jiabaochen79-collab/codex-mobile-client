@@ -37,8 +37,16 @@ export async function nativeControl(session: NativeSession, command: Command, co
       return { accepted: true };
     }
     if (command.method === 'stop') {
+      if (!snap.busy && snap.lastTurnId === command.params.turnId) return { accepted: true };
       if (!snap.busy || snap.turnId !== command.params.turnId) throw new RemoteError('STALE', '当前生成已经结束或变化。');
-      await request('turn/interrupt', { threadId: snap.id, turnId: snap.turnId }); return { accepted: true };
+      try { await request('turn/interrupt', { threadId: snap.id, turnId: snap.turnId }); }
+      catch (error) {
+        if (!(error instanceof Error) || !/^no active turn to interrupt\.?$/i.test(error.message)) throw error;
+        session.refresh(snap.id);
+        const state = await session.read(snap.id);
+        if (state.threadRuntimeStatus?.type !== 'idle' || state.turns.at(-1)?.status === 'inProgress') throw new RemoteError('STALE', '当前生成已经结束或变化。');
+      }
+      return { accepted: true };
     }
     if (command.method === 'settings.update' || command.method === 'mode.update' || command.method === 'permissions.update') {
       const settings = freshSettings();

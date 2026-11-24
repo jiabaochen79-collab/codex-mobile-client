@@ -5,6 +5,11 @@ import type { Snapshot, Command } from '../src/shared/protocol.js';
 const snapshot = { id: 'thread', epoch: 'epoch', busy: true, turnId: 'turn-a', requests: [], messages: [], settings: { model: 'model', effort: 'high', revision: 'revision', mode: 'default' } } as unknown as Snapshot;
 function fixture() { const request = vi.fn(async (method: string) => method === 'turn/steer' ? { turnId: 'turn-a' } : method === 'turn/start' ? { turn: { id: 'turn-b' } } : {}); const session = new NativeSession(request); return { request, session }; }
 describe('native task controls', () => {
+  it('does not send an interrupt if the requested turn has already finished', async () => {
+    const { request, session } = fixture();
+    await expect(nativeControl(session, { method: 'stop', params: { id: 'thread', epoch: 'epoch', turnId: 'turn-a' } } as Command, 'command', { ...snapshot, busy: false, turnId: null, lastTurnId: 'turn-a', lastTurnStatus: 'completed' }, [])).resolves.toMatchObject({ accepted: true });
+    expect(request).not.toHaveBeenCalled();
+  });
   it('steers the actual expected turn and preserves the command identity', async () => {
     const { request, session } = fixture();
     await nativeControl(session, { method: 'send', params: { id: 'thread', epoch: 'epoch', mode: 'steer', turnId: 'turn-a', text: '调整方向' } } as Command, 'command', snapshot, []);
@@ -19,6 +24,19 @@ describe('native task controls', () => {
   it('never retries an operation after loss of its confirmation', async () => {
     const { request, session } = fixture(); request.mockRejectedValue(new Error('Disconnected after send'));
     await expect(nativeControl(session, { method: 'stop', params: { id: 'thread', epoch: 'epoch', turnId: 'turn-a' } } as Command, 'command', snapshot, [])).rejects.toThrow('Disconnected');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+  it('treats a stop racing with task completion as already satisfied after resynchronizing', async () => {
+    const { request, session } = fixture();
+    request.mockRejectedValue(new Error('no active turn to interrupt'));
+    vi.spyOn(session, 'read').mockResolvedValue({ id: 'thread', turns: [{ turnId: 'turn-a', status: 'completed', items: [] }], threadRuntimeStatus: { type: 'idle' } });
+    await expect(nativeControl(session, { method: 'stop', params: { id: 'thread', epoch: 'epoch', turnId: 'turn-a' } } as Command, 'command', snapshot, [])).resolves.toMatchObject({ accepted: true });
+    expect(request).toHaveBeenCalledExactlyOnceWith('turn/interrupt', { threadId: 'thread', turnId: 'turn-a' });
+  });
+  it('never stops a new turn when the original stop has become stale', async () => {
+    const { request, session } = fixture(); request.mockRejectedValue(new Error('no active turn to interrupt'));
+    vi.spyOn(session, 'read').mockResolvedValue({ id: 'thread', turns: [{ turnId: 'turn-b', status: 'inProgress', items: [] }], threadRuntimeStatus: { type: 'active' } });
+    await expect(nativeControl(session, { method: 'stop', params: { id: 'thread', epoch: 'epoch', turnId: 'turn-a' } } as Command, 'command', snapshot, [])).rejects.toThrow('当前生成已经结束或变化');
     expect(request).toHaveBeenCalledTimes(1);
   });
   it('changes permission settings without stopping the current turn', async () => {

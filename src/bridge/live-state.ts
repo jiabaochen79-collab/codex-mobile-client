@@ -21,6 +21,9 @@ export class LiveState {
     }
     const current = this.turns.get(threadId);
     if (!current) return;
+    // A goal can stop its executor without a matching turn/completed event.
+    // Retain the ID so a delayed start acknowledgement cannot revive it.
+    if (message.method === 'thread/status/changed' && ['idle', 'notLoaded', 'systemError'].includes(p.status?.type) && current.turn.status === 'inProgress') current.turn = { ...current.turn, status: 'interrupted' };
     if (message.method === 'turn/completed' && p.turn?.id === current.turn.id) current.turn = { ...current.turn, ...p.turn, turnStartedAtMs: current.turn.turnStartedAtMs };
     if (p.turnId !== current.turn.id) return;
     if ((message.method === 'item/started' || message.method === 'item/completed') && typeof p.item?.id === 'string') {

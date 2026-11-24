@@ -58,9 +58,14 @@ export class NativeSession {
       if (live) {
         if (typeof live.id !== 'string' || !Array.isArray(live.items) || typeof live.status !== 'string') throw new RemoteError('UNSUPPORTED', 'Codex 实时轮次尚未同步。');
         const saved = turns.get(live.id);
-        const items = new Map((saved?.items ?? []).map((item: any) => [item.id, item]));
-        for (const item of live.items) items.set(item.id, item);
-        turns.set(live.id, { ...saved, ...live, turnId: live.id, items: [...items.values()] });
+        const finished = saved && (['completed', 'failed'].includes(saved.status) || saved.status === 'interrupted' && saved.completedAt != null);
+        // A recorded terminal outcome must never be replaced by a cached start.
+        // Interrupted history without completedAt can still describe a live turn.
+        if (!finished || !['inProgress', 'interrupted'].includes(live.status)) {
+          const items = new Map((saved?.items ?? []).map((item: any) => [item.id, item]));
+          for (const item of live.items) items.set(item.id, item);
+          turns.set(live.id, { ...saved, ...live, turnId: live.id, items: [...items.values()] });
+        }
       }
       // Read runtime status after history: turn/start can be acknowledged before
       // the executor changes its status from idle to active.

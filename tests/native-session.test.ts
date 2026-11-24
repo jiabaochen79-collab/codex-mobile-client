@@ -63,9 +63,24 @@ describe('native desktop history', () => {
   });
   it('overlays live execution when durable history still says interrupted', async () => {
     const { session, request } = fixture(); const original = request.getMockImplementation()!;
-    request.mockImplementation(async (method, params) => method === 'bridge/live' ? { id: 'turn-new', status: 'inProgress', turnStartedAtMs: 2000, items: [{ id: 'stream', type: 'agentMessage', text: '正在执行' }] } : original(method, params));
+    request.mockImplementation(async (method, params) => method === 'bridge/live' ? { id: 'turn-new', status: 'inProgress', turnStartedAtMs: 2000, items: [{ id: 'stream', type: 'agentMessage', text: '正在执行' }] } : method === 'thread/turns/list' ? { data: [{ id: 'turn-new', startedAt: 2, status: 'interrupted', completedAt: null }] } : original(method, params));
     const snapshot = normalizeSnapshot(await session.read(thread.id), 'epoch');
     expect(snapshot.busy).toBe(true); expect(snapshot.turnId).toBe('turn-new');
     expect(snapshot.messages.at(-1)?.text).toBe('正在执行');
+  });
+  it.each(['completed', 'failed', 'interrupted'])('does not revive a %s turn from a stale live start after clearing the goal', async status => {
+    const { session, request } = fixture(); const original = request.getMockImplementation()!;
+    request.mockImplementation(async (method, params) => method === 'bridge/live' ? { id: 'turn-new', status: 'inProgress', turnStartedAtMs: 2000, items: [] }
+      : method === 'thread/turns/list' ? { data: [{ id: 'turn-new', startedAt: 2, status, completedAt: 3 }] } : original(method, params));
+    const snapshot = normalizeSnapshot(await session.read(thread.id), 'epoch');
+    expect(snapshot).toMatchObject({ busy: false, turnId: null, lastTurnStatus: status, goal: null });
+    expect(snapshot.messages.every(message => message.turnStatus === status)).toBe(true);
+  });
+  it('does not revive an older orphaned turn when the newest turn has finished', async () => {
+    const { session, request } = fixture(); const original = request.getMockImplementation()!;
+    request.mockImplementation(async (method, params) => method === 'thread/turns/list' && params.cursor ? { data: [{ id: 'turn-old', startedAt: 1, status: 'inProgress' }], nextCursor: null } : original(method, params));
+    await session.read(thread.id);
+    const snapshot = normalizeSnapshot(await session.read(thread.id, true), 'epoch');
+    expect(snapshot).toMatchObject({ busy: false, turnId: null, lastTurnStatus: 'completed' });
   });
 });

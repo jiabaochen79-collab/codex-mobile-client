@@ -1,6 +1,21 @@
 import { describe, it, expect } from 'vitest';
 import { LiveState } from '../src/bridge/live-state.js';
 describe('native live state', () => {
+  it('releases an orphaned running turn on native idle without waiting for turn/completed', () => {
+    const state = new LiveState();
+    state.started('t', { id: 'turn', status: 'inProgress' });
+    state.accept({ method: 'thread/status/changed', params: { threadId: 't', status: { type: 'idle' } } });
+    state.started('t', { id: 'turn', status: 'inProgress' });
+    expect(state.read('t')?.status).toBe('interrupted');
+    state.accept({ method: 'turn/completed', params: { threadId: 't', turn: { id: 'turn', status: 'completed' } } });
+    expect(state.read('t')?.status).toBe('completed');
+  });
+  it('does not infer completion from goal deletion while a turn is actually running', () => {
+    const state = new LiveState(); state.started('t', { id: 'turn', status: 'inProgress' });
+    state.accept({ method: 'thread/goal/cleared', params: { threadId: 't' } });
+    state.accept({ method: 'thread/status/changed', params: { threadId: 'other', status: { type: 'idle' } } });
+    expect(state.read('t')?.status).toBe('inProgress');
+  });
   it('records a start acknowledgement before the delayed started event', () => {
     const state = new LiveState(); state.started('t', { id: 'turn', status: 'inProgress' });
     expect(state.read('t')).toMatchObject({ id: 'turn', status: 'inProgress' });
