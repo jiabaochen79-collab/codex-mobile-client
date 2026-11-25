@@ -1,6 +1,6 @@
 import { RemoteError, type Command, type Snapshot, type LocalAttachment } from '../shared/protocol.js';
 import { collaborationMode } from './models.js';
-import { asyncUserInputRequests } from './async-user-input.js';
+import { asyncInputAccepted, asyncUserInputRequests } from './async-user-input.js';
 import type { NativeSession } from './native-session.js';
 
 const permissionSettings = {
@@ -84,12 +84,24 @@ export async function nativeControl(session: NativeSession, command: Command, co
       const answers = command.params.answers ?? {}, questions = interaction.questions ?? [];
       if (!questions.length || questions.some(q => !answers[q.id]?.length || answers[q.id].some(a => !a.trim())) || Object.keys(answers).some(id => !questions.some(q => q.id === id))) throw new RemoteError('INVALID', '请回答当前请求中的所有问题。');
       const state = await session.read(snap.id);
+      if (asyncInputAccepted(state, interaction, answers)) return { accepted: true };
       if (asyncUserInputRequests(state).some(r => r.id === interaction.id)) {
         if (questions.some(q => answers[q.id].length !== 1)) throw new RemoteError('INVALID', '请为每个问题提交一个回答。');
         const text = '<send_user_message_question_reply>\n' + JSON.stringify(questions.map(q => ({ questionItemId: q.id, question: q.question, answer: answers[q.id][0].trim() }))) + '\n</send_user_message_question_reply>';
-        if (snap.busy && snap.turnId) await request('turn/steer', { threadId: snap.id, expectedTurnId: snap.turnId, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: commandId });
-        else await start(text);
-        return { accepted: true };
+        try {
+          if (snap.busy && snap.turnId) await request('turn/steer', { threadId: snap.id, expectedTurnId: snap.turnId, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: commandId });
+          else await start(text);
+        } catch (error) { if (!(error instanceof RemoteError) || error.code !== 'OUTCOME_UNKNOWN') throw error; }
+        const deadline = Date.now() + 15000;
+        do {
+          session.refresh(snap.id);
+          let received;
+          try { received = asyncInputAccepted(await session.read(snap.id), interaction, answers); }
+          catch { throw new RemoteError('OUTCOME_UNKNOWN', '回答已发送，电脑连接暂时中断，请勿重复提交。'); }
+          if (received) return { accepted: true };
+          await new Promise(resolve => setTimeout(resolve, 150));
+        } while (Date.now() < deadline);
+        throw new RemoteError('OUTCOME_UNKNOWN', '回答已发送，尚未核对到电脑接收记录，请勿重复提交。');
       }
       return request('bridge/respond', { requestId: interaction.id, threadId: snap.id, result: { answers: Object.fromEntries(Object.entries(answers).map(([id, answers]) => [id, { answers }])) } });
     }

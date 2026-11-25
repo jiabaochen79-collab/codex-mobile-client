@@ -62,8 +62,12 @@ export class NativeSession {
         // A recorded terminal outcome must never be replaced by a cached start.
         // Interrupted history without completedAt can still describe a live turn.
         if (!finished || !['inProgress', 'interrupted'].includes(live.status)) {
-          const items = new Map((saved?.items ?? []).map((item: any) => [item.id, item]));
-          for (const item of live.items) items.set(item.id, item);
+          const items = new Map<string, any>((saved?.items ?? []).map((item: any) => [item.id, item]));
+          for (const item of live.items) {
+            // Do not downgrade a persisted user answer to a cached pending steer.
+            if (items.get(item.id)?.type === 'userMessage' && item.type === 'steeringUserMessage') continue;
+            items.set(item.id, item);
+          }
           turns.set(live.id, { ...saved, ...live, turnId: live.id, items: [...items.values()] });
         }
       }

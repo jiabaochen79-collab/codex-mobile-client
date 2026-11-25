@@ -1,10 +1,47 @@
 import { describe, it, expect, vi } from 'vitest';
 import { NativeSession } from '../src/agent/native-session.js';
 import { nativeControl } from '../src/agent/native-control.js';
-import type { Snapshot, Command } from '../src/shared/protocol.js';
+import { RemoteError, type Snapshot, type Command } from '../src/shared/protocol.js';
 const snapshot = { id: 'thread', epoch: 'epoch', busy: true, turnId: 'turn-a', requests: [], messages: [], settings: { model: 'model', effort: 'high', revision: 'revision', mode: 'default' } } as unknown as Snapshot;
 function fixture() { const request = vi.fn(async (method: string) => method === 'turn/steer' ? { turnId: 'turn-a' } : method === 'turn/start' ? { turn: { id: 'turn-b' } } : {}); const session = new NativeSession(request); return { request, session }; }
 describe('native task controls', () => {
+  it.each(['already received', 'lost acknowledgement', 'no receipt'])('never resends an async answer with %s', async kind => {
+    vi.useFakeTimers();
+    const { session, request } = fixture();
+    const id = JSON.stringify(['request_user_input_async', 'message', 0]);
+    const interaction = { id, kind: 'input' as const, title: '需要回复', detail: '', questions: [{ id, question: 'Continue?', options: [] }] };
+    const question = { id: 'message', type: 'agentMessage', questions: [{ title: 'Continue?', options: [] }] };
+    const answer = { id: 'answer', type: 'userMessage', content: [{ type: 'text', text: '<send_user_message_question_reply>\n' + JSON.stringify([{ questionItemId: id, question: 'Continue?', answer: 'Yes' }]) + '\n</send_user_message_question_reply>' }] };
+    const unanswered = { turns: [{ turnId: 'turn-a', items: [question] }] }, answered = { turns: [{ turnId: 'turn-a', items: [answer, question] }] };
+    const read = vi.spyOn(session, 'read').mockResolvedValue(kind === 'no receipt' ? unanswered : answered);
+    if (kind === 'lost acknowledgement') { read.mockResolvedValueOnce(unanswered); request.mockRejectedValue(new RemoteError('OUTCOME_UNKNOWN', 'Acknowledgement lost')); }
+    try {
+      const result = nativeControl(session, { method: 'respond', params: { id: 'thread', epoch: 'epoch', requestId: id, answers: { [id]: ['Yes'] } } } as Command, 'answer-command', { ...snapshot, requests: [interaction] }, []);
+      const assertion = kind === 'no receipt' ? expect(result).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' }) : expect(result).resolves.toMatchObject({ accepted: true });
+      await vi.advanceTimersByTimeAsync(16000); await assertion;
+      expect(request).toHaveBeenCalledTimes(kind === 'already received' ? 0 : 1);
+    } finally { vi.useRealTimers(); }
+  });
+  it('does not acknowledge an async answer until its exact receipt appears in native history', async () => {
+    vi.useFakeTimers();
+    const { session, request } = fixture();
+    const id = JSON.stringify(['request_user_input_async', 'message', 0]);
+    const question = { id: 'message', type: 'agentMessage', questions: [{ title: 'Continue?', options: ['Yes', 'No'] }] };
+    const state = { turns: [{ turnId: 'turn-a', status: 'inProgress', items: [question] as any[] }] };
+    vi.spyOn(session, 'read').mockImplementation(async () => state);
+    const snap = { ...snapshot, requests: [{ id, kind: 'input' as const, title: '需要回复', detail: '', questions: [{ id, question: 'Continue?', options: [{ label: 'Yes' }, { label: 'No' }] }] }] };
+    let settled = false;
+    try {
+      const result = nativeControl(session, { method: 'respond', params: { id: 'thread', epoch: 'epoch', requestId: id, answers: { [id]: ['Yes'] } } } as Command, 'answer-command', snap, []).then(value => { settled = true; return value; });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(request.mock.calls.filter(([method]) => method === 'turn/steer')).toHaveLength(1);
+      expect(settled).toBe(false);
+      state.turns[0].items.unshift({ id: 'answer', type: 'userMessage', content: [{ type: 'text', text: '<send_user_message_question_reply>\n' + JSON.stringify([{ questionItemId: id, question: 'Continue?', answer: 'Yes' }]) + '\n</send_user_message_question_reply>' }] });
+      await vi.advanceTimersByTimeAsync(200);
+      await expect(result).resolves.toMatchObject({ accepted: true });
+      expect(request.mock.calls.filter(([method]) => method === 'turn/steer')).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
   it('does not send an interrupt if the requested turn has already finished', async () => {
     const { request, session } = fixture();
     await expect(nativeControl(session, { method: 'stop', params: { id: 'thread', epoch: 'epoch', turnId: 'turn-a' } } as Command, 'command', { ...snapshot, busy: false, turnId: null, lastTurnId: 'turn-a', lastTurnStatus: 'completed' }, [])).resolves.toMatchObject({ accepted: true });

@@ -550,7 +550,7 @@ export class CodexDesktop extends EventEmitter implements DesktopAdapter {
   commandAccepted(id: string, commandId: string) {
     const state = this.followed.get(id)?.state;
     const turns: any[] = state?.turnHistory?.history?.entitiesByKey ? Object.values(state.turnHistory.history.entitiesByKey) : state?.turns ?? [];
-    return turns.some(turn => turn.items?.some((item: any) => item.clientId === commandId && (item.type === 'userMessage' || item.type === 'steeringUserMessage' && item.status === 'accepted')));
+    return turns.some(turn => turn.items?.some((item: any) => item.clientId === commandId && (item.type === 'userMessage' || item.type === 'steeringUserMessage' && (item.status === 'accepted' || item.steerAcknowledged === true))));
   }
   private async dispatchMessage(id: string, commandId: string, method: string, params: unknown, version: number, accepted?: () => boolean) {
     let settled = false, failure: unknown;

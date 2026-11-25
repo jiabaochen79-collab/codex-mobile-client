@@ -159,6 +159,20 @@ describe('late answer confirmations', () => {
     const query = FakeSocket.latest.frames.at(-1); if (query.command.method === 'command.status') FakeSocket.latest.reply(query, { state: 'unknown' });
     await nextTick();
   }
+  it('keeps a confirmed question closed when an older read completes after submission', async () => {
+    const f = answering(); const other = { ...f.request, id: 'another-question' };
+    f.p.snapshot.value.requests.push(other);
+    const stale = JSON.parse(JSON.stringify({ ...f.p.snapshot.value, requests: [f.request, other] }));
+    const oldRead = f.p.read(), oldFrame = FakeSocket.latest.frames.at(-1);
+    FakeSocket.latest.reply(f.frame, { accepted: true }); await nextTick();
+    expect(f.p.snapshot.value.requests.map((r: any) => r.id)).toEqual(['another-question']);
+    FakeSocket.latest.reply(oldFrame, stale); await oldRead; await nextTick();
+    expect(f.p.snapshot.value.requests.map((r: any) => r.id)).toEqual(['another-question']);
+    const freshFrame = FakeSocket.latest.frames.at(-1);
+    expect(freshFrame.id).not.toBe(oldFrame.id);
+    FakeSocket.latest.reply(freshFrame, { ...stale, requests: [other] }); await f.work;
+    expect(FakeSocket.latest.frames.filter(frame => frame.command.method === 'respond')).toHaveLength(1);
+  });
   it('keeps an uncertain answer neutral and confirms the original request without resending', async () => {
     const f = answering();
     FakeSocket.latest.receive({ type: 'result', id: f.frame.id, error: { code: 'OUTCOME_UNKNOWN', message: 'late native confirmation' } });

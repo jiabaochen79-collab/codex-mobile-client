@@ -26,10 +26,22 @@ it('assigns desktop-compatible identities to every question and preserves manual
 it.each(['pending', 'rejected', 'interrupted'])('keeps a question after a %s steering response', status => {
   expect(normalizeSnapshot(state([question, reply(status)]), 'epoch').requests).toHaveLength(1);
 });
-it('clears an accepted response and ignores forged or earlier acknowledgements', () => {
+it('clears an accepted response regardless of merged item order and ignores other identities', () => {
   expect(normalizeSnapshot(state([question, reply()]), 'epoch').requests).toEqual([]);
-  expect(normalizeSnapshot(state([reply(), question]), 'epoch').requests).toHaveLength(1);
+  expect(normalizeSnapshot(state([reply(), question]), 'epoch').requests).toEqual([]);
   expect(normalizeSnapshot(state([question, reply('accepted', 'answer', 'other-question')]), 'epoch').requests).toHaveLength(1);
+});
+it('recognizes acknowledged steering and split text content like the desktop', () => {
+  const answered = { ...reply('pending'), steerAcknowledged: true };
+  const text = answered.input[0].text;
+  answered.input = [{ type: 'text', text: text.slice(0, text.indexOf('\n')) }, { type: 'text', text: text.slice(text.indexOf('\n') + 1) }];
+  const current = state([answered, question]);
+  expect(normalizeSnapshot(current, 'epoch').requests).toEqual([]);
+  expect(asyncInputAccepted(current, normalizeSnapshot(state(), 'epoch').requests[0], { [questionId()]: ['Same address'] })).toBe(true);
+});
+it('does not treat an answer to a different question text as confirmation', () => {
+  const answered = reply(); answered.input[0].text = answered.input[0].text.replace('Which address?', 'Different question?');
+  expect(normalizeSnapshot(state([answered, question]), 'epoch').requests).toHaveLength(1);
 });
 it.each(['completed', 'failed', 'interrupted', 'inProgress'])('keeps an unanswered question when the latest turn is %s and the desktop is idle', status => {
   const current = state([question, { id: 'final', type: 'agentMessage', text: 'Please confirm before proceeding', phase: 'final_answer' }]);
@@ -176,8 +188,19 @@ it('detects canonical history questions, clears only the answered question and a
   const canonical = { ...rest, turnHistory: { history: { entitiesByKey: { active: turns[0] } } } };
   expect(normalizeSnapshot(canonical, 'epoch').requests.map(r => r.id)).toEqual([questionId('question-message', 1)]);
   const answered = reply('accepted', 'second answer', questionId('question-message', 1));
+  answered.input[0].text = answered.input[0].text.replace('Which address?', 'Second question?');
   turns[0].items.push({ id: 'canonical-reply', type: 'userMessage', content: answered.input });
   expect(normalizeSnapshot(canonical, 'epoch').requests).toEqual([]);
+});
+it('recognizes acknowledged steering when reconciling a delayed command result', () => {
+  const adapter = new CodexDesktop('unused');
+  const current = state([{ ...reply('pending'), clientId: 'answer-command', steerAcknowledged: true }]);
+  Reflect.get(adapter, 'followed').set(current.id, { id: current.id, state: current });
+  try {
+    expect(adapter.commandAccepted(current.id, 'answer-command')).toBe(true);
+    current.turns[0].items[0].steerAcknowledged = false;
+    expect(adapter.commandAccepted(current.id, 'answer-command')).toBe(false);
+  } finally { adapter.close(); }
 });
 it('ignores plain option text and malformed reply metadata', () => {
   expect(normalizeSnapshot(state([{ id: 'ordinary', type: 'agentMessage', text: 'Choose A or B' }]), 'epoch').requests).toEqual([]);

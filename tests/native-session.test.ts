@@ -18,6 +18,16 @@ function fixture() {
   return { request, session: new NativeSession(request) };
 }
 describe('native desktop history', () => {
+  it('does not replace a durable answer with an older pending steering item', async () => {
+    const { session, request } = fixture(); const original = request.getMockImplementation()!;
+    const id = JSON.stringify(['request_user_input_async', 'question', 0]);
+    const input = [{ type: 'text', text: '<send_user_message_question_reply>\n' + JSON.stringify([{ questionItemId: id, question: 'Continue?', answer: 'Yes' }]) + '\n</send_user_message_question_reply>' }];
+    request.mockImplementation(async (method, params) => method === 'thread/turns/list' ? { data: [{ id: 'turn-new', startedAt: 2, status: 'inProgress' }] } : method === 'thread/items/list' ? { data: [
+      { turnId: params.turnId, item: { id: 'question', type: 'agentMessage', questions: [{ title: 'Continue?', options: ['Yes', 'No'] }] } },
+      { turnId: params.turnId, item: { id: 'answer', type: 'userMessage', content: input } }
+    ] } : method === 'bridge/live' ? { id: 'turn-new', status: 'inProgress', turnStartedAtMs: 2000, items: [{ id: 'answer', type: 'steeringUserMessage', status: 'pending', input }] } : original(method, params));
+    expect(normalizeSnapshot(await session.read(thread.id), 'epoch').requests).toEqual([]);
+  });
   it('loads full messages, settings and subsequent history pages', async () => {
     const { request, session } = fixture();
     const current = await session.read(thread.id);
